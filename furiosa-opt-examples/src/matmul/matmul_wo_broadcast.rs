@@ -12,14 +12,14 @@ pub fn matmul_wo_broadcast(
     lhs: &HbmTensor<i8, Chip, m![A, B]>,
     rhs: &HbmTensor<i8, Chip, m![A, B]>,
 ) -> HbmTensor<i8, Chip, m![1]> {
-    let lhs = lhs.to_dm::<Cluster, m![A / 16], m![A / 8 % 2, B, A % 8]>(&mut ctx.tdma, 0);
-    let rhs = rhs.to_dm::<Cluster, m![A / 16], m![A / 8 % 2, B, A % 8]>(&mut ctx.tdma, 0);
+    let lhs = lhs.to_dm::<Cluster, m![A / 16], m![A / 8 % 2, B, A % 8]>(&mut ctx.tdma);
+    let rhs = rhs.to_dm::<Cluster, m![A / 16], m![A / 8 % 2, B, A % 8]>(&mut ctx.tdma);
     let rhs: TrfTensor<i8, Chip, Cluster, m![A / 16], m![1], m![A / 8 % 2, B, A % 8]> = ctx
         .sub
         .begin(rhs.view())
         .fetch::<m![1], m![A / 8 % 2, B, A % 8]>()
         .collect::<m![A / 8 % 2, B / 4], m![B % 4, A % 8]>()
-        .to_trf(TrfAddress::Full);
+        .to_trf();
 
     let matmul_result: DmTensor<i8, Chip, Cluster, m![1 # 256], m![1 # 8]> = ctx
         .main
@@ -35,7 +35,7 @@ pub fn matmul_wo_broadcast(
         .vector_final()
         .cast::<i8, m![1 # 32]>()
         .commit_trim::<m![1 # 8]>()
-        .commit(0);
+        .commit();
 
     // write back to HBM.
     matmul_result.to_hbm(&mut ctx.tdma, 0x3000)

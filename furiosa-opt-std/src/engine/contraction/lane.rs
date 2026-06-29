@@ -5,13 +5,13 @@ use furiosa_mapping::*;
 use furiosa_opt_lower::{DivideTerm, config_divide_exact};
 use furiosa_opt_macro::primitive;
 
+use crate::backend::Backend;
 use crate::context::*;
 use crate::engine::align_up;
 use crate::engine::contraction::{
     CONTRACT_LANE_OUT_PACKET_ELEMENTS, ContractTensor, ContractTimeTensor, TEMPORAL_ACCUMULATOR_COLS,
     padding_per_stride,
 };
-use crate::runtime::Backend;
 use crate::scalar::*;
 
 /// Contraction mode for the Lane Folder.
@@ -268,13 +268,8 @@ mod tests {
         use super::*;
         use furiosa_mapping::M as _;
 
-        // For tests that performed reduction in the old monolithic `verify_accumulate`,
-        // the new test passes `Time` = post-`contract_time` time (i.e., the retained
-        // axes), and uses `vcl_pre` if buffer-bound is being tested with reduction.
-
         #[test]
         fn valid() {
-            // Old: Time=[A,B], OutTime=[B] (reduced A). New post-reduce time=[B].
             verify_contract_lane(
                 <m![1]>::to_value(),
                 <m![B]>::to_value(),
@@ -288,7 +283,6 @@ mod tests {
 
         #[test]
         fn valid_padding() {
-            // Old: Time=[A#8,B#4], OutTime=[B#4] (reduced A#8). post=[B#4].
             verify_contract_lane(
                 <m![1]>::to_value(),
                 <m![B # 4]>::to_value(),
@@ -302,7 +296,6 @@ mod tests {
 
         #[test]
         fn valid_no_reduction_with_padding() {
-            // No reduction: post=pre.
             verify_contract_lane(
                 <m![1]>::to_value(),
                 <m![A # 8, B]>::to_value(),
@@ -316,7 +309,6 @@ mod tests {
 
         #[test]
         fn valid_non_outermost() {
-            // Old: Time=[C,A,B], OutTime=[C,B] (reduced A). post=[C,B].
             verify_contract_lane(
                 <m![N]>::to_value(),
                 <m![C, B]>::to_value(),
@@ -343,7 +335,6 @@ mod tests {
 
         #[test]
         fn valid_all_time_reduced() {
-            // Old: Time=[A], OutTime=[1] (all reduced). post=[1].
             verify_contract_lane(
                 <m![N]>::to_value(),
                 <m![1]>::to_value(),
@@ -362,7 +353,6 @@ mod tests {
 
         #[test]
         fn valid() {
-            // Old: Time=[A,B], OutTime=[B,N]. Reduced A. post=[B].
             verify_contract_lane(
                 <m![N]>::to_value(),
                 <m![B]>::to_value(),
@@ -428,7 +418,6 @@ mod tests {
 
         #[test]
         fn valid_full_temporal_reduction() {
-            // Old: Time=[M], OutTime=[N,D/8] - all M reduced, post=[1].
             verify_contract_lane(
                 <m![N]>::to_value(),
                 <m![1]>::to_value(),

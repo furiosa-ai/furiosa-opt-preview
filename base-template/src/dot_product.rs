@@ -31,8 +31,8 @@ mod tests {
         let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
 
         // Reference: sum_i lhs[i] * rhs[i] in f32, then round to bf16.
-        let lhs_buf: Vec<bf16> = lhs.to_buf();
-        let rhs_buf: Vec<bf16> = rhs.to_buf();
+        let lhs_buf: Vec<bf16> = lhs.into_buf();
+        let rhs_buf: Vec<bf16> = rhs.into_buf();
         let expected_f32: f32 = lhs_buf
             .iter()
             .zip(&rhs_buf)
@@ -42,7 +42,7 @@ mod tests {
 
         let out_hbm = launch(dot_product_kernel, (&mut ctx, &lhs_hbm, &rhs_hbm)).await;
 
-        let actual_buf: Vec<bf16> = out_hbm.to_host::<m![1]>(&mut ctx.pdma).await.to_buf();
+        let actual_buf: Vec<bf16> = out_hbm.to_host::<m![1]>(&mut ctx.pdma).await.into_buf();
         if let Some(&actual) = actual_buf.first() {
             let diff = (f32::from(actual) - f32::from(expected)).abs();
             let tol = (0.02 * f32::from(expected).abs()).max(0.5);

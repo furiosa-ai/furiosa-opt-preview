@@ -9,20 +9,20 @@ async fn test_view_simpl() {
 
     let mut ctx = Context::acquire();
 
-    // Create input tensor with shape (A=512)(B=4).
-    let input = HostTensor::<i32, m![A, B]>::from_buf((0..2048).collect::<Vec<_>>())
+    // Create input tensor with shape (A=512)(B=8).
+    let input = HostTensor::<i32, m![A, B]>::from_buf((0..4096).collect::<Vec<_>>())
         .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
         .await;
 
     // Call the device function.
     let output = launch(view_simpl, (&mut *ctx, &input)).await;
 
-    // Verify the output tensor content: [[3,0,1,2],[7,4,5,6],...].
+    // Verify the output tensor content: [[6,7,0,1,2,3,4,5],[14,15,8,9,10,11,12,13],...].
     assert_eq!(
-        output.to_host::<m![A, B]>(&mut ctx.pdma).await.into_raw(),
-        <CurrentBackend as Backend>::RawTensor::from_buf::<m![A, B]>(
+        output.to_host::<m![A, B]>(&mut ctx.pdma).await.into_inner(),
+        Tensor::<_, m![A, B], CurrentBackend>::from_buf(
             (0..512)
-                .flat_map(|x| [4 * x + 3, 4 * x, 4 * x + 1, 4 * x + 2])
+                .flat_map(|x| [6, 7, 0, 1, 2, 3, 4, 5].into_iter().map(move |i| 8 * x + i))
                 .collect::<Vec<_>>(),
         )
     );

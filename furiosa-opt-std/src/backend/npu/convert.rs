@@ -36,7 +36,7 @@ impl<D: Scalar, Chip: M, Element: M> From<Buffer> for HbmTensor<D, Chip, Element
 
 /// `Extend`-shaped trait for `Vec<Buffer>`, narrowed to this crate's needs.
 ///
-/// Has the identical signature to `core::iter::Extend<A>` — same `&mut self`
+/// Has the identical signature to `core::iter::Extend<A>`, same `&mut self`
 /// receiver, same `IntoIterator<Item = A>` parameter, same `extend` method
 /// name.
 pub trait ExtendBuffers<A> {

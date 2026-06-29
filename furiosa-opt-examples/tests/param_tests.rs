@@ -12,8 +12,8 @@ async fn tuple_param_passes() {
     let out = launch(tuple_passthrough, (&mut *ctx, (&input,))).await;
 
     assert_eq!(
-        out.to_host::<m![A, B]>(&mut ctx.pdma).await.into_raw(),
-        <CurrentBackend as Backend>::RawTensor::from_buf::<m![A, B]>(data)
+        out.to_host::<m![A, B]>(&mut ctx.pdma).await.into_inner(),
+        Tensor::<_, m![A, B], CurrentBackend>::from_buf(data)
     );
 }
 
@@ -28,7 +28,7 @@ async fn struct_param_passes() {
     let out = launch(struct_passthrough, (&mut *ctx, Inputs { x: &input })).await;
 
     assert_eq!(
-        out.to_host::<m![A, B]>(&mut ctx.pdma).await.into_raw(),
-        <CurrentBackend as Backend>::RawTensor::from_buf::<m![A, B]>(data)
+        out.to_host::<m![A, B]>(&mut ctx.pdma).await.into_inner(),
+        Tensor::<_, m![A, B], CurrentBackend>::from_buf(data)
     );
 }

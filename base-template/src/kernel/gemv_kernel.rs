@@ -16,8 +16,8 @@ pub fn gemv_kernel(
     vector: &HbmTensor<bf16, Chip, m![J]>,
 ) -> HbmTensor<bf16, Chip, m![I]> {
     // Move data from HBM to DM
-    let matrix: DmTensor<bf16, Chip, Cluster, Slice, m![J]> = matrix.to_dm(&mut ctx.tdma, 0);
-    let vector: DmTensor<bf16, Chip, Cluster, Slice, m![J]> = vector.to_dm(&mut ctx.tdma, 1 << 12);
+    let matrix: DmTensor<bf16, Chip, Cluster, Slice, m![J]> = matrix.to_dm(&mut ctx.tdma);
+    let vector: DmTensor<bf16, Chip, Cluster, Slice, m![J]> = vector.to_dm(&mut ctx.tdma);
 
     // Load vector into TRF
     let vector_trf: TrfTensor<bf16, Chip, Cluster, Slice, Lane, m![J]> = ctx
@@ -26,7 +26,7 @@ pub fn gemv_kernel(
         .fetch::<m![1], m![J]>()
         // Collect Engine: split into 32-byte flits.
         .collect::<m![J / 16], m![J % 16]>()
-        .to_trf(TrfAddress::Full);
+        .to_trf();
 
     // Compute GEMV: matrix × vector
     // Key difference: `I` maps to slice (preserved), `J` gets reduced
@@ -41,7 +41,7 @@ pub fn gemv_kernel(
         .contract_lane::<m![1], m![1 # 8]>(LaneMode::Interleaved)
         .cast::<bf16, m![1 # 16]>()
         .commit_trim::<m![1 # 4]>()
-        .commit(0);
+        .commit();
 
     // Transfer result to HBM
     result.to_hbm(&mut ctx.tdma, 2 << 28)

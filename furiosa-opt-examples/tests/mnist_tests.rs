@@ -37,7 +37,7 @@ async fn test_mnist() {
             .to_host::<m![C]>(&mut ctx.pdma)
             .await;
 
-        let buf = logits.to_buf();
+        let buf = logits.into_buf();
         let predicted = buf
             .iter()
             .take(10)

@@ -12,7 +12,7 @@ pub fn reshape(
     let hbm_transposed: HbmTensor<i32, m![A / 4 % 4], m![A % 4, B, A / 16]> =
         hbm_tensor.to_hbm(&mut ctx.tdma, 0x100000);
     let dm_tensor: DmTensor<i32, m![A / 4 % 4], m![A / 2 % 2], m![B % 16, B / 16 % 16], m![B / 256, A % 2, A / 16]> =
-        hbm_transposed.to_dm(&mut ctx.tdma, 0);
+        hbm_transposed.to_dm(&mut ctx.tdma);
 
     let reshaped: DmTensor<i32, m![C], m![D], m![E, F], m![G, H, I]> = unsafe { dm_tensor.reshape() };
 
@@ -39,7 +39,7 @@ pub mod different_axes {
             m![A / 2 % 2],
             m![B % 16, B / 16 % 16],
             m![B / 256, A % 2, A / 16],
-        > = hbm_transposed.to_dm(&mut ctx.tdma, 0);
+        > = hbm_transposed.to_dm(&mut ctx.tdma);
 
         let reshaped: DmTensor<i32, m![C], m![D], m![E], m![F]> = unsafe { dm_tensor.reshape() };
 

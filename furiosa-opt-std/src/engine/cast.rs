@@ -6,13 +6,17 @@
 
 use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
+use std::marker::PhantomData;
 
+use crate::backend::Backend;
 use crate::cast::Cast;
+use crate::constraints;
 use crate::context::*;
 use crate::engine::vector::scalar::VeScalar;
 use crate::engine::{CanApplyCast, FLIT_BYTES};
-use crate::runtime::{Backend, CurrentBackend};
+use crate::runtime::CurrentBackend;
 use crate::scalar::*;
+use crate::tensor::Tensor;
 use crate::tensor::tu::{Position, TuTensor};
 
 /// After the cast engine.
@@ -24,6 +28,27 @@ impl Position for PositionCast {}
 /// Tensor streamed after the cast engine.
 pub type CastTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
     TuTensor<'l, { T }, PositionCast, D, Chip, Cluster, Slice, Time, Packet, B>;
+
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    CastTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    const fn check_constraints() {
+        constraints::assert_cluster_size(Cluster::SIZE);
+        constraints::assert_slice_size(Slice::SIZE);
+        constraints::assert_packet_one_flit(D::BITS, Packet::SIZE);
+    }
+
+    #[doc(hidden)]
+    pub fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+        const { Self::check_constraints() };
+
+        Self {
+            ctx,
+            inner,
+            _position: PhantomData,
+        }
+    }
+}
 
 // ANCHOR: cast_impl
 //
@@ -40,7 +65,7 @@ impl<'l, const T: Tu, P: CanApplyCast, D: VeScalar, Chip: M, Cluster: M, Slice: 
         D: Cast<OutD>,
     {
         verify_cast::<D, OutD, Packet, OutPacket>();
-        CastTensor::new(self.ctx, self.inner.map(|v| v.map(|v| v.cast())).transpose(false))
+        CastTensor::new(self.ctx, self.inner.map(|v| v.cast()).transpose(false))
     }
 }
 // ANCHOR_END: cast_impl
@@ -72,8 +97,7 @@ fn verify_cast<D: Scalar, OutD: Scalar, InPacket: M, OutPacket: M>() {
     assert_eq!(
         OutD::size_in_bytes_from_length(OutPacket::SIZE),
         FLIT_BYTES,
-        "Cast output packet must be exactly {FLIT_BYTES} bytes (one flit). \
-         Expected: {expected_packet}, got: {out_packet}",
+        "Cast output packet must be exactly {FLIT_BYTES} bytes (one flit)."
     );
     assert_eq!(
         expected_packet, out_packet,

@@ -26,14 +26,14 @@ mod tests {
         let in_hbm = input.to_hbm(&mut ctx.pdma, 0).await;
 
         // Reference: out[i] = in[i] + 1.
-        let in_buf: Vec<i32> = input.to_buf();
+        let in_buf: Vec<i32> = input.into_buf();
         let expected: Vec<i32> = in_buf.iter().map(|&x| x.wrapping_add(1)).collect();
 
         let out_hbm = launch(constant_add_kernel, (&mut ctx, &in_hbm)).await;
 
         // Under the typecheck backend `actual` is empty (phantom tensors), so
         // the loop trivially runs zero iterations and the assertion is skipped.
-        let actual: Vec<i32> = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await.to_buf();
+        let actual: Vec<i32> = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await.into_buf();
         for (i, (&e, &a)) in expected.iter().zip(&actual).enumerate() {
             assert_eq!(e, a, "constant_add mismatch at i={i}: expected {e}, actual {a}");
         }

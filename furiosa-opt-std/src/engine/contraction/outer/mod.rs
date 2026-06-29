@@ -17,13 +17,14 @@ pub(super) mod stream_adapter;
 pub(super) mod trf_sequencer;
 
 use furiosa_mapping::*;
-use furiosa_opt_lower::config_divide_exact;
 use furiosa_opt_macro::primitive;
 
+use crate::backend::Backend;
 use crate::cast::{Cast, ContractionCast};
+use crate::constraints;
 use crate::context::*;
 use crate::engine::CanApplyContractOuter;
-use crate::runtime::{Backend, CurrentBackend};
+use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
 use crate::tensor::memory::TrfTensor;
@@ -54,6 +55,39 @@ pub struct ContractOuterTensor<
     >,
 }
 
+impl<
+    'l,
+    const T: Tu,
+    D: Scalar + ContractionCast,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Lane: M,
+    Time: M,
+    Packet: M,
+    B: Backend,
+> ContractOuterTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
+{
+    const fn check_constraints() {
+        constraints::assert_cluster_size(Cluster::SIZE);
+        constraints::assert_slice_size(Slice::SIZE);
+        constraints::assert_packet_one_or_two_flit(D::BITS, Packet::SIZE);
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn new(
+        ctx: &'l mut TuContext<{ T }>,
+        inner: Tensor<
+            <D as ContractionCast>::Output,
+            Pair<Chip, Pair<Cluster, Pair<Slice, Pair<Lane, Pair<Time, Packet>>>>>,
+            B,
+        >,
+    ) -> Self {
+        const { Self::check_constraints() };
+        Self { ctx, inner }
+    }
+}
+
 // ANCHOR: contract_outer_def
 impl<
     'l,
@@ -79,9 +113,8 @@ impl<
     where
         D: Cast<<D as ContractionCast>::Output>,
     {
-        verify_contract_outer::<D, Lane, Time, Packet, OutTime, OutPacket>();
-
-        // Broadcast both operands into the joint computation mapping.
+        // Broadcast both operands into the joint computation mapping. Each side
+        // verifies its own mapping inside its `contract_outer`.
         let lhs = stream_adapter::contract_outer::<D, Chip, Cluster, Slice, Lane, Time, Packet, OutTime, OutPacket, B>(
             self.inner,
         );
@@ -90,27 +123,11 @@ impl<
         );
 
         // Multiplier: widen to D::Output, then elementwise multiply.
-        let lhs = lhs.map(|v| v.map(|v| v.cast()));
-        let trf = trf.map(|v| v.map(|v| v.cast()));
+        let lhs = lhs.map(|v| v.cast());
+        let trf = trf.map(|v| v.cast());
         let inner = lhs.zip_with(&trf, |a, b| a * b);
 
-        ContractOuterTensor { ctx: self.ctx, inner }
+        ContractOuterTensor::new(self.ctx, inner)
     }
 }
 // ANCHOR_END: contract_outer_def
-
-/// Top-level validation for `.contract_outer`: runs the Stream Adapter checks and
-/// ensures the input `Time` divides the expected joint-mapping `Time`.
-fn verify_contract_outer<D: Scalar, Lane: M, Time: M, Packet: M, OutTime: M, OutPacket: M>() {
-    stream_adapter::verify_stream_adapter::<D, Lane, Time, Packet, OutTime, OutPacket>();
-
-    let expected_time = OutTime::to_value()
-        .pair(
-            OutPacket::to_value()
-                .stride(D::length_from_bytes(crate::engine::FLIT_BYTES))
-                .remove_padding(),
-        )
-        .normalize();
-    let input_time = Time::to_value();
-    config_divide_exact(&expected_time, &input_time).expect("`contract_outer`: Time does not divide OutTime");
-}

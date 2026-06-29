@@ -135,11 +135,7 @@ pub use transpose::*;
 use crate::engine::vector::tensor::PositionVectorFinal;
 use crate::tensor::tu::{Position, PositionBegin};
 
-/// Size of a single flit in bytes.
-///
-/// Data flows through the switching network in flit-sized units.
-/// Both the collect engine and cast engine normalize packets to exactly one flit.
-pub(crate) const FLIT_BYTES: usize = 32;
+pub(crate) use crate::constraints::FLIT_BYTES;
 
 pub(crate) fn align_up(a: usize, b: usize) -> usize {
     assert_ne!(b, 0);

@@ -15,8 +15,7 @@ pub trait Scalar: ndarray::LinalgScalar + Debug + Clone + Copy + PartialEq + Num
     ///
     /// Panics if the total bit count is not a multiple of 8.
     fn size_in_bytes_from_length(length: usize) -> usize {
-        assert_eq!((length * Self::BITS) % 8, 0, "total bits must be byte-aligned");
-        (length * Self::BITS) / 8
+        crate::constraints::size_in_bytes(Self::BITS, length)
     }
 
     /// Returns the number of elements that fit in `bytes` bytes.

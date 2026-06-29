@@ -18,9 +18,9 @@ async fn test_binary_add_2048() {
 
     assert_eq!(
         lhs.into_inner()
-            .map(|x| x.map(|x| x as i32))
-            .zip_with(&rhs.into_inner().map(|x| x.map(|x| x as i32)), |a, b| a + b)
-            .to_buf(),
-        out.to_host::<m![A]>(&mut ctx.pdma).await.to_buf()
+            .map(|x| x as i32)
+            .zip_with(&rhs.into_inner().map(|x| x as i32), |x, y| x + y)
+            .into_buf(),
+        out.to_host::<m![A]>(&mut ctx.pdma).await.into_buf()
     );
 }

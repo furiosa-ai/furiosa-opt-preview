@@ -28,6 +28,7 @@ use super::VeTensorShape;
 
 use super::VectorFinalTensor;
 use crate::array_vec::ArrayVec;
+use crate::backend::Backend;
 use crate::context::*;
 use crate::engine::vector::MAX_TAGS;
 use crate::engine::vector::alu::RngdAlu;
@@ -41,6 +42,7 @@ use crate::engine::vector::op::{
 };
 use crate::engine::vector::operand::OperandTag;
 use crate::prelude::TagFilter;
+use crate::runtime::CurrentBackend;
 use crate::scalar::Opt;
 use crate::tensor::*;
 
@@ -83,14 +85,8 @@ impl<'l, const T: Tu, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packe
 // VeTensorData - Common tensor data without context (shared by VectorTensor and VectorTensorPair)
 // ============================================================================
 
-/// Common tensor data for VE pipeline stages, without context reference.
-/// This expects sharing implementation between VectorTensor and VectorTensorPair groups.
-///
-/// The `S` type parameter represents the current pipeline stage.
-/// The `FS` type parameter represents the filter state.
-/// The `StashD` type parameter represents the scalar type of the stash tensor.
-/// The `Stash` type parameter represents the stash type (for compile-time type checking).
-/// The `W` type parameter represents the way (Way8 or Way4).
+/// Common tensor data for VE pipeline stages, without a context reference; shared between
+/// `VectorTensor` and `VectorTensorPair` groups.
 #[derive(Debug)]
 pub struct VeTensorData<
     S: stage::Stage,
@@ -206,7 +202,7 @@ impl<
     pub(crate) fn apply_binary<NextStage: stage::Stage, NextFS: stage::VeTensorContext>(
         mut self,
         alu: RngdAlu,
-        op_fn: impl Fn(Opt<D>, Opt<D>) -> Opt<D>,
+        op_fn: impl Fn(D, D) -> D,
         operands: &ArrayVec<BinaryOperandTag<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>, MAX_TAGS>,
     ) -> VeTensorData<NextStage, D, Chip, Cluster, Slice, Time, Packet, StashD, Stash, VE_ORDER, NextFS, W> {
         // Only read stash if actually used by an operand
@@ -311,7 +307,7 @@ impl<
         tag: Tensor<u8, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
         ve_state: VeState<StashD, Stash>,
     ) -> Self {
-        VectorTensor {
+        Self {
             ctx,
             data: VeTensorData {
                 inner,
@@ -328,12 +324,12 @@ impl<
         ctx: &'l mut TuContext<{ T }>,
         data: VeTensorData<S, D, Chip, Cluster, Slice, Time, Packet, StashD, Stash, VE_ORDER, FS, W>,
     ) -> Self {
-        VectorTensor { ctx, data }
+        Self { ctx, data }
     }
 
     /// Internal helper for binary operations.
-    /// Applies operation with ALU tracking and stash support, returns new VectorTensor.
-    /// If mode is None, uses the default mode (Mode01).
+    /// Applies operation with ALU tracking and stash support, returns new VectorTensor. Mode defaulting
+    /// (`None` → `Mode01`) happens in `HasBinaryOp::binary_op_fn`.
     pub(crate) fn do_binary<NextStage: stage::Stage, NextFS: stage::VeTensorContext>(
         self,
         op: impl HasAlu + HasBinaryOp<D>,
@@ -515,10 +511,7 @@ impl<
         op: InterSliceReduceOpI32,
     ) -> VectorInterSliceReduceTensor<'l, T, i32, Chip, Cluster, OutSlice, OutTime, Packet, { VeOrder::IntraFirst }>
     {
-        let reduced = self
-            .data
-            .inner
-            .reduce_then_broadcast_with(op.lifted_reduce_fn(), Opt::Uninit);
+        let reduced = self.data.inner.reduce(op.reduce_fn(), op.identity(), true);
         create_inter_slice_reduce_tensor(self.ctx, reduced)
     }
 }
@@ -561,10 +554,7 @@ impl<
         op: InterSliceReduceOpF32,
     ) -> VectorInterSliceReduceTensor<'l, T, f32, Chip, Cluster, OutSlice, OutTime, Packet, { VeOrder::IntraFirst }>
     {
-        let reduced = self
-            .data
-            .inner
-            .reduce_then_broadcast_with(op.lifted_reduce_fn(), Opt::Uninit);
+        let reduced = self.data.inner.reduce(op.reduce_fn(), op.identity(), true);
         create_inter_slice_reduce_tensor(self.ctx, reduced)
     }
 }
@@ -644,9 +634,7 @@ impl<'l, const T: Tu, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
     ) -> VectorInterSliceReduceTensor<'l, T, i32, Chip, Cluster, OutSlice, OutTime, Packet, { VeOrder::InterFirst }>
     {
         // ANCHOR_END: init_inter_slice_reduce_i32
-        let reduced = self
-            .inner
-            .reduce_then_broadcast_with(op.lifted_reduce_fn(), Opt::Uninit);
+        let reduced = self.inner.reduce(op.reduce_fn(), op.identity(), true);
         create_inter_slice_reduce_tensor(self.ctx, reduced)
     }
 }
@@ -665,9 +653,7 @@ impl<'l, const T: Tu, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
     ) -> VectorInterSliceReduceTensor<'l, T, f32, Chip, Cluster, OutSlice, OutTime, Packet, { VeOrder::InterFirst }>
     {
         // ANCHOR_END: init_inter_slice_reduce_f32
-        let reduced = self
-            .inner
-            .reduce_then_broadcast_with(op.lifted_reduce_fn(), Opt::Uninit);
+        let reduced = self.inner.reduce(op.reduce_fn(), op.identity(), true);
         create_inter_slice_reduce_tensor(self.ctx, reduced)
     }
 }
@@ -954,52 +940,54 @@ pub type VectorFilterTensor<
 // Helper functions for applying operations with tag
 // ============================================================================
 
-/// Reads the rhs operand at the given `index`.
-///
-/// `stash_data` may be `None` when no operand requires it; if a [`VeRhs::Stash`] operand is
-/// encountered with no stash present, that signals an invariant violation in the caller (the
-/// `apply_binary` / `apply_ternary` wrappers only pass `None` when no operand uses Stash).
-fn rhs_at<D: VeScalar, Mapping: M>(
-    rhs: &VeRhs<D, Mapping>,
+/// Resolves `operand0`'s rhs tensor and fuses one branch-conditional combine into a single
+/// [`Backend::zip3_with`] over `(out, rhs, tag)`. `Vrf`/`Stash` borrow the operand's existing tensor
+/// (no copy); only `Const` materializes a broadcast tensor.
+fn blend_operand<D: VeScalar, Mapping: M>(
+    out: &<CurrentBackend as Backend>::Storage<D>,
+    operand0: &VeRhs<D, Mapping>,
+    tag: &Tensor<u8, Mapping>,
     stash_data: Option<&Tensor<D, Mapping>>,
-    index: &Index,
-) -> Opt<D> {
-    match rhs {
-        VeRhs::Const { v } => Opt::Init(*v),
-        VeRhs::Stash => stash_data
-            .expect("VeRhs::Stash operand requires stash_data; caller must supply it")
-            .read_index(index.clone()),
-        VeRhs::Vrf { data } => data.read_index(index.clone()),
+    blend: impl Fn(D, D, u8) -> D,
+) -> <CurrentBackend as Backend>::Storage<D> {
+    match operand0 {
+        VeRhs::Vrf { data } => CurrentBackend::zip3_with(out, &data.inner, &tag.inner, blend),
+        VeRhs::Stash => {
+            let stash = stash_data.expect("VeRhs::Stash operand requires stash_data; caller must supply it");
+            CurrentBackend::zip3_with(out, &stash.inner, &tag.inner, blend)
+        }
+        VeRhs::Const { v } => {
+            let rhs = Tensor::<D, Mapping>::splat(*v);
+            CurrentBackend::zip3_with(out, &rhs.inner, &tag.inner, blend)
+        }
     }
 }
 
-/// Applies a binary operation to a tensor with branch-conditional execution.
-/// Stash data is passed as a Tensor (already transposed to match current mapping).
-///
-/// Delegates to [`Tensor::apply_branch_operands`] (which is on `RawTensor` so `PhantomRawTensor`
-/// can short-circuit the iteration entirely under Typecheck).
+/// Applies a binary operation with branch-conditional execution: for each operand, `op` runs only on
+/// cells whose `tag` matches the operand's `TagFilter`, leaving `out` unchanged elsewhere. Stash data
+/// is passed as a `Tensor` (already transposed to the current mapping).
 pub(super) fn apply_binary_op<D: VeScalar, Mapping: M>(
     data: &Tensor<D, Mapping>,
     tag: &Tensor<u8, Mapping>,
-    op: impl Fn(Opt<D>, Opt<D>) -> Opt<D>,
+    op: impl Fn(D, D) -> D,
     operands: &[BinaryOperandTag<D, Mapping>],
     stash_data: Option<&Tensor<D, Mapping>>,
 ) -> Tensor<D, Mapping> {
-    data.apply_branch_operands(tag, operands, |index, operand, output| {
-        let rhs = rhs_at(operand.operand0(), stash_data, index);
-        let cur = output.read_index(index.clone());
-        output.write_index(index.clone(), op(cur, rhs));
-    })
+    let mut out = data.inner.clone();
+    for operand in operands {
+        let filter = operand.tag_filter();
+        let blend = |o: D, r: D, t: u8| if filter.matches(Opt::Init(t)) { op(o, r) } else { o };
+        out = blend_operand(&out, operand.operand0(), tag, stash_data, blend);
+    }
+    Tensor::from_inner(out)
 }
 
-/// Applies a unary operation to every real position of `data`. Unary ops do not accept branch
-/// operands — only [`BinaryOperandTag`] / [`TernaryOperandTag`] callsites are gated by
-/// [`OperandTag`]. Delegates to [`Tensor::map`].
+/// Applies a unary operation to every position of `data`. Unary ops accept no branch [`OperandTag`].
 pub(super) fn apply_unary_op<D: VeScalar, Mapping: M>(
     data: &Tensor<D, Mapping>,
-    op: impl Fn(Opt<D>) -> Opt<D>,
+    op: impl Fn(D) -> D,
 ) -> Tensor<D, Mapping> {
-    data.map(|&v| op(v))
+    data.map(op)
 }
 
 /// Applies a ternary operation to a tensor with branch-conditional execution.
@@ -1007,16 +995,24 @@ pub(super) fn apply_unary_op<D: VeScalar, Mapping: M>(
 pub(super) fn apply_ternary_op<Mapping: M>(
     data: &Tensor<f32, Mapping>,
     tag: &Tensor<u8, Mapping>,
-    op: impl Fn(Opt<f32>, Opt<f32>, Opt<f32>) -> Opt<f32>,
+    op: impl Fn(f32, f32, f32) -> f32,
     operands: &[TernaryOperandTag<Mapping>],
     stash_data: Option<&Tensor<f32, Mapping>>,
 ) -> Tensor<f32, Mapping> {
-    data.apply_branch_operands(tag, operands, |index, operand, output| {
-        let rhs0 = rhs_at(operand.operand0(), stash_data, index);
-        let rhs1 = Opt::Init(operand.operand1());
-        let cur = output.read_index(index.clone());
-        output.write_index(index.clone(), op(cur, rhs0, rhs1));
-    })
+    let mut out = data.inner.clone();
+    for operand in operands {
+        let filter = operand.tag_filter();
+        let rhs1 = operand.operand1();
+        let blend = |o: f32, r: f32, t: u8| {
+            if filter.matches(Opt::Init(t)) {
+                op(o, r, rhs1)
+            } else {
+                o
+            }
+        };
+        out = blend_operand(&out, operand.operand0(), tag, stash_data, blend);
+    }
+    Tensor::from_inner(out)
 }
 
 // ============================================================================
@@ -1178,7 +1174,7 @@ where
         let op = FxpToFp::new(int_width);
         let op_fn = op.op_fn();
 
-        let result = self.inner().map(|v| v.map(&op_fn));
+        let result = self.inner().map(&op_fn);
 
         let (ctx, _inner, tag, ve_state) = self.into_parts();
         VectorFxpToFpTensor::from_parts(ctx, result, tag, ve_state)
@@ -1328,14 +1324,8 @@ where
     ///
     /// # Example
     /// ```ignore
-    /// // FmaF: result = data * operand0 + operand1
+    /// // FmaF: result = data * operand0 + operand1; operand0 may be const/VRF/Stash
     /// tensor.vector_fp_ternary(FpTernaryOp::FmaF, (2.0f32, 3.0f32))
-    ///
-    /// // With VRF as operand0
-    /// tensor.vector_fp_ternary(FpTernaryOp::FmaF, (&vrf, 3.0f32))
-    ///
-    /// // With stash as operand0
-    /// tensor.vector_fp_ternary(FpTernaryOp::FmaF, (Stash, 3.0f32))
     /// ```
     #[primitive(VectorTensor::vector_fp_ternary)]
     pub fn vector_fp_ternary(
@@ -1417,7 +1407,7 @@ fn verify_reduce_label(time: Mapping, packet: Mapping, out_time: Mapping, out_pa
 fn reduce_tag<Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, OutTime: M, OutPacket: M>(
     tag: Tensor<u8, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
 ) -> Tensor<u8, VeTensorShape<Chip, Cluster, Slice, OutTime, OutPacket>> {
-    tag.reduce::<VeTensorShape<Chip, Cluster, Slice, OutTime, OutPacket>>(|_, y| y, Opt::Uninit)
+    tag.reduce::<VeTensorShape<Chip, Cluster, Slice, OutTime, OutPacket>>(|_, y| y, 0, false)
 }
 
 // ANCHOR: intra_slice_reduce_i32
@@ -1469,8 +1459,11 @@ where
             OutPacket::to_value(),
             &Reduce::NAME,
         );
-        let reduced_inner =
-            inner.reduce::<VeTensorShape<Chip, Cluster, Slice, OutTime, OutPacket>>(op.lifted_reduce_fn(), Opt::Uninit);
+        let reduced_inner = inner.reduce::<VeTensorShape<Chip, Cluster, Slice, OutTime, OutPacket>>(
+            op.reduce_fn(),
+            op.identity(),
+            false,
+        );
         let reduced_eid = reduce_tag::<Chip, Cluster, Slice, Time, Packet, OutTime, OutPacket>(tag);
         VectorIntraSliceReduceTensor::from_parts(ctx, reduced_inner, reduced_eid, ve_state)
     }
@@ -1525,8 +1518,11 @@ where
             OutPacket::to_value(),
             &Reduce::NAME,
         );
-        let reduced_inner =
-            inner.reduce::<VeTensorShape<Chip, Cluster, Slice, OutTime, OutPacket>>(op.lifted_reduce_fn(), Opt::Uninit);
+        let reduced_inner = inner.reduce::<VeTensorShape<Chip, Cluster, Slice, OutTime, OutPacket>>(
+            op.reduce_fn(),
+            op.identity(),
+            false,
+        );
         let reduced_eid = reduce_tag::<Chip, Cluster, Slice, Time, Packet, OutTime, OutPacket>(tag);
         VectorIntraSliceReduceTensor::from_parts(ctx, reduced_inner, reduced_eid, ve_state)
     }
@@ -1688,7 +1684,7 @@ where
     ) -> VectorFpToFxpTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, StashD, Stash, VE_ORDER> {
         let op = FpToFxp::new(int_width);
         let op_fn = op.op_fn();
-        let result = self.inner().map(|&v| v.map(&op_fn));
+        let result = self.inner().map(&op_fn);
 
         let (ctx, _inner, tag, ve_state) = self.into_parts();
         VectorFpToFxpTensor::from_parts(ctx, result, tag, ve_state)

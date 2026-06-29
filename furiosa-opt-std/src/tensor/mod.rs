@@ -1,27 +1,21 @@
 use std::fmt;
-use std::marker::PhantomData;
 
 use furiosa_mapping::*;
-use ndarray::IxDyn;
 use num_traits::Zero;
 use rand::Rng;
 use rand::distr::StandardUniform;
 
 use self::view::*;
 use crate::scalar::*;
-use crate::tensor::raw::gen_axes;
 
-use crate::engine::vector::operand::OperandTag;
-use crate::engine::vector::scalar::VeScalar;
-use crate::runtime::{Backend, CurrentBackend};
+use crate::backend::Backend;
+use crate::runtime::CurrentBackend;
+use crate::storage::MathStorage;
 
 pub(crate) mod memory;
 pub mod pseudo;
-pub(crate) mod raw;
 pub(crate) mod tu;
 pub(crate) mod view;
-
-pub use raw::{BufRawTensor, MathRawTensor, PhantomRawTensor, RawTensor, RawTensorOpt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BufferConvertErrorKind {
@@ -56,130 +50,133 @@ impl std::error::Error for BufferConvertError {}
 
 /// Tensor with scalar type `D`, axes determined by `Mapping`, and backend determined by `B`.
 ///
-/// `B` defaults to [`CurrentBackend`], a cfg-aliased type that picks Simulation / Emulation / Npu
-/// / Typecheck. User code writes `Tensor<D, M>` and gets the backend-appropriate storage
-/// automatically. Explicit `Tensor<D, M, SomeBackend>` overrides for testing / cross-backend code.
+/// A thin newtype over the backend's concrete tensor type ([`Backend::Storage`]). `B` defaults to
+/// [`CurrentBackend`], a cfg-aliased type that picks
+/// Simulation / Emulation / Npu / Typecheck. User code writes `Tensor<D, M>` and gets the
+/// backend-appropriate storage automatically. Explicit `Tensor<D, M, SomeBackend>` overrides for
+/// testing / cross-backend code.
 pub struct Tensor<D: Scalar, Mapping: M, B: Backend = CurrentBackend> {
-    inner: B::RawTensor<D>,
-    _marker: PhantomData<(Mapping, B)>,
+    pub(crate) inner: B::Storage<D>,
+    // `B::Storage<D>` drops `Mapping` at the type level (storage-layer erasure); this phantom keeps
+    // the layout traveling at the `Tensor` level so memory-tier structs stay generic and inferable.
+    pub(crate) _marker: std::marker::PhantomData<Mapping>,
 }
 
-impl<D: Scalar, Mapping: M, B: Backend> std::fmt::Debug for Tensor<D, Mapping, B>
-where
-    B::RawTensor<D>: std::fmt::Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<D: Scalar, Mapping: M, B: Backend> fmt::Debug for Tensor<D, Mapping, B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Tensor").field("inner", &self.inner).finish()
     }
 }
 
-impl<D: Scalar, Mapping: M, B: Backend> Clone for Tensor<D, Mapping, B>
-where
-    B::RawTensor<D>: Clone,
-{
+impl<D: Scalar, Mapping: M, B: Backend> Clone for Tensor<D, Mapping, B> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            _marker: PhantomData,
+            _marker: std::marker::PhantomData,
         }
     }
 }
 
+impl<D: Scalar, Mapping: M, B: Backend> PartialEq for Tensor<D, Mapping, B> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
 impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
-    /// Wraps a backend-native raw tensor in `Tensor`.
-    pub(crate) fn from_inner(inner: B::RawTensor<D>) -> Self {
+    /// Wraps a backend-native concrete tensor in `Tensor`.
+    pub(crate) fn from_inner(inner: B::Storage<D>) -> Self {
         Self {
             inner,
-            _marker: PhantomData,
+            _marker: std::marker::PhantomData,
         }
     }
-}
 
-impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
-    /// Consumes the tensor and returns its underlying backend-native raw tensor. Pair this with
-    /// [`RawTensor::from_buf`] to compare against an expected raw tensor without a `Vec<D>`
-    /// round-trip.
-    pub fn into_raw(self) -> B::RawTensor<D> {
+    /// Consumes the tensor and returns its underlying backend-native concrete tensor.
+    pub fn into_inner(self) -> B::Storage<D> {
         self.inner
     }
 
-    pub(crate) fn read_index(&self, index: Index) -> Opt<D> {
-        self.inner.read_index(index)
-    }
-}
-
-impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
-    /// Creates a new tensor from an initialized buffer.
+    /// Creates a new tensor from an initialized buffer. Panics if the buffer length does not match
+    /// `Mapping::SIZE`.
     pub fn from_buf(data: impl IntoIterator<Item = D>) -> Self {
-        Self::try_from_buf(data).unwrap_or_else(|err| panic!("failed to convert buffer for backend storage: {err}"))
+        // The length check is backend-independent `Mapping::SIZE` arithmetic, so it lives here in the
+        // wrapper rather than on the construct-only `Backend` seam.
+        let data: Vec<D> = data.into_iter().collect();
+        assert_eq!(
+            data.len(),
+            Mapping::SIZE,
+            "from_buf: buffer length does not match mapping size"
+        );
+        Self::from_inner(B::from_buf(&Mapping::to_value(), data))
     }
 
-    /// Creates a new tensor from an initialized buffer, returning an error if the input cannot be
-    /// lowered.
-    pub fn try_from_buf(data: impl IntoIterator<Item = D>) -> Result<Self, BufferConvertError> {
-        B::RawTensor::try_from_buf::<Mapping>(data).map(Self::from_inner)
+    /// Returns the tensor data as a flat `Vec<D>`, consuming the tensor. On Simulation, panics if any
+    /// slot is `Opt::Uninit`. Use `to_buf_opt` (Simulation/Typecheck only) to inspect logical
+    /// Opt-bearing values.
+    pub fn into_buf(self) -> Vec<D> {
+        B::into_buf(self.inner, &Mapping::to_value())
     }
 
-    /// Returns the tensor data as a flat `Vec<D>`. On Simulation, panics if any slot is
-    /// `Opt::Uninit`. Use `to_buf_opt` (Simulation/Typecheck only) to inspect logical Opt-bearing
-    /// values.
-    pub fn to_buf(&self) -> Vec<D> {
-        self.inner.to_buf::<Mapping>()
-    }
-
-    /// Like [`Self::to_buf`], but yields `D::zero()` for padding/uninit slots instead of panicking
-    /// (see [`RawTensor::to_buf_or_default`]). Available on all backends.
-    pub fn to_buf_or_default(&self) -> Vec<D> {
-        self.inner.to_buf_or_default::<Mapping>()
-    }
-}
-
-impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
-    /// Creates a new tensor from a function. Delegates to [`RawTensor::from_fn`]; storage choice
-    /// (`MathRawTensor` / `BufRawTensor` / `PhantomRawTensor`) determines whether iteration writes
-    /// real values, propagates `todo!()`, or silently drops them.
-    pub fn from_fn<F>(f: F) -> Self
-    where
-        F: FnMut(&Vec<Term>, &IxDyn) -> Opt<D>,
-    {
-        Self::from_inner(B::RawTensor::from_fn(gen_axes::<Mapping>(), f))
-    }
-
-    /// Maps the tensor with a function. Delegates to [`RawTensor::map`].
+    /// Maps the tensor element-wise to a new scalar; same layout. The bare-scalar closure is lifted
+    /// by the backend's own [`Backend::map`] strategy (Simulation coordinate-addressed with `Uninit`
+    /// propagation, Emulation/Npu a bare buffer walk, Typecheck a no-op), no offset-uniform
+    /// primitive imposed across storages.
     pub fn map<D2: Scalar, F>(&self, f: F) -> Tensor<D2, Mapping, B>
     where
-        F: FnMut(&Opt<D>) -> Opt<D2>,
+        F: FnMut(D) -> D2,
     {
-        Tensor::from_inner(self.inner.map::<D2, _, F>(f))
+        Tensor::from_inner(B::map(&self.inner, f))
     }
 
-    /// Zips two tensors with a function. Delegates to [`RawTensor::zip_with`].
+    /// Zips two same-layout tensors element-wise. Delegates to the backend's [`Backend::zip_with`];
+    /// the result is defined only where both inputs are.
     pub fn zip_with<D2: Scalar, D3: Scalar, F>(&self, other: &Tensor<D2, Mapping, B>, f: F) -> Tensor<D3, Mapping, B>
     where
-        F: Fn(Opt<D>, Opt<D2>) -> Opt<D3>,
+        F: Fn(D, D2) -> D3,
     {
-        Tensor::from_inner(self.inner.zip_with::<D2, D3, _, _, F>(&other.inner, f))
+        Tensor::from_inner(B::zip_with(&self.inner, &other.inner, f))
     }
 
-    /// Performs reduction (sum) over axes not present in `Dst`.
-    pub fn reduce_add<Dst: M>(&self) -> Tensor<D, Dst, B> {
-        self.reduce::<Dst>(|a, b| a + b, Opt::zero())
-    }
-
-    /// Reduces the factors of `self`'s mapping that are absent in `Dst`. `Dst` must be an
-    /// exact factor of the source mapping; the source mapping is passed through so that
-    /// per-factor identity is preserved (e.g., a symbol appearing as multiple sub-factors,
-    /// only some of which are reduced).
-    pub fn reduce<Dst: M>(&self, reduce_fn: impl Fn(Opt<D>, Opt<D>) -> Opt<D>, identity: Opt<D>) -> Tensor<D, Dst, B> {
-        Tensor::from_inner(self.inner.reduce::<Mapping, Dst, _>(reduce_fn, identity))
-    }
-
-    /// Creates a zero tensor.
-    pub fn zero() -> Self
+    /// Performs reduction (sum) over axes not present in `Dst` (strict: no broadcast).
+    pub fn reduce_add<Dst: M>(&self) -> Tensor<D, Dst, B>
     where
         D: Zero,
     {
-        Self::from_fn(|_, _| Opt::Init(D::zero()))
+        self.reduce::<Dst>(|a, b| a + b, D::zero(), false)
+    }
+
+    /// Reduces the factors of `self`'s mapping that are absent in `Dst`. Axes that `Dst` adds beyond
+    /// the reduced source are broadcast (the reduced value repeats across them); `allow_broadcast`
+    /// gates that, `false` is a plain reduce that requires `Dst` to be a pure factor and rejects an
+    /// unintended extra axis, `true` permits the broadcast (like [`Self::transpose`]'s flag).
+    ///
+    /// The reduce fn works over bare scalars; the backend lifts it to its cell representation.
+    /// Simulation propagates `Uninit` (a reduction touching an undefined cell is undefined),
+    /// matching `Opt`'s arithmetic; Emulation/Npu have no undefined cells.
+    pub fn reduce<Dst: M>(
+        &self,
+        reduce_fn: impl Fn(D, D) -> D,
+        identity: D,
+        allow_broadcast: bool,
+    ) -> Tensor<D, Dst, B> {
+        Tensor::from_inner(B::reduce::<D, Mapping, Dst>(
+            &self.inner,
+            reduce_fn,
+            identity,
+            allow_broadcast,
+        ))
+    }
+
+    /// Creates a tensor with every logical cell set to `value`, a scalar broadcast ("splat").
+    /// Padding cells stay uninitialized.
+    pub fn splat(value: D) -> Self {
+        Self::from_buf(std::iter::repeat_n(value, Mapping::SIZE))
+    }
+
+    /// Creates a tensor with every logical cell set to zero (every [`Scalar`] is `Zero` via `Num`).
+    pub fn zero() -> Self {
+        Self::splat(num_traits::Zero::zero())
     }
 
     /// Creates a random tensor.
@@ -187,21 +184,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     where
         StandardUniform: rand::distr::Distribution<D>,
     {
-        Self::from_fn(|_, _| Opt::Init(rng.random::<D>()))
-    }
-
-    /// Performs reduction followed by broadcasting to match destination axes.
-    pub fn reduce_then_broadcast<Dst: M>(&self) -> Tensor<D, Dst, B> {
-        self.reduce_then_broadcast_with::<Dst>(|a, b| a + b, Opt::zero())
-    }
-
-    /// Performs reduction with a custom function, followed by broadcasting to match destination axes.
-    pub fn reduce_then_broadcast_with<Dst: M>(
-        &self,
-        reduce_fn: impl Fn(Opt<D>, Opt<D>) -> Opt<D>,
-        identity: Opt<D>,
-    ) -> Tensor<D, Dst, B> {
-        Tensor::from_inner(self.inner.reduce_then_broadcast::<Mapping, Dst, _>(reduce_fn, identity))
+        Self::from_buf((0..Mapping::SIZE).map(|_| rng.random::<D>()))
     }
 
     /// Performs contraction between two tensors.
@@ -212,13 +195,15 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     }
 }
 
-/// Host-side tensor methods. NPU has no host-side value semantics; Npu's `Backend` impl supplies
-/// `todo!()` stubs for the underlying iteration primitives so `B = Npu` resolves here without a
-/// separate parallel inherent block.
+/// Host-side tensor methods.
 impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
-    /// Creates an uninitialized tensor.
-    pub fn uninit() -> Self {
-        Self::from_inner(B::RawTensor::uninit_from_axes(gen_axes::<Mapping>()))
+    /// The empty destination canvas for the relayout ops (transpose / scatter / gather / reduce /
+    /// reshape), which fill only the live cells. Deliberately not `zero()`: on Simulation the cells
+    /// no op writes, padding and any gaps, must stay `Opt::Uninit` rather than become `Init(0)`,
+    /// which the `Opt` padding model relies on. `pub(crate)`: no public constructor hands out an
+    /// undefined-value tensor (an external caller that wants zeros uses `splat`/`zero`).
+    pub(crate) fn uninit() -> Self {
+        Self::from_inner(B::uninit(&Mapping::to_value()))
     }
 
     /// Creates a mutable view of the tensor.
@@ -231,120 +216,101 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
         TensorView::new(&self.inner)
     }
 
-    /// Transmutes the tensor to a different mapping.
+    /// Rewraps the tensor under a different mapping.
     ///
-    /// # Safety
+    /// After the `Mapping`-type-parameter erasure of the storage layer, `B::Storage<D>` no longer
+    /// carries the mapping at the type level, so the inner storage of `Tensor<D, Mapping, B>` and
+    /// `Tensor<D, Mapping2, B>` is literally the same type, rewrapping it is a plain, safe move.
     ///
-    /// The caller must ensure that the underlying data layout is compatible with the new mapping.
-    pub unsafe fn transmute<Mapping2: M>(self) -> Tensor<D, Mapping2, B> {
-        Tensor {
-            inner: self.inner,
-            _marker: PhantomData,
-        }
+    /// Deliberately NOT size-checked: `transmute` is used to relabel a padded read down to its
+    /// compact slot (the vector engine does `…tile(k).read().transmute()`, shrinking the mapping),
+    /// so `Mapping::SIZE != Mapping2::SIZE` is a legitimate, intended case. Delegates to
+    /// [`Backend::transmute`], which keeps the canonical `MathStorage` as-is but COMPACTS the physical
+    /// `BufStorage` buffer (drops the padding the relabel removes) so both backends agree.
+    pub fn transmute<Mapping2: M>(self) -> Tensor<D, Mapping2, B> {
+        Tensor::from_inner(B::transmute::<D, Mapping, Mapping2>(
+            self.inner,
+            &Mapping::to_value(),
+            &Mapping2::to_value(),
+        ))
     }
-}
 
-impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
-    /// Reshapes the tensor to a different mapping. Delegates to [`RawTensor::reshape`], which
-    /// reinterprets the underlying physical buffer (C-major over `Mapping` → C-major over
-    /// `Mapping2`); each backend supplies its own implementation.
+    /// Reshapes the tensor to a different mapping by reinterpreting its buffer under `Mapping2`
+    /// (delegates to [`Backend::reshape`]). Relabels axes over an unchanged buffer; the element count
+    /// is checked (`Mapping::SIZE == Mapping2::SIZE`, asserted below).
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the tensor mapping sizes are equal,
-    /// i.e. `Mapping::SIZE == Mapping2::SIZE`.
-    pub unsafe fn reshape<Mapping2: M>(self) -> Tensor<D, Mapping2, B> {
+    /// `Mapping` and `Mapping2` must lay the elements out in the SAME physical (wire) order, so the
+    /// element at each wire position is unchanged by the relabel. Axis regrouping (merge/split)
+    /// preserves wire order and is valid; a permutation like `m![A, B]` → `m![B, A]` does NOT, that
+    /// reorders elements and must use `transpose`. Equal sizes alone do not guarantee this.
+    pub unsafe fn reshape<Mapping2: M>(&self) -> Tensor<D, Mapping2, B> {
         assert_eq!(Mapping::SIZE, Mapping2::SIZE);
-        Tensor::from_inner(self.inner.reshape::<Mapping, Mapping2>())
+        Tensor::from_inner(B::reshape::<D, Mapping, Mapping2>(&self.inner))
     }
 
     /// Performs transpose. The mapping division is validated inside
-    /// [`RawTensor::write_transpose`] (via `transpose_broadcast`), so this generic body works
-    /// for every backend: Simulation writes values, Typecheck only runs the assertion, Npu /
-    /// Emulation hit `todo!()`.
+    /// [`Backend::transpose`] (via `transpose_broadcast`), so this generic body works
+    /// for every backend.
     pub fn transpose<Dst: M>(&self, allow_broadcast: bool) -> Tensor<D, Dst, B> {
         let mut dst = Tensor::uninit();
-        dst.view_mut().write_transpose(self.view(), allow_broadcast);
+        dst.view_mut().transpose(self.view(), allow_broadcast);
         dst
     }
 
     /// Scatter elements from self into dst at positions given by index tensor. Delegates to
-    /// [`RawTensor::write_scatter`].
-    pub fn write_scatter<Key: M, Dst: M, Idx: M>(
+    /// [`Backend::scatter`].
+    pub fn scatter<Key: M, Dst: M, Idx: M>(
         &self,
         dst: &mut Tensor<D, Dst, B>,
         index: &Tensor<i32, Idx, B>,
         scaled: bool,
     ) {
-        self.inner
-            .write_scatter::<Mapping, Key, Dst, Idx, _>(&mut dst.inner, &index.inner, scaled);
+        B::scatter::<D, Mapping, Key, Dst, Idx>(&self.inner, &mut dst.inner, &index.inner, scaled);
     }
 
     /// Gather elements from self (table) into dst at positions given by index tensor. Delegates
-    /// to [`RawTensor::write_gather`].
-    pub fn write_gather<Dst: M, Idx: M>(&self, dst: &mut Tensor<D, Dst, B>, index: &Tensor<i32, Idx, B>, scaled: bool) {
-        self.inner
-            .write_gather::<Mapping, Dst, Idx, _>(&mut dst.inner, &index.inner, scaled);
-    }
-
-    /// VE branch-conditional update. Delegates to [`RawTensor::apply_branch_operands`].
-    pub(crate) fn apply_branch_operands<Operand, F>(
-        &self,
-        tag: &Tensor<u8, Mapping, B>,
-        operands: &[Operand],
-        update: F,
-    ) -> Self
-    where
-        D: VeScalar,
-        Operand: OperandTag<D, Mapping>,
-        F: FnMut(&Index, &Operand, &mut B::RawTensor<D>),
-    {
-        Self::from_inner(
-            self.inner
-                .apply_branch_operands::<Mapping, Operand, _, F>(&tag.inner, operands, update),
-        )
+    /// to [`Backend::gather`].
+    pub fn gather<Dst: M, Idx: M>(&self, dst: &mut Tensor<D, Dst, B>, index: &Tensor<i32, Idx, B>, scaled: bool) {
+        B::gather::<D, Mapping, Dst, Idx>(&self.inner, &mut dst.inner, &index.inner, scaled);
     }
 }
 
-/// `Opt`-buffer constructors and serializers — gated on `B::RawTensor<D>: RawTensorOpt<D>` so
-/// only backends whose storage represents `Opt<D>` (Simulation: `MathRawTensor`, Typecheck:
-/// `PhantomRawTensor`) surface them. Npu / Emulation's `BufRawTensor` deliberately does not
-/// implement `RawTensorOpt`, so this surface is unreachable for those backends.
-impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B>
-where
-    B::RawTensor<D>: RawTensorOpt<D>,
-{
+/// `Opt`-buffer constructors and serializers, Simulation-only. `Opt<D>` is a Simulation concept
+/// (`MathStorage`'s `ArrayD<Opt<D>>`); Npu / Emulation's `BufStorage` is a bare `Vec<D>` with no
+/// `Opt::Uninit` representation, and Typecheck carries no values. So this surface is exposed only on
+/// the concrete `Simulation` backend, delegating to `MathStorage`'s inherent Opt methods.
+impl<D: Scalar, Mapping: M> Tensor<D, Mapping, crate::backend::Simulation> {
     /// Creates a new tensor from a logical `Opt<D>` buffer.
     pub fn from_opt_buf(data: impl IntoIterator<Item = Opt<D>>) -> Self {
-        Self::try_from_opt_buf(data)
-            .unwrap_or_else(|err| panic!("failed to convert logical buffer for backend storage: {err}"))
+        Self::from_inner(MathStorage::from_opt_buf(&Mapping::to_value(), data))
     }
 
     /// Creates a new tensor from a logical `Opt<D>` buffer, returning an error if the input
-    /// cannot be lowered. Length-check policy is delegated to the storage's
-    /// [`RawTensorOpt::try_from_opt_buf`] impl.
+    /// cannot be lowered.
     pub fn try_from_opt_buf(data: impl IntoIterator<Item = Opt<D>>) -> Result<Self, BufferConvertError> {
-        B::RawTensor::try_from_opt_buf::<Mapping>(data).map(Self::from_inner)
+        MathStorage::try_from_opt_buf(&Mapping::to_value(), data).map(Self::from_inner)
     }
 
     /// Returns the tensor data as a flat logical `Opt<D>` buffer in physical layout order.
     pub fn to_buf_opt(&self) -> Vec<Opt<D>> {
-        self.inner.to_opt_buf::<Mapping>()
+        self.inner.to_buf_opt(&Mapping::to_value())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{Npu, Simulation, Typecheck};
+    use crate::backend::{Emulation, Npu, Simulation, Typecheck};
 
-    /// Regression for `MathRawTensor::reduce` where the source and destination mappings share a
+    /// Regression for `MathStorage::reduce` where the source and destination mappings share a
     /// symbol whose factors are unevenly split: `Src = m![K, M]` consolidates K into a single
     /// `K(stride 1, mod 8)` term in `self.axes`, while `Dst = m![K / 2, M]` carries only K's
-    /// `(stride 2, mod 4)` sub-factor — the `(stride 1, mod 2)` piece must be reduced. The
-    /// old filter-by-`Term`-equality logic dropped K entirely (since the two K Terms differ).
-    /// The strict per-factor reduction must split K into "keep" (stride 2, mod 4) and
-    /// "reduce" (stride 1, mod 2) and sum exactly the in-between K positions.
+    /// `(stride 2, mod 4)` sub-factor — the `(stride 1, mod 2)` piece must be reduced. Filtering
+    /// by `Term` equality would drop K entirely (the two K Terms differ); the strict per-factor
+    /// reduction must instead split K into "keep" (stride 2, mod 4) and "reduce" (stride 1, mod 2)
+    /// and sum exactly the in-between K positions.
     #[test]
     fn simulation_reduce_keeps_partial_axis_when_only_a_sub_factor_remains() {
         axes![K = 8, M = 4];
@@ -360,17 +326,17 @@ mod tests {
         // dst[j, m] = (2j + 100m) + (2j+1 + 100m) = 4j + 1 + 200m.
         // K/2 outer (stride M=4), M inner: iteration is (j=0,m=0..4), (j=1,m=0..4), ...
         let expected: Vec<i32> = (0..4).flat_map(|j| (0..4).map(move |m| 4 * j + 1 + 200 * m)).collect();
-        assert_eq!(reduced.to_buf(), expected);
+        assert_eq!(reduced.into_buf(), expected);
     }
 
-    /// Regression for `MathRawTensor::reduce_then_broadcast` covering the same partial-sub-factor
+    /// Regression for `MathStorage::reduce` covering the same partial-sub-factor
     /// hazard as the `reduce` test above, *plus* a real broadcast axis that exists only in `Dst`.
     /// `Src = m![A]` consolidates A as `A(stride 1, mod 4)`; `Dst = m![A / 2, B]` keeps A's
     /// `(stride 2, mod 2)` sub-factor (reducing `A % 2`) and broadcasts over a fresh `B` axis.
     /// The divide-based intersection must split A correctly so each `B` column receives the
     /// pair-sum (not the full sum across all of A).
     #[test]
-    fn simulation_reduce_then_broadcast_keeps_partial_axis_and_broadcasts_extra_dst_axis() {
+    fn simulation_reduce_keeps_partial_axis_and_broadcasts_extra_dst_axis() {
         axes![A = 4, B = 2];
 
         // m![A]: source = [0, 1, 2, 3].
@@ -378,10 +344,10 @@ mod tests {
 
         // Reduce A%2 (sum pairs), broadcast over B:
         //   dst[j, b] = source[2j] + source[2j+1] for every b.
-        let result: Tensor<i32, m![A / 2, B], Simulation> = source.reduce_then_broadcast();
+        let result: Tensor<i32, m![A / 2, B], Simulation> = source.reduce(|a, b| a + b, 0, true);
 
         // m![A/2, B] iteration: (j=0,b=0), (j=0,b=1), (j=1,b=0), (j=1,b=1) → [1, 1, 5, 5].
-        assert_eq!(result.to_buf(), vec![1, 1, 5, 5]);
+        assert_eq!(result.into_buf(), vec![1, 1, 5, 5]);
     }
 
     #[test]
@@ -390,18 +356,17 @@ mod tests {
 
         let tensor = Tensor::<i32, m![A], Simulation>::from_buf(vec![1, 2]);
 
-        assert_eq!(tensor.to_buf(), vec![1, 2]);
+        assert_eq!(tensor.clone().into_buf(), vec![1, 2]);
         assert_eq!(tensor.to_buf_opt(), vec![Opt::Init(1), Opt::Init(2)]);
     }
 
     #[test]
-    fn typecheck_try_from_buf_ignores_length_mismatch() {
+    fn typecheck_from_buf_validates_length() {
         axes![A = 2];
 
-        let tensor = Tensor::<i32, m![A], Typecheck>::try_from_buf(vec![1]).unwrap();
-
-        assert!(tensor.to_buf().is_empty());
-        assert!(tensor.to_buf_opt().is_empty());
+        // The wrapper length-validates on every backend, Typecheck included.
+        let tensor = Tensor::<i32, m![A], Typecheck>::from_buf(vec![1, 2]);
+        assert!(tensor.clone().into_buf().is_empty());
     }
 
     #[test]
@@ -410,15 +375,14 @@ mod tests {
 
         let tensor = Tensor::<i32, m![A], Typecheck>::empty();
 
-        assert!(tensor.to_buf().is_empty());
-        assert!(tensor.to_buf_opt().is_empty());
+        assert!(tensor.clone().into_buf().is_empty());
     }
 
     /// Math-backend round-trip: gather a small table by a list of indices and confirm
     /// we get table rows back in indexed order. Mirrors the inverse-of-scatter contract
     /// documented on `HbmTensor::dma_gather`.
     ///
-    /// `scaled=true` matches the existing `write_scatter` semantics: indices are in
+    /// `scaled=true` matches the existing `scatter` semantics: indices are in
     /// byte-offset units (e.g., row 1 of `[W, V=2]` of i32 = byte offset `1*2*4 = 8`).
     /// The math impl divides by `payload_size * sizeof(D) = 8` to get the position index.
     /// `scaled=false` treats indices as raw position indices.
@@ -432,9 +396,9 @@ mod tests {
         let table = Tensor::<i32, m![W, V], Simulation>::from_buf(vec![10, 11, 20, 21, 30, 31]);
         let index = Tensor::<i32, m![K], Simulation>::from_buf(vec![0, 16, 8, 0]);
         let mut output = Tensor::<i32, m![K, V], Simulation>::uninit();
-        table.write_gather::<_, _>(&mut output, &index, true);
+        table.gather::<_, _>(&mut output, &index, true);
 
-        assert_eq!(output.to_buf(), vec![10, 11, 30, 31, 20, 21, 10, 11]);
+        assert_eq!(output.into_buf(), vec![10, 11, 30, 31, 20, 21, 10, 11]);
     }
 
     /// `scaled=false`: indices are raw row-position values.
@@ -445,9 +409,64 @@ mod tests {
         let table = Tensor::<i32, m![W, V], Simulation>::from_buf(vec![10, 11, 20, 21, 30, 31]);
         let index = Tensor::<i32, m![K], Simulation>::from_buf(vec![0, 2, 1, 0]);
         let mut output = Tensor::<i32, m![K, V], Simulation>::uninit();
-        table.write_gather::<_, _>(&mut output, &index, false);
+        table.gather::<_, _>(&mut output, &index, false);
 
-        assert_eq!(output.to_buf(), vec![10, 11, 30, 31, 20, 21, 10, 11]);
+        assert_eq!(output.into_buf(), vec![10, 11, 30, 31, 20, 21, 10, 11]);
+    }
+
+    /// Composite `MappingIter` over a *reordering* composite: `[B, A]` packs B-major (wire position
+    /// `p` decodes to `b = p / 3`, `a = p % 3`), but the canonical layout sorts A-major, so the
+    /// composite table is genuinely non-identity, unlike `[A, B] # N`, where wire order already
+    /// equals canonical. Cross-checked against Emulation, whose physical buffer is driven by the
+    /// sequencer (never `MappingExt::iter` / `finalize`), so it is an independent oracle; the literal
+    /// is hand-derived: wire `p = 3b + a` lands at canonical `4a + b`.
+    #[test]
+    fn simulation_composite_transpose_reorders_matching_emulation() {
+        axes![A = 3, B = 4];
+        let data: Vec<i32> = (0..12).collect();
+        let expected = vec![0, 3, 6, 9, 1, 4, 7, 10, 2, 5, 8, 11];
+
+        let sim = Tensor::<i32, m![[B, A] # 12], Simulation>::from_buf(data.clone());
+        let sim_t: Tensor<i32, m![A, B], Simulation> = sim.transpose(false);
+        assert_eq!(sim_t.into_buf(), expected, "Simulation (MappingIter) composite reorder");
+
+        let emu = Tensor::<i32, m![[B, A] # 12], Emulation>::from_buf(data);
+        let emu_t: Tensor<i32, m![A, B], Emulation> = emu.transpose(false);
+        assert_eq!(emu_t.into_buf(), expected, "Emulation (sequencer) composite reorder");
+    }
+
+    /// Composite `MappingIter` in wire mode (`padding = true`, the buffer seam) over a *padded*
+    /// composite: `[B, A] # 16` is 12 live cells plus a 4-cell padding tail. `to_buf_opt` walks every
+    /// physical position; the 4 pad positions have no canonical slot, so they read back `Uninit` (the
+    /// iterator's `None`).
+    #[test]
+    fn simulation_composite_padding_tail_is_uninit() {
+        axes![A = 3, B = 4];
+        let tensor = Tensor::<i32, m![[B, A] # 16], Simulation>::from_buf((0..16).collect::<Vec<i32>>());
+
+        let expected: Vec<Opt<i32>> = (0..12)
+            .map(Opt::Init)
+            .chain(std::iter::repeat_n(Opt::Uninit, 4))
+            .collect();
+        assert_eq!(tensor.to_buf_opt(), expected);
+    }
+
+    /// `write_scatter` round-trip on the math backend: the Simulation peer of
+    /// [`emulation_write_scatter_roundtrip_unscaled`], directly exercising `MathStorage`'s
+    /// `indexed_move` scatter path. The matching expectation across the two backends is the
+    /// math-vs-buf cross-check (Emulation drives the physical buffer through the sequencer, never
+    /// `MappingExt::iter`).
+    #[test]
+    fn simulation_write_scatter_roundtrip_unscaled() {
+        axes![W = 3, V = 2, K = 3];
+
+        let source = Tensor::<i32, m![K, V], Simulation>::from_buf(vec![10, 11, 20, 21, 30, 31]);
+        let index = Tensor::<i32, m![K], Simulation>::from_buf(vec![2, 0, 1]);
+        let mut output = Tensor::<i32, m![W, V], Simulation>::uninit();
+        source.scatter::<m![K], _, _>(&mut output, &index, false);
+
+        // row k of source lands at row index[k]: 0→W2, 1→W0, 2→W1.
+        assert_eq!(output.into_buf(), vec![20, 21, 30, 31, 10, 11]);
     }
 
     /// Typecheck-backend smoke: gather should propagate mapping checks (via
@@ -460,7 +479,7 @@ mod tests {
         let table = Tensor::<i32, m![W, V], Typecheck>::empty();
         let index = Tensor::<i32, m![K], Typecheck>::empty();
         let mut output = Tensor::<i32, m![K, V], Typecheck>::empty();
-        table.write_gather::<_, _>(&mut output, &index, true);
+        table.gather::<_, _>(&mut output, &index, true);
     }
 
     #[test]
@@ -469,6 +488,147 @@ mod tests {
 
         let tensor = Tensor::<i32, m![A], Npu>::from_buf(vec![1, 2]);
 
-        assert_eq!(tensor.to_buf(), vec![1, 2]);
+        assert_eq!(tensor.into_buf(), vec![1, 2]);
+    }
+
+    // ---- Emulation backend: physical `BufStorage` buffer semantics ----
+    //
+    // These pin `B = Emulation` via the type parameter, so they run under the default
+    // (simulation-cfg) `cargo test` without a backend rebuild. Each mirrors a `Simulation`
+    // expectation: same math, computed over the physical `Mapping::SIZE` staging buffer instead of
+    // the canonical `ArrayD`.
+
+    /// `from_buf`/`to_buf` round-trip: the staging buffer is stored verbatim in `Mapping`-order.
+    #[test]
+    fn emulation_from_buf_round_trips() {
+        axes![A = 4];
+
+        let tensor = Tensor::<i32, m![A], Emulation>::from_buf(vec![5, 6, 7, 8]);
+
+        assert_eq!(tensor.into_buf(), vec![5, 6, 7, 8]);
+    }
+
+    /// The buffer is `Mapping::SIZE` long, padding cells included. `m![A # 8]` with `A = 6` is a
+    /// 6-live + 2-pad buffer of length 8; `BufStorage` keeps all 8 cells (unlike `MathStorage`,
+    /// which strips padding and panics in `to_buf`). This is the storage fix that distinguishes
+    /// Emulation's buffer from Simulation's canonical tensor.
+    #[test]
+    fn emulation_buffer_is_padded_size_and_round_trips() {
+        axes![A = 6];
+
+        let data: Vec<i32> = (0..8).collect();
+        let tensor = Tensor::<i32, m![A # 8], Emulation>::from_buf(data.clone());
+
+        assert_eq!(tensor.into_buf(), data);
+    }
+
+    /// Element-wise `map` over the physical buffer.
+    #[test]
+    fn emulation_map() {
+        axes![A = 4];
+
+        let tensor = Tensor::<i32, m![A], Emulation>::from_buf(vec![0, 1, 2, 3]);
+        let mapped = tensor.map(|v| v * 10);
+
+        assert_eq!(mapped.into_buf(), vec![0, 10, 20, 30]);
+    }
+
+    /// Element-wise `zip_with` over two physical buffers of the same mapping.
+    #[test]
+    fn emulation_zip_with() {
+        axes![A = 4];
+
+        let lhs = Tensor::<i32, m![A], Emulation>::from_buf(vec![1, 2, 3, 4]);
+        let rhs = Tensor::<i32, m![A], Emulation>::from_buf(vec![10, 20, 30, 40]);
+        let sum = lhs.zip_with(&rhs, |a, b| a + b);
+
+        assert_eq!(sum.into_buf(), vec![11, 22, 33, 44]);
+    }
+
+    /// Multi-axis layout: `m![K, M]` (K outer / M inner) exercises per-axis buffer strides
+    /// (`stride_K = M`, `stride_M = 1`). Round-trip confirms `read_index`/`write_index` address the
+    /// physical buffer correctly through `Σ coordₖ · strideₖ`.
+    #[test]
+    fn emulation_multi_axis_strides_round_trip() {
+        axes![K = 8, M = 4];
+
+        let buf: Vec<i32> = (0..8).flat_map(|k| (0..4).map(move |m| k + 100 * m)).collect();
+        let tensor = Tensor::<i32, m![K, M], Emulation>::from_buf(buf.clone());
+
+        // Re-map (identity transpose) forces a write_index/read_index round-trip over the strides.
+        let same: Tensor<i32, m![K, M], Emulation> = tensor.transpose(false);
+        assert_eq!(same.into_buf(), buf);
+    }
+
+    /// Real relayout via the sequencer walk: `m![K,N]` -> `m![N,K]` permutes the buffer.
+    #[test]
+    fn emulation_transpose_relayout() {
+        axes![K = 2, N = 3];
+
+        // m![K,N]: K outer (stride 3), N inner. buf[k*3+n].  k=0:{0,1,2}, k=1:{10,11,12}
+        let src = Tensor::<i32, m![K, N], Emulation>::from_buf(vec![0, 1, 2, 10, 11, 12]);
+
+        // m![N,K]: N outer (stride 2), K inner. out[n*2+k] = src[k,n].
+        let dst: Tensor<i32, m![N, K], Emulation> = src.transpose(false);
+
+        // n=0:{k0,k1}={0,10}, n=1:{1,11}, n=2:{2,12}
+        assert_eq!(dst.into_buf(), vec![0, 10, 1, 11, 2, 12]);
+    }
+
+    /// `reduce` over a partially-split shared symbol, the Emulation peer of
+    /// [`simulation_reduce_keeps_partial_axis_when_only_a_sub_factor_remains`].
+    #[test]
+    fn emulation_reduce_keeps_partial_axis_when_only_a_sub_factor_remains() {
+        axes![K = 8, M = 4];
+
+        let source_buf: Vec<i32> = (0..8).flat_map(|k| (0..4).map(move |m| k + 100 * m)).collect();
+        let source = Tensor::<i32, m![K, M], Emulation>::from_buf(source_buf);
+
+        let reduced: Tensor<i32, m![K / 2, M], Emulation> = source.reduce_add();
+
+        let expected: Vec<i32> = (0..4).flat_map(|j| (0..4).map(move |m| 4 * j + 1 + 200 * m)).collect();
+        assert_eq!(reduced.into_buf(), expected);
+    }
+
+    /// `reduce` with broadcast, the Emulation peer of
+    /// [`simulation_reduce_keeps_partial_axis_and_broadcasts_extra_dst_axis`].
+    #[test]
+    fn emulation_reduce_keeps_partial_axis_and_broadcasts_extra_dst_axis() {
+        axes![A = 4, B = 2];
+
+        let source = Tensor::<i32, m![A], Emulation>::from_buf(vec![0, 1, 2, 3]);
+
+        let result: Tensor<i32, m![A / 2, B], Emulation> = source.reduce(|a, b| a + b, 0, true);
+
+        assert_eq!(result.into_buf(), vec![1, 1, 5, 5]);
+    }
+
+    /// `write_gather` round-trip, the Emulation peer of
+    /// [`simulation_write_gather_roundtrip_scaled`].
+    #[test]
+    fn emulation_write_gather_roundtrip_scaled() {
+        axes![W = 3, V = 2, K = 4];
+
+        let table = Tensor::<i32, m![W, V], Emulation>::from_buf(vec![10, 11, 20, 21, 30, 31]);
+        let index = Tensor::<i32, m![K], Emulation>::from_buf(vec![0, 16, 8, 0]);
+        let mut output = Tensor::<i32, m![K, V], Emulation>::uninit();
+        table.gather::<_, _>(&mut output, &index, true);
+
+        assert_eq!(output.into_buf(), vec![10, 11, 30, 31, 20, 21, 10, 11]);
+    }
+
+    /// `write_scatter` round-trip: scatter rows of a `[K, V]` source into a `[W, V]` destination at
+    /// indexed positions (the inverse of the gather above).
+    #[test]
+    fn emulation_write_scatter_roundtrip_unscaled() {
+        axes![W = 3, V = 2, K = 3];
+
+        let source = Tensor::<i32, m![K, V], Emulation>::from_buf(vec![10, 11, 20, 21, 30, 31]);
+        let index = Tensor::<i32, m![K], Emulation>::from_buf(vec![2, 0, 1]);
+        let mut output = Tensor::<i32, m![W, V], Emulation>::uninit();
+        source.scatter::<m![K], _, _>(&mut output, &index, false);
+
+        // row k of source lands at row index[k]: 0→W2, 1→W0, 2→W1.
+        assert_eq!(output.into_buf(), vec![20, 21, 30, 31, 10, 11]);
     }
 }

@@ -30,7 +30,10 @@ async fn test_matmul_16384() {
     // Verify the output tensor content.
     let expected: Tensor<_, m![A, C]> =
         Tensor::<_, m![A, C]>::contraction::<m![A, B, C], _, _>(&lhs.into_inner(), &rhs.into_inner());
-    assert_eq!(expected.to_buf(), out.to_host::<m![A, C]>(&mut ctx.pdma).await.to_buf());
+    assert_eq!(
+        expected.into_buf(),
+        out.to_host::<m![A, C]>(&mut ctx.pdma).await.into_buf()
+    );
 }
 
 #[tokio::test]
@@ -56,7 +59,10 @@ async fn test_matmul_4096() {
 
     // Verify the output tensor content.
     let expected: Tensor<_, m![A]> = Tensor::contraction::<m![A, B], _, _>(&lhs.into_inner(), &rhs.into_inner());
-    assert_eq!(expected.to_buf(), out.to_host::<m![A]>(&mut ctx.pdma).await.to_buf());
+    assert_eq!(
+        expected.into_buf(),
+        out.to_host::<m![A]>(&mut ctx.pdma).await.into_buf()
+    );
 }
 
 #[tokio::test]
@@ -80,7 +86,10 @@ async fn test_matmul_wo_broadcast() {
     let out = launch(matmul_wo_broadcast, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
     let expected: Tensor<_, m![1]> = Tensor::contraction::<m![A, B], _, _>(&lhs.into_inner(), &rhs.into_inner());
-    assert_eq!(expected.to_buf(), out.to_host::<m![1]>(&mut ctx.pdma).await.to_buf());
+    assert_eq!(
+        expected.into_buf(),
+        out.to_host::<m![1]>(&mut ctx.pdma).await.into_buf()
+    );
 }
 
 #[tokio::test]
@@ -104,7 +113,10 @@ async fn test_matmul_with_split_reduce() {
     let out = launch(matmul_with_split_reduce, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
     let expected: Tensor<_, m![A]> = Tensor::contraction::<m![A, B], _, _>(&lhs.into_inner(), &rhs.into_inner());
-    assert_eq!(expected.to_buf(), out.to_host::<m![A]>(&mut ctx.pdma).await.to_buf());
+    assert_eq!(
+        expected.into_buf(),
+        out.to_host::<m![A]>(&mut ctx.pdma).await.into_buf()
+    );
 }
 
 // `to_buf_opt` is a Simulation/Typecheck-only host-side `Opt<D>` view, so this
@@ -179,7 +191,10 @@ async fn test_matmul_with_cluster_reduce() {
     // Verify the output tensor content.
     let expected: Tensor<_, m![A, C]> =
         Tensor::<_, m![A, C]>::contraction::<m![A, B, C], _, _>(&lhs.into_inner(), &rhs.into_inner());
-    assert_eq!(expected.to_buf(), out.to_host::<m![A, C]>(&mut ctx.pdma).await.to_buf());
+    assert_eq!(
+        expected.into_buf(),
+        out.to_host::<m![A, C]>(&mut ctx.pdma).await.into_buf()
+    );
 }
 
 #[tokio::test]
@@ -207,5 +222,8 @@ async fn test_matmul_with_chip_reduce() {
     // Verify the output tensor content.
     let expected: Tensor<_, m![A, C]> =
         Tensor::<_, m![A, C]>::contraction::<m![A, B, C], _, _>(&lhs.into_inner(), &rhs.into_inner());
-    assert_eq!(expected.to_buf(), out.to_host::<m![A, C]>(&mut ctx.pdma).await.to_buf());
+    assert_eq!(
+        expected.into_buf(),
+        out.to_host::<m![A, C]>(&mut ctx.pdma).await.into_buf()
+    );
 }

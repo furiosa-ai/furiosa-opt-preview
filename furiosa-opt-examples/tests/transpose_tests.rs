@@ -23,7 +23,7 @@ async fn test_transpose_simple() {
 
     let output = launch(transpose_simple, (&mut *ctx, &hbm_input)).await;
 
-    let actual = output.to_host::<m![C, A, B]>(&mut ctx.pdma).await.into_raw();
+    let actual = output.to_host::<m![C, A, B]>(&mut ctx.pdma).await.into_inner();
 
     let mut expected = vec![0f32; total];
     let mut idx = 0;
@@ -35,8 +35,5 @@ async fn test_transpose_simple() {
             }
         }
     }
-    assert_eq!(
-        actual,
-        <CurrentBackend as Backend>::RawTensor::from_buf::<m![C, A, B]>(expected)
-    );
+    assert_eq!(actual, Tensor::<_, m![C, A, B], CurrentBackend>::from_buf(expected));
 }

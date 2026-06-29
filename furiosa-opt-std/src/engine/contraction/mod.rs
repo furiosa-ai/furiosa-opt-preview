@@ -14,13 +14,17 @@ pub mod outer;
 pub mod packet;
 pub mod time;
 
+use std::marker::PhantomData;
+
 pub use lane::LaneMode;
 pub use outer::ContractOuterTensor;
 
 use furiosa_mapping::*;
 
+use crate::backend::Backend;
+use crate::constraints;
 use crate::context::*;
-use crate::runtime::{Backend, CurrentBackend};
+use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
 use crate::tensor::tu::{Position, TuTensor};
@@ -30,6 +34,15 @@ pub(crate) const TEMPORAL_ACCUMULATOR_COLS: usize = 32;
 
 /// Number of elements in the `contract_lane` output packet (`i32`/`f32`).
 pub(crate) const CONTRACT_LANE_OUT_PACKET_ELEMENTS: usize = 8;
+
+/// Asserts a reduce packet's element count is a power of two and at most
+/// [`TEMPORAL_ACCUMULATOR_COLS`] (`packet_reduce` / `time_reduce` output).
+const fn assert_packet_pow2_within_accumulator_cols(size: usize) {
+    assert!(
+        size != 0 && size & (size - 1) == 0 && size <= TEMPORAL_ACCUMULATOR_COLS,
+        "Packet element count must be a power of two and at most the accumulator column count (32)"
+    );
+}
 
 /// After the contraction engine.
 #[derive(Debug)]
@@ -78,6 +91,49 @@ pub struct ContractTimeTensor<
     pub(crate) pre_reduce_time: Mapping,
 }
 
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M, Packet: M, B: Backend>
+    ContractPacketTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
+{
+    const fn check_constraints() {
+        constraints::assert_cluster_size(Cluster::SIZE);
+        constraints::assert_slice_size(Slice::SIZE);
+        assert_packet_pow2_within_accumulator_cols(Packet::SIZE);
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn new(
+        ctx: &'l mut TuContext<{ T }>,
+        inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Pair<Lane, Pair<Time, Packet>>>>>, B>,
+    ) -> Self {
+        const { Self::check_constraints() };
+        Self { ctx, inner }
+    }
+}
+
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M, Packet: M, B: Backend>
+    ContractTimeTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
+{
+    const fn check_constraints() {
+        constraints::assert_cluster_size(Cluster::SIZE);
+        constraints::assert_slice_size(Slice::SIZE);
+        assert_packet_pow2_within_accumulator_cols(Packet::SIZE);
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn new(
+        ctx: &'l mut TuContext<{ T }>,
+        inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Pair<Lane, Pair<Time, Packet>>>>>, B>,
+        pre_reduce_time: Mapping,
+    ) -> Self {
+        const { Self::check_constraints() };
+        Self {
+            ctx,
+            inner,
+            pre_reduce_time,
+        }
+    }
+}
+
 /// The padded extent of each axis of `m` keyed by its cumulative (dividend) stride, inner-to-outer.
 ///
 /// The FMapping-free peer of the old factor walk (`stride -> padding_size/stride | resize`): on the
@@ -111,3 +167,24 @@ fn collect_axis_extents(m: &Mapping, out: &mut Vec<usize>) {
 /// Tensor streamed after the contraction engine.
 pub type ContractTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
     TuTensor<'l, { T }, PositionContraction, D, Chip, Cluster, Slice, Time, Packet, B>;
+
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    ContractTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    const fn check_constraints() {
+        constraints::assert_cluster_size(Cluster::SIZE);
+        constraints::assert_slice_size(Slice::SIZE);
+        constraints::assert_packet_one_flit(D::BITS, Packet::SIZE);
+    }
+
+    #[doc(hidden)]
+    pub fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+        const { Self::check_constraints() };
+
+        Self {
+            ctx,
+            inner,
+            _position: PhantomData,
+        }
+    }
+}

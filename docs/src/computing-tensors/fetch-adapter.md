@@ -37,7 +37,7 @@ fn fetch_mask_then_cast<'l, const T: Tu>(
 }
 #
 # let mut ctx = Context::acquire();
-# let x: BeginTensor<'_, _, i8, m![1], m![1], m![1], m![1], m![A]> = BeginTensor::new(&mut ctx.main, Tensor::uninit());
+# let x: BeginTensor<'_, _, i8, m![1], m![1], m![1], m![1], m![A]> = BeginTensor::new(&mut ctx.main, Tensor::zero());
 # let _o = fetch_mask_then_cast(x);
 ```
 
@@ -83,7 +83,7 @@ fn fetch_mask_contiguous_right<'l, const T: Tu>(
 }
 #
 # let mut ctx = Context::acquire();
-# let x: BeginTensor<'_, _, i8, m![1], m![1], m![1], m![1], m![A, B # 96]> = BeginTensor::new(&mut ctx.main, Tensor::uninit());
+# let x: BeginTensor<'_, _, i8, m![1], m![1], m![1], m![1], m![A, B # 96]> = BeginTensor::new(&mut ctx.main, Tensor::zero());
 # let _o = fetch_mask_contiguous_right(x);
 ```
 
@@ -133,7 +133,7 @@ fn fetch_mask_split_right<'l, const T: Tu>(
 }
 #
 # let mut ctx = Context::acquire();
-# let x: BeginTensor<'_, _, i8, m![1], m![1], m![1], m![1], m![A, B # 96]> = BeginTensor::new(&mut ctx.main, Tensor::uninit());
+# let x: BeginTensor<'_, _, i8, m![1], m![1], m![1], m![1], m![A, B # 96]> = BeginTensor::new(&mut ctx.main, Tensor::zero());
 # let _o = fetch_mask_split_right(x);
 ```
 
@@ -184,7 +184,7 @@ fn fetch_mask_variable_per_chunk<'l, const T: Tu>(
 }
 #
 # let mut ctx = Context::acquire();
-# let x: BeginTensor<'_, _, f32, m![1], m![1], m![1], m![1], m![A, B # 128]> = BeginTensor::new(&mut ctx.main, Tensor::uninit());
+# let x: BeginTensor<'_, _, f32, m![1], m![1], m![1], m![1], m![A, B # 128]> = BeginTensor::new(&mut ctx.main, Tensor::zero());
 # let _o = fetch_mask_variable_per_chunk(x);
 ```
 
@@ -395,7 +395,7 @@ fn fetch_with_type_cast<'l, const T: Tu>(
 }
 #
 # let mut ctx = Context::acquire();
-# let x: BeginTensor<'_, _, i8, m![1], m![1], m![1], m![1], m![A]> = BeginTensor::new(&mut ctx.main, Tensor::uninit());
+# let x: BeginTensor<'_, _, i8, m![1], m![1], m![1], m![1], m![A]> = BeginTensor::new(&mut ctx.main, Tensor::zero());
 # let _o = fetch_with_type_cast(x);
 ```
 

@@ -106,8 +106,8 @@ pub fn device_send(input: TokenStream) -> TokenStream {
         tys.iter()
             .map(|ty| {
                 quote! {
-                    ::std::vec::Vec<::furiosa_opt_std::runtime::npu::Buffer>:
-                        ::furiosa_opt_std::runtime::npu::ExtendBuffers<#ty>
+                    ::std::vec::Vec<::furiosa_opt_std::backend::npu::Buffer>:
+                        ::furiosa_opt_std::backend::npu::ExtendBuffers<#ty>
                 }
             })
             .collect(),
@@ -119,14 +119,14 @@ pub fn device_send(input: TokenStream) -> TokenStream {
 
         // Flatten fields into buffers in declaration order (must match the compiler's
         // parameter lowering).
-        impl #impl_generics ::furiosa_opt_std::runtime::npu::ExtendBuffers<#name #ty_generics>
-            for ::std::vec::Vec<::furiosa_opt_std::runtime::npu::Buffer>
+        impl #impl_generics ::furiosa_opt_std::backend::npu::ExtendBuffers<#name #ty_generics>
+            for ::std::vec::Vec<::furiosa_opt_std::backend::npu::Buffer>
         #bufferable
         {
             fn extend<__I: ::core::iter::IntoIterator<Item = #name #ty_generics>>(&mut self, iter: __I) {
                 for value in iter {
                     #(
-                        ::furiosa_opt_std::runtime::npu::ExtendBuffers::extend(
+                        ::furiosa_opt_std::backend::npu::ExtendBuffers::extend(
                             self,
                             ::core::iter::once(value.#accessors),
                         );
@@ -164,8 +164,8 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
             .and_then(|(_, v)| v.trim().parse().ok())
             .unwrap_or(default)
     };
-    let device_chip = attr_int("chip", 1);
-    let device_pe = attr_int("pe", 8);
+    let device_chip = attr_int("chip", 1) as u8;
+    let device_pe = attr_int("pe", 8) as u8;
     let func = match parse_macro_input!(item as Item) {
         Item::Fn(f) => f,
         other => {
@@ -230,9 +230,9 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
         .collect();
 
     let tensor_stmts: TokenStream2 = quote! {
-        let mut __furiosa_opt_bufs: ::std::vec::Vec<furiosa_opt_std::runtime::npu::Buffer> =
+        let mut __furiosa_opt_bufs: ::std::vec::Vec<furiosa_opt_std::backend::npu::Buffer> =
             ::std::vec::Vec::new();
-        furiosa_opt_std::runtime::npu::ExtendBuffers::extend(
+        furiosa_opt_std::backend::npu::ExtendBuffers::extend(
             &mut __furiosa_opt_bufs,
             ::std::iter::once((#(#tensor_param_names,)*)),
         );
@@ -277,17 +277,16 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let npu_body = quote! {
-        furiosa_opt_std::runtime::npu::set_device(#device_chip, #device_pe);
-        static __FURIOSA_OPT_KERNEL: furiosa_opt_std::OnceCell<furiosa_opt_std::runtime::npu::Kernel> =
+        static __FURIOSA_OPT_KERNEL: furiosa_opt_std::OnceCell<furiosa_opt_std::backend::npu::Kernel> =
             furiosa_opt_std::OnceCell::const_new();
         let __furiosa_opt_kernel = __FURIOSA_OPT_KERNEL.get_or_init(|| async {
-            let __furiosa_opt_path = furiosa_opt_std::runtime::npu::kernel_path(
+            let __furiosa_opt_path = furiosa_opt_std::backend::npu::kernel_path(
                 env!("FURIOSA_OPT_OUT_DIR"),
                 env!("CARGO_PKG_NAME"),
                 module_path!(),
                 #name_str,
             );
-            furiosa_opt_std::runtime::npu::Kernel::load(&__furiosa_opt_path).await
+            furiosa_opt_std::backend::npu::Kernel::load(&__furiosa_opt_path).await
         }).await;
         #tensor_stmts
         #run_body
@@ -310,6 +309,14 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
         // names like `MatMul`.
         #[allow(non_upper_case_globals)]
         #vis const #name: #struct_name = #struct_name;
+
+        impl #struct_name {
+            /// The logical [`furiosa_opt_std::Device`] this kernel runs on, from `#[device(chip, pe)]`.
+            /// Pass to `Context::acquire().bind(..)` before any host I/O.
+            pub fn device(&self) -> furiosa_opt_std::Device {
+                furiosa_opt_std::Device { chip: #device_chip, pe: #device_pe }
+            }
+        }
 
         impl #generics furiosa_opt_std::runtime::DeviceFn<#tuple_type> for #struct_name {
             type Output = #return_ty;

@@ -41,13 +41,13 @@ async fn test_scatter_minimal() {
 
     launch(scatter_minimal, (&mut *ctx, &data, &index, &mut output)).await;
 
-    let actual = output.to_host::<m![C, D]>(&mut ctx.pdma).await.to_buf();
+    let actual = output.to_host::<m![C, D]>(&mut ctx.pdma).await.into_buf();
     let expected = Tensor::<bf16, m![C, D]>::from_buf(
         (0..<m![C, D]>::SIZE)
             .map(|i| bf16::from_f32(if i < <m![K, D]>::SIZE { (i + 1) as f32 } else { 0.0 }))
             .collect::<Vec<_>>(),
     )
-    .to_buf();
+    .into_buf();
 
     assert_eq!(actual, expected);
 }

@@ -13,14 +13,19 @@
 //! - `commit_cast::<OutD>(Activation)` → `CommitCastTensor` (main; ReLU only ever fuses into the cast)
 //! - `commit_valid_count_pack(count)` → `CommitValidCountPackTensor` (sub)
 
+use std::marker::PhantomData;
+
 use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
 
+use crate::backend::Backend;
 use crate::cast::Cast;
+use crate::constraints;
 use crate::context::*;
 use crate::engine::{CanApplyCommitCast, CanApplyCommitTrim, CanApplyCommitValidCountPack};
-use crate::runtime::{Backend, CurrentBackend};
+use crate::runtime::CurrentBackend;
 use crate::scalar::*;
+use crate::tensor::Tensor;
 use crate::tensor::tu::{Position, TuTensor};
 
 pub(super) use furiosa_opt_lower::COMMIT_VALID_PACKET_SIZES;
@@ -47,6 +52,27 @@ impl Position for PositionCommitTrim {}
 pub type CommitTrimTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
     TuTensor<'l, { T }, PositionCommitTrim, D, Chip, Cluster, Slice, Time, Packet, B>;
 
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    CommitTrimTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    const fn check_constraints() {
+        constraints::assert_cluster_size(Cluster::SIZE);
+        constraints::assert_slice_size(Slice::SIZE);
+        constraints::assert_packet_aligned_by_access_width_max_flit(D::BITS, Packet::SIZE);
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+        const { Self::check_constraints() };
+
+        Self {
+            ctx,
+            inner,
+            _position: PhantomData,
+        }
+    }
+}
+
 /// After the Commit Adapter's type-casting stage.
 #[derive(Debug)]
 pub struct PositionCommitCast;
@@ -57,6 +83,26 @@ impl Position for PositionCommitCast {}
 pub type CommitCastTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
     TuTensor<'l, { T }, PositionCommitCast, D, Chip, Cluster, Slice, Time, Packet, B>;
 
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    CommitCastTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    const fn check_constraints() {
+        constraints::assert_cluster_size(Cluster::SIZE);
+        constraints::assert_slice_size(Slice::SIZE);
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+        const { Self::check_constraints() };
+
+        Self {
+            ctx,
+            inner,
+            _position: PhantomData,
+        }
+    }
+}
+
 /// After the Commit Adapter's valid-count-packing stage.
 #[derive(Debug)]
 pub struct PositionCommitValidCountPack;
@@ -66,6 +112,26 @@ impl Position for PositionCommitValidCountPack {}
 /// Tensor streamed after `commit_valid_count_pack`.
 pub type CommitValidCountPackTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
     TuTensor<'l, { T }, PositionCommitValidCountPack, D, Chip, Cluster, Slice, Time, Packet, B>;
+
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    CommitValidCountPackTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    const fn check_constraints() {
+        constraints::assert_cluster_size(Cluster::SIZE);
+        constraints::assert_slice_size(Slice::SIZE);
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+        const { Self::check_constraints() };
+
+        Self {
+            ctx,
+            inner,
+            _position: PhantomData,
+        }
+    }
+}
 
 // ANCHOR: commit_trim_impl
 impl<'l, const T: Tu, P: CanApplyCommitTrim, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
@@ -106,7 +172,7 @@ impl<'l, const T: Tu, P: CanApplyCommitCast, D: Scalar, Chip: M, Cluster: M, Sli
         D: Cast<OutD>,
     {
         verify_commit_cast::<D, OutD>();
-        CommitCastTensor::new(self.ctx, self.inner.map(|v| v.map(|v| v.cast())))
+        CommitCastTensor::new(self.ctx, self.inner.map(|v| v.cast()))
     }
 }
 // ANCHOR_END: commit_cast_impl

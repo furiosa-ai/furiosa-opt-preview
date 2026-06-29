@@ -33,7 +33,6 @@ mod alignment {
 
         launch(aligned_fetch_packet_i4, (&mut *ctx, &input, &mut output)).await;
     }
-
     #[tokio::test]
     async fn test_aligned_fetch_packet_i8() {
         let mut ctx = Context::acquire();
@@ -47,7 +46,6 @@ mod alignment {
 
         launch(aligned_fetch_packet_i8, (&mut *ctx, &input, &mut output)).await;
     }
-
     #[tokio::test]
     async fn test_aligned_fetch_packet_bf16() {
         let mut ctx = Context::acquire();

@@ -1,7 +1,7 @@
 //! Pseudo tensor types used by the docs to explain the common buffer-stream pattern shared by Fetch, Commit, and DMA engines.
 //!
 //! These types do not correspond to any concrete hardware tensor.
-//! They exist so the sequencer documentation can use real source-anchored types instead of duplicating a hidden `# struct BufTensor` boilerplate in every code block.
+//! They exist so the sequencer documentation can use real source-anchored types instead of duplicating a hidden `# struct MemTensor` boilerplate in every code block.
 //!
 //! The bodies of `read` / `write` move data by transposing the underlying [`Tensor`] between `Buf` and `(Time, Packet)`.
 //! `read` produces a `StreamTensor` whose values are the buffer's values reordered into `(Time, Packet)` iteration order (broadcast allowed, matching Fetch / Switch / DMA-read).
@@ -20,7 +20,7 @@ use crate::tensor::Tensor;
 /// A generic buffer-backed tensor.
 /// Anything that holds data in a memory `Buf` and can be streamed in or out.
 #[derive(Debug)]
-pub struct BufTensor<D: Scalar, Buf: M> {
+pub struct MemTensor<D: Scalar, Buf: M> {
     inner: Tensor<D, Buf>,
 }
 // ANCHOR_END: buf_tensor_def
@@ -36,7 +36,7 @@ pub struct StreamTensor<'l, D: Scalar, Time: M, Packet: M> {
 // ANCHOR_END: stream_tensor_def
 
 // ANCHOR: buf_tensor_read_write
-impl<D: Scalar, Buf: M> BufTensor<D, Buf> {
+impl<D: Scalar, Buf: M> MemTensor<D, Buf> {
     /// Reads a stream from this buffer with the supplied `Time` and `Packet` mapping.
     /// `(Time, Packet)` may be a broadcast of `Buf` (matches Fetch / Switch / DMA-read behavior).
     pub fn read<'l, Time: M, Packet: M>(&'l self) -> StreamTensor<'l, D, Time, Packet> {
@@ -54,8 +54,8 @@ impl<D: Scalar, Buf: M> BufTensor<D, Buf> {
 }
 // ANCHOR_END: buf_tensor_read_write
 
-impl<D: Scalar, Buf: M> BufTensor<D, Buf> {
-    /// Constructs a `BufTensor` from a flat buffer in `Buf`-order.
+impl<D: Scalar, Buf: M> MemTensor<D, Buf> {
+    /// Constructs a `MemTensor` from a flat buffer in `Buf`-order.
     /// Mirrors [`Tensor::from_buf`].
     pub fn from_buf(data: impl IntoIterator<Item = D>) -> Self {
         Self {
@@ -63,18 +63,18 @@ impl<D: Scalar, Buf: M> BufTensor<D, Buf> {
         }
     }
 
-    /// Returns the underlying buffer as a flat `Vec<D>` in `Buf`-order.
-    /// Mirrors [`Tensor::to_buf`].
-    pub fn to_buf(&self) -> Vec<D> {
-        self.inner.to_buf()
+    /// Returns the underlying buffer as a flat `Vec<D>` in `Buf`-order, consuming the buffer.
+    /// Mirrors [`Tensor::into_buf`].
+    pub fn into_buf(self) -> Vec<D> {
+        self.inner.into_buf()
     }
 }
 
 impl<'l, D: Scalar, Time: M, Packet: M> StreamTensor<'l, D, Time, Packet> {
-    /// Returns the stream contents as a flat `Vec<D>` in `(Time, Packet)`-order.
-    /// Mirrors [`Tensor::to_buf`].
-    pub fn to_buf(&self) -> Vec<D> {
-        self.inner.to_buf()
+    /// Returns the stream contents as a flat `Vec<D>` in `(Time, Packet)`-order, consuming the stream.
+    /// Mirrors [`Tensor::into_buf`].
+    pub fn into_buf(self) -> Vec<D> {
+        self.inner.into_buf()
     }
 }
 
@@ -87,12 +87,12 @@ mod tests {
     fn read_identity_preserves_order() {
         axes![A = 2, B = 3];
 
-        let buf = BufTensor::<i32, m![A, B]>::from_buf(vec![10, 11, 12, 20, 21, 22]);
+        let buf = MemTensor::<i32, m![A, B]>::from_buf(vec![10, 11, 12, 20, 21, 22]);
         let stream = buf.read::<m![A], m![B]>();
 
         assert_eq!(
-            stream.to_buf(),
-            Tensor::<i32, m![A, B]>::from_buf(vec![10, 11, 12, 20, 21, 22]).to_buf()
+            stream.into_buf(),
+            Tensor::<i32, m![A, B]>::from_buf(vec![10, 11, 12, 20, 21, 22]).into_buf()
         );
     }
 
@@ -102,14 +102,14 @@ mod tests {
         axes![A = 2, B = 3];
 
         // buf in [A, B]-order: A=0 row, then A=1 row.
-        let buf = BufTensor::<i32, m![A, B]>::from_buf(vec![10, 11, 12, 20, 21, 22]);
+        let buf = MemTensor::<i32, m![A, B]>::from_buf(vec![10, 11, 12, 20, 21, 22]);
 
         // stream in [B, A]-order: B=0 column, then B=1 column, then B=2 column.
         let stream = buf.read::<m![B], m![A]>();
 
         assert_eq!(
-            stream.to_buf(),
-            Tensor::<i32, m![A, B]>::from_buf(vec![10, 20, 11, 21, 12, 22]).to_buf()
+            stream.into_buf(),
+            Tensor::<i32, m![A, B]>::from_buf(vec![10, 20, 11, 21, 12, 22]).into_buf()
         );
     }
 
@@ -119,14 +119,14 @@ mod tests {
         axes![A = 2, B = 3];
 
         let original = vec![10, 11, 12, 20, 21, 22];
-        let buf = BufTensor::<i32, m![A, B]>::from_buf(original.clone());
+        let buf = MemTensor::<i32, m![A, B]>::from_buf(original.clone());
 
         let stream = buf.read::<m![B], m![A]>();
 
-        let mut sink = BufTensor::<i32, m![A, B]>::from_buf(vec![0; 6]);
+        let mut sink = MemTensor::<i32, m![A, B]>::from_buf(vec![0; 6]);
         sink.write(stream);
 
-        assert_eq!(sink.to_buf(), Tensor::<i32, m![A, B]>::from_buf(original).to_buf());
+        assert_eq!(sink.into_buf(), Tensor::<i32, m![A, B]>::from_buf(original).into_buf());
     }
 
     /// Axis split read: `m![A % 2, A / 2]` reads `A`'s low bit then high bit.
@@ -135,12 +135,12 @@ mod tests {
         axes![A = 4];
 
         // A=[0, 1, 2, 3]. A % 2 outer, A / 2 inner visits: (0,0)=0, (0,1)=2, (1,0)=1, (1,1)=3.
-        let buf = BufTensor::<i32, m![A]>::from_buf(vec![0, 1, 2, 3]);
+        let buf = MemTensor::<i32, m![A]>::from_buf(vec![0, 1, 2, 3]);
         let stream = buf.read::<m![A % 2], m![A / 2]>();
 
         assert_eq!(
-            stream.to_buf(),
-            Tensor::<i32, m![A]>::from_buf(vec![0, 2, 1, 3]).to_buf()
+            stream.into_buf(),
+            Tensor::<i32, m![A]>::from_buf(vec![0, 2, 1, 3]).into_buf()
         );
     }
 }

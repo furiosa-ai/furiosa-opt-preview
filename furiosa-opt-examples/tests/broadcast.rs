@@ -13,12 +13,12 @@ async fn test_view_broadcast() {
     let output = hbm2.to_host::<m![A, B]>(&mut ctx.pdma).await;
 
     assert_eq!(
-        output.to_buf(),
+        output.into_buf(),
         Tensor::<i32, m![A, B]>::from_buf(
             (0..<m![A]>::SIZE as i32)
                 .flat_map(|x| [x; <m![B]>::SIZE])
                 .collect::<Vec<_>>(),
         )
-        .to_buf()
+        .into_buf()
     );
 }

@@ -10,12 +10,16 @@
 
 use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
+use std::marker::PhantomData;
 
+use crate::backend::Backend;
+use crate::constraints;
 use crate::context::*;
 use crate::engine::vector::scalar::VeScalar;
 use crate::engine::{CanApplyCollect, CanApplyToTrf, CanApplyToVrf, FLIT_BYTES, align_up, exact_div};
-use crate::runtime::{Backend, CurrentBackend};
+use crate::runtime::CurrentBackend;
 use crate::scalar::*;
+use crate::tensor::Tensor;
 use crate::tensor::memory::{Address, TrfAddress, TrfTensor, VrfTensor};
 use crate::tensor::tu::{Position, TuTensor};
 
@@ -28,6 +32,27 @@ impl Position for PositionCollect {}
 /// Tensor after collect engine: packet is exactly 32 bytes (one flit).
 pub type CollectTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
     TuTensor<'l, { T }, PositionCollect, D, Chip, Cluster, Slice, Time, Packet, B>;
+
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    CollectTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    const fn check_constraints() {
+        constraints::assert_cluster_size(Cluster::SIZE);
+        constraints::assert_slice_size(Slice::SIZE);
+        constraints::assert_packet_one_flit(D::BITS, Packet::SIZE);
+    }
+
+    #[doc(hidden)]
+    pub fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+        const { Self::check_constraints() };
+
+        Self {
+            ctx,
+            inner,
+            _position: PhantomData,
+        }
+    }
+}
 
 // ANCHOR: collect_impl
 impl<'l, const T: Tu, P: CanApplyCollect, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
@@ -52,12 +77,19 @@ impl<'l, const T: Tu, P: CanApplyToTrf, D: Scalar, Chip: M, Cluster: M, Slice: M
 {
     /// Stores to the tensor register file.
     #[primitive(TuTensor::to_trf)]
-    pub fn to_trf<Lane: M, Element: M>(
+    pub fn to_trf<Lane: M, Element: M>(self) -> TrfTensor<D, Chip, Cluster, Slice, Lane, Element, B> {
+        verify_to_trf::<D, Lane, Time, Packet, Element>(&TrfAddress::Full);
+        TrfTensor::new(self.inner.transpose(false), None)
+    }
+
+    /// Stores to the tensor register file at `address`.
+    #[primitive(TuTensor::to_trf_at)]
+    pub fn to_trf_at<Lane: M, Element: M>(
         self,
         address: TrfAddress,
     ) -> TrfTensor<D, Chip, Cluster, Slice, Lane, Element, B> {
         verify_to_trf::<D, Lane, Time, Packet, Element>(&address);
-        TrfTensor::new(self.inner.transpose(false), address)
+        TrfTensor::new(self.inner.transpose(false), Some(address))
     }
 }
 // ANCHOR_END: collect_to_trf
@@ -68,8 +100,14 @@ impl<'l, const T: Tu, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice:
 {
     /// Stores to the vector register file.
     #[primitive(TuTensor::to_vrf)]
-    pub fn to_vrf<Element: M>(self, address: Address) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
-        VrfTensor::new(self.inner.transpose(false), address)
+    pub fn to_vrf<Element: M>(self) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
+        VrfTensor::new(self.inner.transpose(false), None)
+    }
+
+    /// Stores to the vector register file at `address`.
+    #[primitive(TuTensor::to_vrf_at)]
+    pub fn to_vrf_at<Element: M>(self, address: Address) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
+        VrfTensor::new(self.inner.transpose(false), Some(address))
     }
 }
 // ANCHOR_END: collect_to_vrf

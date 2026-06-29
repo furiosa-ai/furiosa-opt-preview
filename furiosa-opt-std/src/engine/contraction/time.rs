@@ -5,9 +5,9 @@ use furiosa_mapping::*;
 use furiosa_opt_lower::{DivideTerm, config_divide_exact};
 use furiosa_opt_macro::primitive;
 
+use crate::backend::Backend;
 use crate::context::*;
 use crate::engine::contraction::{ContractPacketTensor, ContractTimeTensor, padding_per_stride};
-use crate::runtime::Backend;
 use crate::scalar::*;
 
 // ANCHOR: contract_time_def
@@ -22,11 +22,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M
         self,
     ) -> ContractTimeTensor<'l, T, D, Chip, Cluster, Slice, Lane, OutTime, Packet, B> {
         verify_contract_time(Time::to_value(), OutTime::to_value());
-        ContractTimeTensor {
-            ctx: self.ctx,
-            inner: self.inner.reduce_add(),
-            pre_reduce_time: Time::to_value(),
-        }
+        ContractTimeTensor::new(self.ctx, self.inner.reduce_add(), Time::to_value())
     }
 }
 // ANCHOR_END: contract_time_def

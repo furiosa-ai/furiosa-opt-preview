@@ -1,22 +1,14 @@
-//! Runtime for dispatching device functions to CPU or device.
-
-pub(crate) mod backend;
-pub(crate) mod op_prep;
-
-mod emulation;
-/// NPU backend.
-pub mod npu;
-mod simulation;
-mod typecheck;
+//! Device-function execution runtime: [`launch`] dispatches a [`DeviceFn`] over its arguments,
+//! [`DeviceSend`] marks the types that may cross to a device function, and [`TupleApply`] adapts
+//! tuple arguments to positional calls. This layer sits above the [`crate::backend`] abstraction
+//! and drives it.
 
 use cfg_if::cfg_if;
 
-pub use backend::Backend;
-pub use emulation::Emulation;
-pub use simulation::Simulation;
-pub use typecheck::Typecheck;
-
-pub use npu::Npu;
+// Only the cfg-selected backend below is named in the active build; the others are referenced
+// solely by inactive `cfg_if` branches.
+#[allow(unused_imports)]
+use crate::backend::{Emulation, Npu, Simulation, Typecheck};
 
 cfg_if! {
     if #[cfg(backend = "simulation")] {

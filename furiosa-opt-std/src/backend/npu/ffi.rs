@@ -13,6 +13,8 @@ pub(crate) use bindings::*;
 
 use std::sync::{LazyLock, OnceLock};
 
+use crate::context::Device;
+
 pub(crate) fn lib() -> &'static DeviceRuntime {
     static LIB: LazyLock<DeviceRuntime> = LazyLock::new(|| {
         let lib = unsafe { DeviceRuntime::new(env!("DEVICE_RUNTIME_SO")) }
@@ -31,7 +33,7 @@ pub(crate) fn rt() -> *const Runtime {
 
     static RT: OnceLock<Handle> = OnceLock::new();
     RT.get_or_init(|| {
-        let (chips, pes) = *DEVICE.get_or_init(|| (1, 8));
+        let Device { chip: chips, pe: pes } = *DEVICE.get_or_init(|| Device { chip: 1, pe: 8 });
         let npus: Vec<NpuDesc> = (0..chips)
             .flat_map(|chip| match pes {
                 8 => vec![
@@ -60,11 +62,14 @@ pub(crate) fn rt() -> *const Runtime {
     .0
 }
 
-static DEVICE: OnceLock<(u8, u8)> = OnceLock::new();
+static DEVICE: OnceLock<Device> = OnceLock::new();
 
-/// Sets the `#[device(chip, pe)]` the process runs on. First call wins; a conflicting one panics.
-pub fn set_device(chip: usize, pe: usize) {
-    let dev = (chip as u8, pe as u8);
-    let cur = *DEVICE.get_or_init(|| dev);
-    assert_eq!(cur, dev, "conflicting NPU device in one process: {cur:?} vs {dev:?}");
+/// Binds the `#[device(chip, pe)]` the process runs on, via `Context::acquire().bind(..)`.
+/// First bind wins; a conflicting one panics.
+pub(crate) fn bind_device(device: Device) {
+    let cur = *DEVICE.get_or_init(|| device);
+    assert_eq!(
+        cur, device,
+        "conflicting NPU device in one process: {cur:?} vs {device:?}"
+    );
 }

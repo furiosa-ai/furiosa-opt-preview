@@ -19,7 +19,7 @@ pub use furiosa_mapping_macro::{axes, m};
 
 use abi_stable::{
     StableAbi,
-    std_types::{RBox, RResult, RVec},
+    std_types::{RBox, ROption, RResult, RVec},
 };
 use std::fmt::{self, Display, Formatter};
 
@@ -197,7 +197,7 @@ pub enum Mapping {
 impl Mapping {
     /// The identity mapping (size 1), the unit of `pair`.
     pub const fn identity() -> Self {
-        Mapping::Broadcast { size: 1 }
+        Self::Broadcast { size: 1 }
     }
 
     /// Pairs two mappings, dropping an identity operand rather than nesting it (`[1, X] == X`).
@@ -221,13 +221,13 @@ impl Mapping {
     /// even though it is not a valid `from_mapping` INPUT.
     pub fn size(&self) -> usize {
         match self {
-            Mapping::Symbol { size, .. } => *size,
-            Mapping::Stride { inner, stride } => inner.size() / stride,
-            Mapping::Modulo { modulo, .. } => *modulo,
-            Mapping::Resize { resize, .. } => *resize,
-            Mapping::Padding { padding, .. } => *padding,
-            Mapping::Pair { left, right } => left.size() * right.size(),
-            Mapping::Broadcast { size } => *size,
+            Self::Symbol { size, .. } => *size,
+            Self::Stride { inner, stride } => inner.size() / stride,
+            Self::Modulo { modulo, .. } => *modulo,
+            Self::Resize { resize, .. } => *resize,
+            Self::Padding { padding, .. } => *padding,
+            Self::Pair { left, right } => left.size() * right.size(),
+            Self::Broadcast { size } => *size,
         }
     }
 
@@ -238,15 +238,15 @@ impl Mapping {
     /// `Zero` pad (unwritten zeros) and a `Broadcast` of more than one (cells the write never reached).
     pub fn consumed(&self, mode: SequencerMode) -> bool {
         match self {
-            Mapping::Symbol { .. } => false,
-            Mapping::Broadcast { size } => mode == SequencerMode::Read || *size == 1,
-            Mapping::Padding { inner, kind, .. } => {
-                (mode != SequencerMode::Write || *kind != PaddingKind::Zero) && inner.consumed(mode)
+            Self::Symbol { .. } => false,
+            Self::Broadcast { size } => mode.carving() == CarvingMode::Read || *size == 1,
+            Self::Padding { inner, kind, .. } => {
+                (mode.carving() == CarvingMode::Read || *kind != PaddingKind::Zero) && inner.consumed(mode)
             }
-            Mapping::Stride { inner, .. } | Mapping::Modulo { inner, .. } | Mapping::Resize { inner, .. } => {
+            Self::Stride { inner, .. } | Self::Modulo { inner, .. } | Self::Resize { inner, .. } => {
                 inner.consumed(mode)
             }
-            Mapping::Pair { left, right } => left.consumed(mode) && right.consumed(mode),
+            Self::Pair { left, right } => left.consumed(mode) && right.consumed(mode),
         }
     }
 
@@ -357,13 +357,13 @@ impl Mapping {
     /// broadcast is the identity).
     fn has_live(&self) -> bool {
         match self {
-            Mapping::Symbol { .. } => true,
-            Mapping::Broadcast { size } => *size > 1,
-            Mapping::Stride { inner, .. }
-            | Mapping::Modulo { inner, .. }
-            | Mapping::Resize { inner, .. }
-            | Mapping::Padding { inner, .. } => inner.has_live(),
-            Mapping::Pair { left, right } => left.has_live() || right.has_live(),
+            Self::Symbol { .. } => true,
+            Self::Broadcast { size } => *size > 1,
+            Self::Stride { inner, .. }
+            | Self::Modulo { inner, .. }
+            | Self::Resize { inner, .. }
+            | Self::Padding { inner, .. } => inner.has_live(),
+            Self::Pair { left, right } => left.has_live() || right.has_live(),
         }
     }
 
@@ -376,17 +376,17 @@ impl Mapping {
 
     fn collect_idents(&self, out: &mut Vec<Ident>) {
         match self {
-            Mapping::Symbol { symbol, .. } => {
+            Self::Symbol { symbol, .. } => {
                 if !out.contains(symbol) {
                     out.push(*symbol);
                 }
             }
-            Mapping::Broadcast { .. } => {}
-            Mapping::Stride { inner, .. }
-            | Mapping::Modulo { inner, .. }
-            | Mapping::Resize { inner, .. }
-            | Mapping::Padding { inner, .. } => inner.collect_idents(out),
-            Mapping::Pair { left, right } => {
+            Self::Broadcast { .. } => {}
+            Self::Stride { inner, .. }
+            | Self::Modulo { inner, .. }
+            | Self::Resize { inner, .. }
+            | Self::Padding { inner, .. } => inner.collect_idents(out),
+            Self::Pair { left, right } => {
                 left.collect_idents(out);
                 right.collect_idents(out);
             }
@@ -616,8 +616,8 @@ impl Atom {
     /// The atom's live size.
     pub fn size(&self) -> usize {
         match self {
-            Atom::Symbol { size, .. } => *size,
-            Atom::Composite(inner) => inner.size(),
+            Self::Symbol { size, .. } => *size,
+            Self::Composite(inner) => inner.size(),
         }
     }
 }
@@ -655,6 +655,38 @@ impl Mapping {
     /// Builds a mapping from axis [`Term`]s, the inverse of finalize's terms.
     pub fn from_terms(terms: impl IntoIterator<Item = Term>) -> Self {
         Self::pairs(terms.into_iter().map(|t| t.to_mapping()))
+    }
+}
+
+/// A [`Term`] guaranteed to be a resolved symbol axis (never a composite): `symbol / stride % modulo`.
+/// The element type of `MappingExt::axes` and the `axes` a `MappingIter` is projected onto, produced
+/// by the impl crate's `resolve`. Encoding "the composites are decoded away" as a type, rather than
+/// re-checking it at every axis consumer, is the point: there is no composite case to guard.
+#[repr(C)]
+#[derive(StableAbi, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AxisTerm {
+    /// The axis symbol.
+    pub symbol: Ident,
+    /// The symbol's declared size.
+    pub size: usize,
+    /// Stride.
+    pub stride: usize,
+    /// Modulo.
+    pub modulo: usize,
+}
+
+impl AxisTerm {
+    /// As a full [`Term`] (an `Atom::Symbol`), for the places that rebuild a `Mapping` from an axis
+    /// (via [`Mapping::from_terms`]).
+    pub fn to_term(self) -> Term {
+        Term {
+            inner: Atom::Symbol {
+                symbol: self.symbol,
+                size: self.size,
+            },
+            stride: self.stride,
+            modulo: self.modulo,
+        }
     }
 }
 
@@ -746,15 +778,43 @@ pub enum SequencerMode {
     Read,
     /// Stream writes to memory (each memory cell is written exactly once).
     Write,
+    /// A read carve ([`MappingExt::carve`]) that also tolerates a `Bottom` pad in the stream (a
+    /// `view_mut` hole, read as a `Top` don't-care). TRANSIENT (PROG-480): a stopgap until the sequencer
+    /// can carve the broadcast from the memory leftover (see `read_carved_down_memory_keeps_broadcast_term`),
+    /// at which point this mode can be retired.
+    Carve,
 }
 
 impl SequencerMode {
-    /// The pad kind an unbacked memory gap reads or writes as (the default fill):
-    /// `Top` (don't-care) for Read, `Bottom` (inaccessible) for Write.
+    /// The two-valued carving direction the matcher branches on; `Carve` shares `Read`'s.
+    pub const fn carving(self) -> CarvingMode {
+        match self {
+            SequencerMode::Read | SequencerMode::Carve => CarvingMode::Read,
+            SequencerMode::Write => CarvingMode::Write,
+        }
+    }
+
+    /// The pad kind an unbacked memory gap reads or writes as: delegates to [`CarvingMode::gap_kind`].
+    pub const fn gap_kind(self) -> PaddingKind {
+        self.carving().gap_kind()
+    }
+}
+
+/// The two-valued carving direction the matcher branches on, projected from [`SequencerMode::carving`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarvingMode {
+    /// Stream reads from memory: `memory ⊑ stream`, unmatched stream segments broadcast, gap = `Top`.
+    Read,
+    /// Stream writes to memory: `stream ⊑ memory`, every cell written once, gap = `Bottom`.
+    Write,
+}
+
+impl CarvingMode {
+    /// The default fill for an unbacked memory gap: `Top` (don't-care) for read, `Bottom` for write.
     pub const fn gap_kind(self) -> PaddingKind {
         match self {
-            SequencerMode::Read => PaddingKind::Top,
-            SequencerMode::Write => PaddingKind::Bottom,
+            Self::Read => PaddingKind::Top,
+            Self::Write => PaddingKind::Bottom,
         }
     }
 }
@@ -795,3 +855,193 @@ pub struct SequencerEntry {
 #[repr(C)]
 #[derive(StableAbi, Debug, Clone, PartialEq, Eq)]
 pub struct SequencerConfig(pub RSortedMap<usize, SequencerEntry>);
+
+impl SequencerConfig {
+    /// Walks the entries (innermost-first) yielding, for each stream position `0..stream_size`, the
+    /// memory offset `Σ digitᵢ · memory_strideᵢ`. The stream position is the mixed-radix counter
+    /// over the entry sizes (`entry.mapping.size()`), so the result is indexed by stream (output)
+    /// buffer position. Pure arithmetic over the sequencer structure: no per-cell index decode /
+    /// `finalize`.
+    pub fn buffer_offsets(&self) -> impl Iterator<Item = usize> {
+        let entries: Vec<(usize, usize)> = self
+            .0
+            .iter()
+            .map(|(_, e)| (e.mapping.size(), e.memory_stride))
+            .collect();
+        let total: usize = entries.iter().map(|(size, _)| size).product();
+        // Lazy mixed-radix odometer: `digit` is the per-entry counter (innermost-first). Rather than
+        // recompute `Σ digitᵢ · memory_strideᵢ` each step (O(entries)), keep a running `offset` and
+        // apply only the delta of the advancing odometer (O(1) amortized): the incremented digit adds
+        // its stride; each wrapping digit (size-1 → 0) subtracts what it contributed. No `Vec` of
+        // offsets is materialized.
+        let mut digit = vec![0usize; entries.len()];
+        let mut offset = 0usize;
+        (0..total).map(move |_| {
+            let current = offset;
+            for (i, (size, stride)) in entries.iter().enumerate() {
+                if digit[i] + 1 < *size {
+                    digit[i] += 1;
+                    offset += stride;
+                    break;
+                }
+                offset -= digit[i] * stride; // digit[i] == size - 1 here: undo its contribution
+                digit[i] = 0;
+            }
+            current
+        })
+    }
+}
+
+/// One segment of a [`MappingIter`]: the range its digit takes, and how stepping it moves the offset.
+/// Hidden: a construction detail the impl crate fills in via [`MappingIter::new`]; consumers only walk
+/// the finished iterator.
+#[doc(hidden)]
+#[repr(C)]
+#[derive(StableAbi, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OffsetFactor {
+    /// How many values the digit takes, padding included (the wire extent).
+    pub extent: usize,
+    /// How many of those are live; a digit in `[live, extent)` is padding.
+    pub live: usize,
+    /// How stepping this digit moves the offset (see [`FactorStep`]).
+    pub step: FactorStep,
+}
+
+/// How stepping a segment's digit moves the walk: exactly one of these per segment. Hidden: an
+/// [`OffsetFactor`] construction detail, not part of the walking API.
+#[doc(hidden)]
+#[repr(C)]
+#[derive(StableAbi, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactorStep {
+    /// The linear (common) case: add this fixed amount to the running offset.
+    Linear(usize),
+    /// A composite (non-linear) segment: advance the `composite_table` index by this weight; the
+    /// offset itself comes from the table, not from a fixed step.
+    Composite(usize),
+    /// A broadcast segment: nothing (the cell repeats, e.g. a broadcast axis re-reads one source).
+    Broadcast,
+}
+
+/// A lazy iterator over where every cell of a mapping lands in a dense buffer laid out by some `axes`
+/// (built by `MappingExt::iter`). It yields one `Option<usize>` per physical cell in canonical order:
+/// `Some(off)` for a live cell at dense-buffer offset `off`, `None` for a padding cell. Computing the
+/// offsets as a compact formula rather than a materialized per-cell array keeps it `O(1)` in memory
+/// instead of `O(size)`.
+///
+/// A mapping is a product of segments, so a cell is one digit per [`OffsetFactor`] segment, a
+/// mixed-radix number read like an odometer (the innermost segment varies fastest). The offset is
+/// almost always *linear* in those digits: stepping one segment's digit moves the offset by a fixed
+/// amount ([`FactorStep`]), so it keeps that per-segment step rather than every offset and recovers
+/// each cell's offset by walking the digits and accumulating. For example, a buffer shaped
+/// `[A = 4, B = 3]` has steps `B: +1` and `A: +3`, so cell `(a, b)` lands at `3a + b`.
+///
+/// The exception is a *composite* segment, whose offset is not linear in its digit. The combined
+/// contribution of all composite segments is precomputed into the composite table, which their digits
+/// index. So in full:
+///
+/// > cell offset = (sum of the linear segments' steps) + composite_table\[composite digits\]
+#[repr(C)]
+#[derive(StableAbi, Debug, Clone)]
+pub struct MappingIter {
+    /// One factor per segment, innermost-first (its digit varies fastest).
+    factors: RVec<OffsetFactor>,
+    /// The offsets the composite segments' digits index (their `finalize`d contribution plus the
+    /// base). One joint table because sibling composite slices `finalize` together (it cannot split
+    /// per factor). Always at least one entry (just the base offset when there is no composite
+    /// segment); `None` marks a combination that lands in padding.
+    composite_table: RVec<ROption<usize>>,
+    /// Visit every physical cell, padding included as `None` (`true`, the wire traversal the buffer
+    /// seam needs); or only live cells, skipping the padding cells entirely (`false`, faster on padded
+    /// mappings). Set at construction from `MappingExt::iter`'s `padding` argument.
+    padding: bool,
+    /// Odometer reading: the current digit of each factor.
+    digit: RVec<usize>,
+    /// Running sum of the linear factors' steps at the current digits.
+    linear_offset: usize,
+    /// Current index into `composite_table` (the composite factors' combination).
+    composite_index: usize,
+    /// How many digits sit in their padding tail; the current cell is padding while this is non-zero.
+    pad_depth: usize,
+    /// Set once the odometer has rolled over (the last cell was yielded).
+    done: bool,
+}
+
+impl MappingIter {
+    /// Builds a fresh iterator from the plan the impl crate computes: `factors` (the odometer wheels)
+    /// and `composite_table`; the `axes`/`base` it was projected onto are already baked in. `padding`
+    /// picks the traversal: `true` visits every physical cell (padding as `None`, the wire order the
+    /// buffer seam needs), `false` skips the padding cells entirely (faster on padded mappings, for the
+    /// relayouts). Hidden because it is constructed by the impl crate over the FFI boundary, not by
+    /// consumers (who go through `MappingExt::iter`).
+    #[doc(hidden)]
+    pub fn new(factors: RVec<OffsetFactor>, composite_table: RVec<ROption<usize>>, padding: bool) -> Self {
+        let digit = RVec::from(vec![0; factors.len()]);
+        Self {
+            factors,
+            composite_table,
+            padding,
+            digit,
+            linear_offset: 0,
+            composite_index: 0,
+            pad_depth: 0,
+            done: false,
+        }
+    }
+}
+
+impl Iterator for MappingIter {
+    type Item = Option<usize>;
+
+    fn next(&mut self) -> Option<Option<usize>> {
+        if self.done {
+            return None;
+        }
+        // The cell to yield: the linear sum plus the composite table entry, or `None` if a digit sits
+        // in its padding tail or the composite combination is itself padding. (A plan has at least one
+        // cell, so the first read is always real.)
+        let cell = if self.pad_depth > 0 {
+            None
+        } else {
+            Option::from(self.composite_table[self.composite_index]).map(|c: usize| self.linear_offset + c)
+        };
+        // Then tick the odometer for next time, innermost digit first: the first digit with room
+        // advances (`+1`) and we stop; each fuller digit before it wraps back to 0 (undoing the steps
+        // it had run up) and the carry moves on. If no digit had room, every one wrapped: the walk is
+        // done. Either way that digit's step moves the linear offset or the composite index (or
+        // neither, for a broadcast).
+        let mut advanced = false;
+        for j in 0..self.factors.len() {
+            let f = self.factors[j];
+            let bound = if self.padding { f.extent } else { f.live };
+            let count: isize = if self.digit[j] + 1 < bound {
+                if self.padding && self.digit[j] + 1 == f.live {
+                    self.pad_depth += 1; // entering the padding tail
+                }
+                self.digit[j] += 1;
+                advanced = true;
+                1
+            } else {
+                if self.padding && self.digit[j] >= f.live {
+                    self.pad_depth -= 1; // leaving the padding tail
+                }
+                let undo = -(self.digit[j] as isize);
+                self.digit[j] = 0;
+                undo
+            };
+            match f.step {
+                FactorStep::Linear(delta) => {
+                    self.linear_offset = self.linear_offset.wrapping_add_signed(count * delta as isize)
+                }
+                FactorStep::Composite(place) => {
+                    self.composite_index = self.composite_index.wrapping_add_signed(count * place as isize)
+                }
+                FactorStep::Broadcast => {}
+            }
+            if advanced {
+                break;
+            }
+        }
+        self.done = !advanced;
+        Some(cell)
+    }
+}

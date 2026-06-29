@@ -4,6 +4,7 @@
 #![feature(register_tool)]
 #![register_tool(furiosa_opt)]
 
+pub mod at_primitives;
 pub mod attention;
 pub mod binary_add;
 pub mod cluster_chip_shuffle_slice;
@@ -12,15 +13,18 @@ pub mod dma;
 pub mod fetch_assertions;
 pub mod fetch_commit;
 pub mod matmul;
+pub mod memory_op;
 pub mod mnist;
 pub mod param;
 pub mod reshape;
+pub mod runtime_panic;
 pub mod scatter_gather;
 pub mod switch_assertions;
 pub mod switch_engine;
 pub mod tile;
 pub mod transformer;
 pub mod transpose;
+pub mod unevaluated_const;
 pub mod vector_engine;
 pub mod view;
 pub mod vrf_add;

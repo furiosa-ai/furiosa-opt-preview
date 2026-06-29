@@ -6,11 +6,11 @@
 use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
 
+use crate::backend::Backend;
 use crate::cast::ContractionCast;
 use crate::context::*;
 use crate::engine::contraction::outer::ContractOuterTensor;
 use crate::engine::contraction::{ContractPacketTensor, TEMPORAL_ACCUMULATOR_COLS};
-use crate::runtime::Backend;
 use crate::scalar::*;
 
 // ANCHOR: contract_packet_def
@@ -36,10 +36,7 @@ impl<
     ) -> ContractPacketTensor<'l, T, <D as ContractionCast>::Output, Chip, Cluster, Slice, Lane, Time, OutPacket, B>
     {
         verify_contract_packet::<D, Packet, OutPacket>();
-        ContractPacketTensor {
-            ctx: self.ctx,
-            inner: self.inner.reduce_add(),
-        }
+        ContractPacketTensor::new(self.ctx, self.inner.reduce_add())
     }
 }
 // ANCHOR_END: contract_packet_def
@@ -70,13 +67,16 @@ pub(crate) fn verify_contract_packet<D: Scalar, Packet: M, OutPacket: M>() {
         OutPacket::SIZE
     );
 
+    // `remove_padding` only peels the outer spine, so it needs a NORMALIZED layout: normalize first to
+    // surface trailing padding to the top level, then strip it (a split can leave the pad buried inside a
+    // strided composite like `(A # 16, C) / 4`, which a pre-normalize `remove_padding` would miss).
     let packet = Packet::to_value();
-    let out_packet = OutPacket::to_value().remove_padding().normalize();
+    let out_packet = OutPacket::to_value().normalize().remove_padding();
 
     assert!(
         (0..=Packet::SIZE.trailing_zeros()).rev().any(|depth| {
             let split = 1 << depth;
-            packet.clone().split_at(split).0.remove_padding().normalize() == out_packet
+            packet.clone().split_at(split).0.normalize().remove_padding() == out_packet
         }),
         "OutPacket {out_packet} is not a valid contraction of Packet {packet}",
     );

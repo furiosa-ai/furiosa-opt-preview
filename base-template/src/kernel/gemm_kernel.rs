@@ -15,8 +15,8 @@ pub fn gemm_kernel(
     b: &HbmTensor<bf16, Chip, m![J, K]>,
 ) -> HbmTensor<bf16, Chip, m![I, J]> {
     // Move data from HBM to DM
-    let a: DmTensor<bf16, Chip, Cluster, Slice, m![I % 32, K]> = a.to_dm(&mut ctx.tdma, 0);
-    let b: DmTensor<bf16, Chip, Cluster, Slice, m![J % 32, K]> = b.to_dm(&mut ctx.tdma, 1 << 12);
+    let a: DmTensor<bf16, Chip, Cluster, Slice, m![I % 32, K]> = a.to_dm(&mut ctx.tdma);
+    let b: DmTensor<bf16, Chip, Cluster, Slice, m![J % 32, K]> = b.to_dm(&mut ctx.tdma);
 
     // Load matrix B into TRF
     // Switch Engine distributes B across 256 slices
@@ -27,7 +27,7 @@ pub fn gemm_kernel(
         .begin(b.view())
         .fetch::<m![J % 8, J / 8 % 4], m![K]>()
         .collect::<m![J % 8, J / 8 % 4, K / 16], m![K % 16]>()
-        .to_trf(TrfAddress::Full);
+        .to_trf();
 
     // Compute GEMM: A × B
     // Switch Engine ensures matching (`I / 32`, `J / 32`) slice distribution
@@ -43,7 +43,7 @@ pub fn gemm_kernel(
         .contract_lane::<m![I % 32, J / 8 % 4], m![J % 8]>(LaneMode::Interleaved)
         .cast::<bf16, m![J % 8 # 16]>()
         .commit_trim::<m![J % 8]>()
-        .commit(0);
+        .commit();
 
     // Transfer result to HBM
     result.to_hbm(&mut ctx.tdma, 2 << 28)

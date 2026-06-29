@@ -2,7 +2,7 @@ use super::*;
 
 #[device(chip = 1)]
 pub fn ve_elementwise_fxp_const(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -15,7 +15,7 @@ pub fn ve_elementwise_fxp_const(ctx: &mut Context, input: &HbmTensor<i32, Chip, 
         .vector_fxp(FxpBinaryOp::AddFxp, 100)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -28,7 +28,7 @@ pub fn ve_elementwise_fxp_const(ctx: &mut Context, input: &HbmTensor<i32, Chip, 
 /// Expected panic: "FxpAdd is already in use"
 #[device(chip = 1)]
 pub fn ve_elementwise_fxp_chain(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -43,7 +43,7 @@ pub fn ve_elementwise_fxp_chain(ctx: &mut Context, input: &HbmTensor<i32, Chip, 
         .vector_fxp(FxpBinaryOp::SubFxp, 5)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -53,7 +53,7 @@ pub fn ve_elementwise_full_pipeline(
     ctx: &mut Context,
     input: &HbmTensor<i32, Chip, m![A]>,
 ) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -73,14 +73,14 @@ pub fn ve_elementwise_full_pipeline(
         .vector_clip(ClipBinaryOpI32::Min, 1000)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
 
 #[device(chip = 1)]
 pub fn ve_elementwise_stash_f32(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -> HbmTensor<f32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -97,7 +97,7 @@ pub fn ve_elementwise_stash_f32(ctx: &mut Context, input: &HbmTensor<f32, Chip, 
         .vector_clip(ClipBinaryOpF32::Max, Stash)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -105,7 +105,7 @@ pub fn ve_elementwise_stash_f32(ctx: &mut Context, input: &HbmTensor<f32, Chip, 
 /// i32 stash example: stash input, multiply by 2, then max with stashed value
 #[device(chip = 1)]
 pub fn ve_elementwise_stash_i32(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -120,14 +120,14 @@ pub fn ve_elementwise_stash_i32(ctx: &mut Context, input: &HbmTensor<i32, Chip, 
         .vector_clip(ClipBinaryOpI32::Max, Stash)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
 
 #[device(chip = 1)]
 pub fn ve_elementwise_fp_unary(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -> HbmTensor<f32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -142,7 +142,7 @@ pub fn ve_elementwise_fp_unary(ctx: &mut Context, input: &HbmTensor<f32, Chip, m
         .vector_widen_pad::<m![A % 2 # 8]>()
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -152,7 +152,7 @@ pub fn ve_elementwise_fp_binary_with_mode(
     ctx: &mut Context,
     input: &HbmTensor<f32, Chip, m![A]>,
 ) -> HbmTensor<f32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -167,7 +167,7 @@ pub fn ve_elementwise_fp_binary_with_mode(
         .vector_widen_pad::<m![A % 2 # 8]>()
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -177,7 +177,7 @@ pub fn ve_elementwise_fp_ternary_with_mode(
     ctx: &mut Context,
     input: &HbmTensor<f32, Chip, m![A]>,
 ) -> HbmTensor<f32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -192,7 +192,7 @@ pub fn ve_elementwise_fp_ternary_with_mode(
         .vector_widen_pad::<m![A % 2 # 8]>()
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -202,7 +202,7 @@ pub fn ve_elementwise_logic_with_mode(
     ctx: &mut Context,
     input: &HbmTensor<i32, Chip, m![A]>,
 ) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -215,7 +215,7 @@ pub fn ve_elementwise_logic_with_mode(
         .vector_logic_with_mode(LogicBinaryOpI32::BitXor, BinaryArgMode::Mode11, 0xff)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -225,7 +225,7 @@ pub fn ve_elementwise_fxp_with_mode(
     ctx: &mut Context,
     input: &HbmTensor<i32, Chip, m![A]>,
 ) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -238,7 +238,7 @@ pub fn ve_elementwise_fxp_with_mode(
         .vector_fxp_with_mode(FxpBinaryOp::SubFxp, BinaryArgMode::Mode10, 7)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -248,7 +248,7 @@ pub fn ve_elementwise_fp_div_with_mode(
     ctx: &mut Context,
     input: &HbmTensor<f32, Chip, m![A]>,
 ) -> HbmTensor<f32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -263,7 +263,7 @@ pub fn ve_elementwise_fp_div_with_mode(
         .vector_widen_pad::<m![A % 2 # 8]>()
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -273,7 +273,7 @@ pub fn ve_elementwise_clip_with_mode(
     ctx: &mut Context,
     input: &HbmTensor<i32, Chip, m![A]>,
 ) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -286,7 +286,7 @@ pub fn ve_elementwise_clip_with_mode(
         .vector_clip_with_mode(ClipBinaryOpI32::AddFxp, BinaryArgMode::Mode11, 3)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -297,8 +297,8 @@ pub fn ve_group_pair_fp_zip_with_mode(
     lhs: &HbmTensor<f32, Chip, m![A]>,
     rhs: &HbmTensor<f32, Chip, m![A]>,
 ) -> HbmTensor<f32, Chip, m![A]> {
-    let lhs_dm = lhs.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
-    let rhs_dm = rhs.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x2000);
+    let lhs_dm = lhs.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
+    let rhs_dm = rhs.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -313,7 +313,7 @@ pub fn ve_group_pair_fp_zip_with_mode(
         .vector_widen_concat::<m![1], m![A % 2 # 8]>()
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x3000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x4000)
 }
@@ -322,7 +322,7 @@ pub fn ve_group_pair_fp_zip_with_mode(
 // input * 2, then max(result, stashed_input)
 #[device(chip = 1)]
 pub fn ve_stash_fxp_fxp(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -337,7 +337,7 @@ pub fn ve_stash_fxp_fxp(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) 
         .vector_clip(ClipBinaryOpI32::Max, Stash)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -346,7 +346,7 @@ pub fn ve_stash_fxp_fxp(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) 
 // input * 2 (fxp), convert to fp, then add stashed_input (reinterpreted as f32)
 #[device(chip = 1)]
 pub fn ve_stash_fxp_fp(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -> HbmTensor<f32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -362,7 +362,7 @@ pub fn ve_stash_fxp_fp(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -
         .vector_clip(ClipBinaryOpF32::Max, Stash)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -371,7 +371,7 @@ pub fn ve_stash_fxp_fp(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -
 // input * 2.0, stash, then * 3.0, then max(result, stashed)
 #[device(chip = 1)]
 pub fn ve_stash_fp_fp(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -> HbmTensor<f32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -389,7 +389,7 @@ pub fn ve_stash_fp_fp(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) ->
         .vector_clip(ClipBinaryOpF32::Max, Stash)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -398,7 +398,7 @@ pub fn ve_stash_fp_fp(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) ->
 // input * 2.0 (fp), stash, convert to fxp, then max(result, stashed reinterpreted as i32)
 #[device(chip = 1)]
 pub fn ve_stash_fp_fxp(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -416,14 +416,14 @@ pub fn ve_stash_fp_fxp(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -
         .vector_clip(ClipBinaryOpI32::Max, Stash)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
 
 #[device(chip = 1)]
 pub fn ve_elementwise_logic(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma, 0x1000);
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
@@ -437,7 +437,7 @@ pub fn ve_elementwise_logic(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A
         .vector_logic(LogicBinaryOpI32::BitOr, 0x100)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x2000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
@@ -449,8 +449,8 @@ pub fn ve_elementwise_vrf(
     vrf_data: &HbmTensor<i32, Chip, m![B]>,
 ) -> HbmTensor<i32, Chip, m![A, B]> {
     let input_intermediate: HbmTensor<i32, Chip, m![B, A]> = input.to_hbm(&mut ctx.tdma, 0x8000);
-    let input_dm = input_intermediate.to_dm::<Cluster, m![A / 2], m![B, A % 2]>(&mut ctx.tdma, 0x1000);
-    let vrf_dm = vrf_data.to_dm::<Cluster, m![A / 2], m![B]>(&mut ctx.tdma, 0x2000);
+    let input_dm = input_intermediate.to_dm::<Cluster, m![A / 2], m![B, A % 2]>(&mut ctx.tdma);
+    let vrf_dm = vrf_data.to_dm::<Cluster, m![A / 2], m![B]>(&mut ctx.tdma);
 
     let vrf: VrfTensor<i32, Chip, Cluster, m![A / 2], m![B]> = ctx
         .sub
@@ -458,7 +458,7 @@ pub fn ve_elementwise_vrf(
         .fetch::<m![1], m![B]>()
         .fetch_cast::<i32>()
         .collect::<m![B / 8], m![B % 8]>()
-        .to_vrf(0);
+        .to_vrf();
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![B, A % 2]> = ctx
         .main
@@ -471,7 +471,7 @@ pub fn ve_elementwise_vrf(
         .vector_fxp(FxpBinaryOp::AddFxp, &vrf)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x3000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x5000)
 }
@@ -484,9 +484,9 @@ pub fn ve_elementwise_multi_vrf(
     vrf_data2: &HbmTensor<i32, Chip, m![B]>,
 ) -> HbmTensor<i32, Chip, m![A, B]> {
     let input_intermediate: HbmTensor<i32, Chip, m![B, A]> = input.to_hbm(&mut ctx.tdma, 0x0);
-    let input_dm = input_intermediate.to_dm::<Cluster, m![A / 2], m![B, A % 2]>(&mut ctx.tdma, 0x1000);
-    let vrf_dm1 = vrf_data1.to_dm::<Cluster, m![A / 2], m![B]>(&mut ctx.tdma, 0x2000);
-    let vrf_dm2 = vrf_data2.to_dm::<Cluster, m![A / 2], m![B]>(&mut ctx.tdma, 0x3000);
+    let input_dm = input_intermediate.to_dm::<Cluster, m![A / 2], m![B, A % 2]>(&mut ctx.tdma);
+    let vrf_dm1 = vrf_data1.to_dm::<Cluster, m![A / 2], m![B]>(&mut ctx.tdma);
+    let vrf_dm2 = vrf_data2.to_dm::<Cluster, m![A / 2], m![B]>(&mut ctx.tdma);
 
     let vrf1: VrfTensor<i32, Chip, Cluster, m![A / 2], m![B]> = ctx
         .sub
@@ -494,7 +494,7 @@ pub fn ve_elementwise_multi_vrf(
         .fetch::<m![1], m![B]>()
         .fetch_cast::<i32>()
         .collect::<m![B / 8], m![B % 8]>()
-        .to_vrf(0);
+        .to_vrf();
 
     let vrf2: VrfTensor<i32, Chip, Cluster, m![A / 2], m![B]> = ctx
         .sub
@@ -502,7 +502,7 @@ pub fn ve_elementwise_multi_vrf(
         .fetch::<m![1], m![B]>()
         .fetch_cast::<i32>()
         .collect::<m![B / 8], m![B % 8]>()
-        .to_vrf(1024);
+        .to_vrf();
 
     let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![B, A % 2]> = ctx
         .main
@@ -517,7 +517,7 @@ pub fn ve_elementwise_multi_vrf(
         .vector_clip(ClipBinaryOpI32::AddFxp, &vrf1)
         .vector_final()
         .commit_trim::<m![A % 2]>()
-        .commit(0x4000);
+        .commit();
 
     result.to_hbm(&mut ctx.tdma, 0x5000)
 }

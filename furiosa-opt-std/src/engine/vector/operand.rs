@@ -288,31 +288,12 @@ where
 // IntoTernaryOperandTags trait (for ternary operations, f32 only)
 // ============================================================================
 
-/// Trait for converting various operand types into an ArrayVec of TernaryOperandTag.
+/// Converts various operand types into an `ArrayVec` of `TernaryOperandTag`: anything
+/// `Into<TernaryOperandTag>` (`(f32, f32)`, `(VeRhs, f32)`, a single tag) or an array of tags
+/// for multi-branch ops.
 ///
-/// # Supported operand types
-///
-/// - `(f32, f32)` - two constant values (operand0, operand1)
-/// - `(VeRhs<f32, Mapping>, f32)` - VeRhs and constant
-/// - `TernaryOperandTag<Mapping>` - single ternary operand
-/// - `[TernaryOperandTag<Mapping>; N]` - array of ternary operands for multi-branch operations
-///
-/// # Example
 /// ```ignore
-/// // Simple usage with tuple (operand0, operand1)
 /// tensor.vector_fp_ternary(FpTernaryOp::FmaF, (2.0f32, 3.0f32))
-///
-/// // With VRF as operand0
-/// tensor.vector_fp_ternary(FpTernaryOp::FmaF, (&vrf, 3.0f32))
-///
-/// // With stash as operand0
-/// tensor.vector_fp_ternary(FpTernaryOp::FmaF, (Stash, 3.0f32))
-///
-/// // Explicit TernaryOperandTag for branch control
-/// tensor.vector_fp_ternary(
-///     FpTernaryOp::FmaF,
-///     TernaryOperandTag::always(VeRhs::constant(2.0f32), 3.0f32)
-/// )
 /// ```
 pub trait IntoTernaryOperandTags<TargetMapping: M> {
     /// Converts into an ArrayVec of TernaryOperandTag.
@@ -352,39 +333,6 @@ impl<TargetMapping: M> IntoTernaryOperandTags<TargetMapping> for ArrayVec<Ternar
 // ============================================================================
 // From implementations for BinaryOperandTag (enables .into() conversion)
 // ============================================================================
-//
-// These implementations allow ergonomic conversion to BinaryOperandTag using `.into()`.
-//
-// # Usage for heterogeneous multi-branch operands
-//
-// When you need multiple operands of different types (e.g., constant + stash),
-// use `.into()` to convert each to `BinaryOperandTag`, then pass as array:
-//
-// ```ignore
-// // Single operand (homogeneous) - direct usage
-// tensor.vector_fxp(op, 16384i32)
-// tensor.vector_fxp(op, Stash)
-// tensor.vector_fxp(op, &vrf)
-//
-// // Multiple operands of same type
-// tensor.vector_fxp(op, [
-//     BinaryOperandTag::group(VeRhs::constant(100), GroupId::Group0),
-//     BinaryOperandTag::group(VeRhs::constant(200), GroupId::Group1),
-// ])
-//
-// // Multiple operands of different types (heterogeneous)
-// // Use .into() to convert each type
-// tensor.vector_fxp(op, [
-//     16384i32.into(),
-//     Stash.into(),
-// ])
-//
-// // With branch control
-// tensor.vector_fxp(op, [
-//     BinaryOperandTag::group(VeRhs::constant(100), GroupId::Group0),
-//     StashOperand::group(GroupId::Group1).into(),
-// ])
-// ```
 
 impl<R, D: VeScalar, Mapping: M> From<R> for BinaryOperandTag<D, Mapping>
 where
@@ -413,41 +361,15 @@ where
 // IntoOperands trait - Multiple operands conversion
 // ============================================================================
 
-/// Trait for converting various operand types into an ArrayVec.
+/// Trait for converting various operand types into an `ArrayVec`.
 ///
-/// Types implementing `Into<BinaryOperandTag>` automatically get this via blanket impl.
-/// Array types `[BinaryOperandTag; N]` and `ArrayVec` implement this directly.
-///
-/// # Supported operand types
-///
-/// **Single operand** (via `Into<BinaryOperandTag>`, auto-wrapped in ArrayVec):
-/// - `i32`, `f32` - constant value
-/// - `Stash` - stash read marker
-/// - `StashOperand<D>` - stash read with branch validity
-/// - `BinaryOperandTag<D, _>` - explicit operand (pass through)
-/// - `&VrfTensor<D, ...>` - VRF tensor reference
-///
-/// **Multiple operands** (direct implementations):
-/// - `[BinaryOperandTag<D, _>; N]` - array of operands for multi-branch operations
-/// - `ArrayVec<BinaryOperandTag<D, _>, MAX_TAGS>` - pass through
-///
-/// # Examples
+/// A single operand (anything `Into<BinaryOperandTag>` — `i32`/`f32`/`Stash`/`StashOperand`/
+/// `&VrfTensor`/`BinaryOperandTag`) is auto-wrapped; `[BinaryOperandTag; N]` and `ArrayVec`
+/// pass through directly for multi-branch operations.
 ///
 /// ```ignore
-/// // Single operand - direct usage
-/// tensor.vector_fxp(op, 16384i32)
-///
-/// // Multiple homogeneous operands
-/// tensor.vector_fxp(op, [
-///     BinaryOperandTag::group(VeRhs::constant(100), GroupId::Group0),
-///     BinaryOperandTag::group(VeRhs::constant(200), GroupId::Group1),
-/// ])
-///
-/// // Multiple heterogeneous operands - use .into()
-/// tensor.vector_fxp(op, [
-///     16384i32.into(),
-///     Stash.into(),
-/// ])
+/// tensor.vector_fxp(op, 16384i32)                 // single, auto-wrapped
+/// tensor.vector_fxp(op, [a.into(), Stash.into()]) // multiple, per-branch
 /// ```
 pub trait IntoOperands<D: VeScalar, TargetMapping: M> {
     /// Converts into an ArrayVec of operands.
@@ -493,19 +415,8 @@ impl<D: VeScalar, TargetMapping: M, const N: usize> IntoOperands<D, TargetMappin
 // Stash - Type-inferred marker for stash operands (compile-time type checked)
 // ============================================================================
 
-/// Type-inferred stash marker for compile-time type checking.
-///
-/// When used as an operand, the stash data type must match the operation's data type.
-///
-/// # Example
-/// ```ignore
-/// // f32 tensor with f32 stash -> OK
-/// tensor
-///     .vector_stash()
-///     .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), 2.0f32)
-///     .vector_clip(ClipBinaryOpF32::Max, Stash)  // Compiles: D == StashD == f32
-///
-/// ```
+/// Type-inferred stash marker. As an operand, the stash data type must match the operation's
+/// data type (`D == StashD`), enforced at compile time.
 #[primitive(op::Stash)]
 #[derive(Debug, Clone, Copy)]
 pub struct Stash;
@@ -514,18 +425,12 @@ pub struct Stash;
 // VeOperand - Unified operand type with automatic conversion
 // ============================================================================
 
-/// Unified operand type for Vector Engine operations.
-///
-/// Supports automatic conversion from:
-/// - `D` (i32/f32) - constant value
-/// - `&VrfTensor<D, ...>` - VRF tensor reference
-/// - `Stash` - stash read (always valid)
-///
-/// Use with `impl Into<VeOperand<D, ...>>` for ergonomic API:
+/// Unified operand type for Vector Engine operations. Accepts `D` (constant), `&VrfTensor`, or
+/// `Stash` via `Into`, for an ergonomic `impl Into<VeOperand<D, ...>>` API:
 /// ```ignore
-/// .vector_fxp(op, 16384i32)   // i32 auto-converted
-/// .vector_fxp(op, &vrf)       // VRF auto-converted
-/// .vector_fxp(op, Stash)      // Stash (always valid)
+/// .vector_fxp(op, 16384i32)   // constant
+/// .vector_fxp(op, &vrf)       // VRF
+/// .vector_fxp(op, Stash)      // stash
 /// ```
 #[derive(Debug)]
 pub enum VeOperand<'a, D: VeScalar, Chip: M, Cluster: M, Slice: M, VrfMapping: M> {
@@ -609,17 +514,9 @@ impl<'a, D: VeScalar, Chip: M, Cluster: M, Slice: M, VrfMapping: M> VeOperand<'a
 /// that group; `Some(operand)` applies it.
 pub type GroupOperand<D, Mapping> = Option<BinaryOperandTag<D, Mapping>>;
 
-/// Trait for converting various types into a [`GroupOperand`].
-///
-/// Uses `Into<BinaryOperandTag>` blanket impl so callers can pass i32/f32/Stash/etc. directly.
-///
-/// # Supported types
-/// - `()` - skip operation for this group (returns `None`)
-/// - `i32`, `f32` - constant value (via `Into<BinaryOperandTag>`)
-/// - `Stash` - stash read marker (via `Into<BinaryOperandTag>`)
-/// - `StashOperand<D>` - stash with branch validity (via `Into<BinaryOperandTag>`)
-/// - `BinaryOperandTag<D, Mapping>` - explicit operand (via `Into<BinaryOperandTag>`)
-/// - `Option<BinaryOperandTag<D, Mapping>>` - pass through
+/// Trait for converting various types into a [`GroupOperand`]. Accepts anything
+/// `Into<BinaryOperandTag>` (i32/f32/Stash/etc.), `Option<BinaryOperandTag>` (pass-through), or
+/// `()` to skip the operation for this group (`None`).
 pub trait IntoGroupOperand<D: VeScalar, Mapping: M> {
     /// Converts into a [`GroupOperand`]. `None` skips the operation for this group.
     fn into_group_operand(self) -> GroupOperand<D, Mapping>;
@@ -657,29 +554,9 @@ where
 /// Type alias for group ternary operand in VectorTensorPair operations.
 pub type GroupTernaryOperandTag<Mapping> = Option<TernaryOperandTag<Mapping>>;
 
-/// Trait for converting various types into a group ternary operand.
-///
-/// Uses `Into<TernaryOperandTag>` blanket impl for automatic conversion from
-/// types that implement `From` for `TernaryOperandTag` ((f32, f32), (VeRhs, f32), etc.).
-///
-/// # Supported types
-/// - `()` - skip operation for this group
-/// - `(f32, f32)` - two constant values (via `Into<TernaryOperandTag>`)
-/// - `(VeRhs<f32, Mapping>, f32)` - VeRhs and constant (via `Into<TernaryOperandTag>`)
-/// - `TernaryOperandTag<Mapping>` - explicit ternary operand (via `Into<TernaryOperandTag>`)
-/// - `Option<TernaryOperandTag<Mapping>>` - pass through
-///
-/// # Example
-/// ```ignore
-/// // Apply ternary op only to group0
-/// pair.vector_fp_ternary(op, (2.0f32, 3.0f32), ())
-///
-/// // Apply to both groups with different operands
-/// pair.vector_fp_ternary(op, (2.0f32, 3.0f32), (4.0f32, 5.0f32))
-///
-/// // With stash as operand0 for group0
-/// pair.vector_fp_ternary(op, (Stash, 3.0f32), ())
-/// ```
+/// Trait for converting various types into a group ternary operand. Accepts anything
+/// `Into<TernaryOperandTag>` (`(f32, f32)`, `(VeRhs, f32)`, a tag), `Option<TernaryOperandTag>`
+/// (pass-through), or `()` to skip the operation for this group.
 pub trait IntoGroupTernaryOperandTag<Mapping: M> {
     /// Converts into a GroupTernaryOperandTag with the specified mapping.
     fn into_group_ternary_operand(self) -> GroupTernaryOperandTag<Mapping>;

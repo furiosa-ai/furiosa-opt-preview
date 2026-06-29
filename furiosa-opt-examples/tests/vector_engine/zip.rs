@@ -29,11 +29,9 @@ async fn test_ve_group_pair_add() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: output = lhs + rhs
-    let expected = lhs
-        .into_inner()
-        .zip_with(&rhs.into_inner(), |a, b| a.zip_map(b, |x, y| x.wrapping_add(y)));
+    let expected = lhs.into_inner().zip_with(&rhs.into_inner(), |x, y| x.wrapping_add(y));
 
-    assert_eq!(expected.to_buf(), result.to_buf());
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -54,12 +52,10 @@ async fn test_ve_group_pair_preprocess_both() {
     // Verify: output = (lhs * 2) + (rhs * 3)
     let expected = lhs
         .into_inner()
-        .map(|x| x.map(|x| x.wrapping_mul(2)))
-        .zip_with(&rhs.into_inner().map(|x| x.map(|x| x.wrapping_mul(3))), |a, b| {
-            a.zip_map(b, |x, y| x.wrapping_add(y))
-        });
+        .map(|x| x.wrapping_mul(2))
+        .zip_with(&rhs.into_inner().map(|x| x.wrapping_mul(3)), |x, y| x.wrapping_add(y));
 
-    assert_eq!(expected.to_buf(), result.to_buf());
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -80,10 +76,10 @@ async fn test_ve_group_pair_preprocess_g0() {
     // Verify: output = (lhs * 10) + rhs
     let expected = lhs
         .into_inner()
-        .map(|x| x.map(|x| x.wrapping_mul(10)))
-        .zip_with(&rhs.into_inner(), |a, b| a.zip_map(b, |x, y| x.wrapping_add(y)));
+        .map(|x| x.wrapping_mul(10))
+        .zip_with(&rhs.into_inner(), |x, y| x.wrapping_add(y));
 
-    assert_eq!(expected.to_buf(), result.to_buf());
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -104,11 +100,9 @@ async fn test_ve_group_pair_preprocess_g1() {
     // Verify: output = lhs + (rhs * 10)
     let expected = lhs
         .into_inner()
-        .zip_with(&rhs.into_inner().map(|x| x.map(|x| x.wrapping_mul(10))), |a, b| {
-            a.zip_map(b, |x, y| x.wrapping_add(y))
-        });
+        .zip_with(&rhs.into_inner().map(|x| x.wrapping_mul(10)), |x, y| x.wrapping_add(y));
 
-    assert_eq!(expected.to_buf(), result.to_buf());
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -127,11 +121,11 @@ async fn test_ve_group_pair_chain() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: output = ((lhs + 10) * 2) + ((rhs + 20) * 3)
-    let lhs_processed = lhs.into_inner().map(|x| x.map(|x| x.wrapping_add(10).wrapping_mul(2)));
-    let rhs_processed = rhs.into_inner().map(|x| x.map(|x| x.wrapping_add(20).wrapping_mul(3)));
-    let expected = lhs_processed.zip_with(&rhs_processed, |a, b| a.zip_map(b, |x, y| x.wrapping_add(y)));
+    let lhs_processed = lhs.into_inner().map(|x| x.wrapping_add(10).wrapping_mul(2));
+    let rhs_processed = rhs.into_inner().map(|x| x.wrapping_add(20).wrapping_mul(3));
+    let expected = lhs_processed.zip_with(&rhs_processed, |x, y| x.wrapping_add(y));
 
-    assert_eq!(expected.to_buf(), result.to_buf());
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -150,11 +144,9 @@ async fn test_ve_group_pair_fxp() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: output = lhs * rhs
-    let expected = lhs
-        .into_inner()
-        .zip_with(&rhs.into_inner(), |a, b| a.zip_map(b, |x, y| x.wrapping_mul(y)));
+    let expected = lhs.into_inner().zip_with(&rhs.into_inner(), |x, y| x.wrapping_mul(y));
 
-    assert_eq!(expected.to_buf(), result.to_buf());
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -173,11 +165,9 @@ async fn test_ve_group_pair_logic() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: output = lhs ^ rhs (BitXor)
-    let expected = lhs
-        .into_inner()
-        .zip_with(&rhs.into_inner(), |a, b| a.zip_map(b, |x, y| x ^ y));
+    let expected = lhs.into_inner().zip_with(&rhs.into_inner(), |x, y| x ^ y);
 
-    assert_eq!(expected.to_buf(), result.to_buf());
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -199,9 +189,9 @@ async fn test_ve_group_pair_fp() {
     // Verify: fxp_to_fp(31) then multiply -> (lhs as f32) * (rhs as f32)
     let expected = lhs
         .into_inner()
-        .zip_with(&rhs.into_inner(), |a, b| a.zip_map(b, |x, y| (x as f32) * (y as f32)));
+        .zip_with(&rhs.into_inner(), |x, y| (x as f32) * (y as f32));
 
-    assert_f32_vec_eq(&expected.to_buf(), &result.to_buf());
+    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
 }
 
 #[tokio::test]
@@ -222,11 +212,11 @@ async fn test_ve_group_pair_unary() {
 
     // Verify: fxp_to_fp(31) -> sqrt(both) -> add
     // output = sqrt(lhs as f32) + sqrt(rhs as f32)
-    let expected = lhs.into_inner().zip_with(&rhs.into_inner(), |a, b| {
-        a.zip_map(b, |x, y| (x as f32).sqrt() + (y as f32).sqrt())
-    });
+    let expected = lhs
+        .into_inner()
+        .zip_with(&rhs.into_inner(), |x, y| (x as f32).sqrt() + (y as f32).sqrt());
 
-    assert_f32_vec_eq(&expected.to_buf(), &result.to_buf());
+    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
 }
 
 #[tokio::test]
@@ -247,11 +237,11 @@ async fn test_ve_group_pair_unary_selective() {
 
     // Verify: fxp_to_fp(31) -> exp(g0 only) -> add
     // output = exp(lhs as f32) + (rhs as f32)
-    let expected = lhs.into_inner().zip_with(&rhs.into_inner(), |a, b| {
-        a.zip_map(b, |x, y| (x as f32).exp() + (y as f32))
-    });
+    let expected = lhs
+        .into_inner()
+        .zip_with(&rhs.into_inner(), |x, y| (x as f32).exp() + (y as f32));
 
-    assert_f32_vec_eq(&expected.to_buf(), &result.to_buf());
+    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
 }
 
 #[tokio::test]
@@ -270,11 +260,11 @@ async fn test_ve_group_pair_ternary() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: (lhs * 2.0 + 1.0) + (rhs * 3.0 + 2.0)
-    let expected = lhs.into_inner().zip_with(&rhs.into_inner(), |a, b| {
-        a.zip_map(b, |x, y| x.mul_add(2.0, 1.0) * y.mul_add(3.0, 2.0))
-    });
+    let expected = lhs
+        .into_inner()
+        .zip_with(&rhs.into_inner(), |x, y| x.mul_add(2.0, 1.0) * y.mul_add(3.0, 2.0));
 
-    assert_f32_vec_eq(&expected.to_buf(), &result.to_buf());
+    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
 }
 
 #[tokio::test]
@@ -295,7 +285,7 @@ async fn test_ve_group_pair_ternary_selective() {
     // Verify: (lhs * 2.0 + 1.0) / rhs (rhs unchanged, no ternary)
     let expected = lhs
         .into_inner()
-        .zip_with(&rhs.into_inner(), |a, b| a.zip_map(b, |x, y| x.mul_add(2.0, 1.0) / y));
+        .zip_with(&rhs.into_inner(), |x, y| x.mul_add(2.0, 1.0) / y);
 
-    assert_f32_vec_eq(&expected.to_buf(), &result.to_buf());
+    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
 }

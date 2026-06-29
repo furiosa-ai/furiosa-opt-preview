@@ -19,8 +19,8 @@ async fn test_tile_simple_host() {
     let output = output_hbm.to_host::<m![B, A]>(&mut ctx.pdma).await;
 
     assert_eq!(
-        unsafe { input.into_inner().transmute::<m![B, A]>() }.to_buf(),
-        output.to_buf(),
+        input.into_inner().transmute::<m![B, A]>().into_buf(),
+        output.into_buf(),
         "Transpose should not change the mathematical meaning of tensor"
     );
 }

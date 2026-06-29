@@ -60,7 +60,7 @@ fn hbm_to_dm(
     ctx: &mut Context,
     input: &HbmTensor<i8, m![1], m![A]>,
 ) -> DmTensor<i8, m![1], m![1 # 2], m![A / 8], m![A % 8]> {
-    input.to_dm::<m![1 # 2], m![A / 8], m![A % 8]>(&mut ctx.tdma, 0)
+    input.to_dm::<m![1 # 2], m![A / 8], m![A % 8]>(&mut ctx.tdma)
 }
 #
 # let mut ctx = Context::acquire();
@@ -566,7 +566,7 @@ fn scatter_minimal(
     output: &mut HbmTensor<bf16, m![1], m![C, D]>,
 ) {
     let data_dm: DmTensor<bf16, m![1], m![1 # 2], m![K / 2], m![K % 2, D]> =
-        data.to_dm(&mut ctx.tdma, 0x0);
+        data.to_dm(&mut ctx.tdma);
 
     data_dm.dma_scatter::<m![K], _, _>(index, output, true);
 }

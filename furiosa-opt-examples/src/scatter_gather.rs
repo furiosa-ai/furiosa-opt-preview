@@ -30,7 +30,7 @@ pub fn scatter_minimal(
     index: &HbmTensor<i32, Chip, m![K]>,
     output: &mut HbmTensor<bf16, Chip, m![C, D]>,
 ) {
-    let data_dm: DmTensor<bf16, Chip, Cluster, m![K / 2], m![K % 2, D]> = data.to_dm(&mut ctx.tdma, 0x0);
+    let data_dm: DmTensor<bf16, Chip, Cluster, m![K / 2], m![K % 2, D]> = data.to_dm(&mut ctx.tdma);
 
     data_dm.dma_scatter::<m![K], _, _>(index, output, true);
 }

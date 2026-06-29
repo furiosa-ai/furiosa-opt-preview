@@ -25,10 +25,8 @@ async fn test_ve_intra_slice_reduce_add_fxp_sat() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: saturating add across R axis
-    let expected: Tensor<i32, m![A]> = input
-        .into_inner()
-        .reduce(|a, b| a.zip_map(b, |x, y| x.saturating_add(y)), Opt::Init(0));
-    assert_eq!(expected.to_buf(), result.to_buf());
+    let expected: Tensor<i32, m![A]> = input.into_inner().reduce(|x, y| x.saturating_add(y), 0, false);
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -43,10 +41,8 @@ async fn test_ve_intra_slice_reduce_max_i32() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: max across R axis
-    let expected: Tensor<i32, m![A]> = input
-        .into_inner()
-        .reduce(|a, b| a.zip_map(b, |x, y| x.max(y)), Opt::Init(i32::MIN));
-    assert_eq!(expected.to_buf(), result.to_buf());
+    let expected: Tensor<i32, m![A]> = input.into_inner().reduce(|x, y| x.max(y), i32::MIN, false);
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -61,10 +57,8 @@ async fn test_ve_intra_slice_reduce_min_i32() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: min across R axis
-    let expected: Tensor<i32, m![A]> = input
-        .into_inner()
-        .reduce(|a, b| a.zip_map(b, |x, y| x.min(y)), Opt::Init(i32::MAX));
-    assert_eq!(expected.to_buf(), result.to_buf());
+    let expected: Tensor<i32, m![A]> = input.into_inner().reduce(|x, y| x.min(y), i32::MAX, false);
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -80,7 +74,7 @@ async fn test_ve_intra_slice_reduce_add_f32() {
 
     // Verify: sum across R axis
     let expected: Tensor<f32, m![A]> = input.into_inner().reduce_add();
-    assert_f32_vec_eq(&expected.to_buf(), &result.to_buf());
+    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
 }
 
 #[tokio::test]
@@ -95,10 +89,8 @@ async fn test_ve_intra_slice_reduce_max_f32() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: max across R axis
-    let expected: Tensor<f32, m![A]> = input
-        .into_inner()
-        .reduce(|a, b| a.zip_map(b, |x, y| x.max(y)), Opt::Init(f32::NEG_INFINITY));
-    assert_f32_vec_eq(&expected.to_buf(), &result.to_buf());
+    let expected: Tensor<f32, m![A]> = input.into_inner().reduce(|x, y| x.max(y), f32::NEG_INFINITY, false);
+    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
 }
 
 #[tokio::test]
@@ -113,10 +105,8 @@ async fn test_ve_intra_slice_reduce_min_f32() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: min across R axis
-    let expected: Tensor<f32, m![A]> = input
-        .into_inner()
-        .reduce(|a, b| a.zip_map(b, |x, y| x.min(y)), Opt::Init(f32::INFINITY));
-    assert_f32_vec_eq(&expected.to_buf(), &result.to_buf());
+    let expected: Tensor<f32, m![A]> = input.into_inner().reduce(|x, y| x.min(y), f32::INFINITY, false);
+    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
 }
 
 #[tokio::test]
@@ -133,10 +123,8 @@ async fn test_ve_intra_slice_reduce_split_time_packet() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Verify: saturating add across R axis (R=4, no padding, full reduce)
-    let expected: Tensor<i32, m![A]> = input
-        .into_inner()
-        .reduce(|a, b| a.zip_map(b, |x, y| x.saturating_add(y)), Opt::Init(0));
-    assert_eq!(expected.to_buf(), result.to_buf());
+    let expected: Tensor<i32, m![A]> = input.into_inner().reduce(|x, y| x.saturating_add(y), 0, false);
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 // =============================================================================
@@ -154,10 +142,8 @@ async fn test_ve_inter_slice_reduce_add_sat_i32() {
     let out_hbm = launch(ve_inter_slice_reduce_add_sat_i32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
-    let expected: Tensor<i32, m![A]> = input
-        .into_inner()
-        .reduce(|a, b| a.zip_map(b, |x, y| x.saturating_add(y)), Opt::Init(0));
-    assert_eq!(expected.to_buf(), result.to_buf());
+    let expected: Tensor<i32, m![A]> = input.into_inner().reduce(|x, y| x.saturating_add(y), 0, false);
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -171,10 +157,8 @@ async fn test_ve_inter_slice_reduce_max_i32() {
     let out_hbm = launch(ve_inter_slice_reduce_max_i32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
-    let expected: Tensor<i32, m![A]> = input
-        .into_inner()
-        .reduce(|a, b| a.zip_map(b, |x, y| x.max(y)), Opt::Init(i32::MIN));
-    assert_eq!(expected.to_buf(), result.to_buf());
+    let expected: Tensor<i32, m![A]> = input.into_inner().reduce(|x, y| x.max(y), i32::MIN, false);
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 #[tokio::test]
@@ -189,7 +173,7 @@ async fn test_ve_inter_slice_reduce_add_f32() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     let expected: Tensor<f32, m![A]> = input.into_inner().reduce_add();
-    assert_f32_vec_eq(&expected.to_buf(), &result.to_buf());
+    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
 }
 
 // =============================================================================
@@ -208,11 +192,9 @@ async fn test_ve_vru_then_vau_i32() {
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     // Expected: saturating_add across R, then +100 per element
-    let reduced: Tensor<i32, m![A]> = input
-        .into_inner()
-        .reduce(|a, b| a.zip_map(b, |x, y| x.saturating_add(y)), Opt::Init(0));
-    let expected = reduced.map(|v| v.map(|x| x.wrapping_add(100)));
-    assert_eq!(expected.to_buf(), result.to_buf());
+    let reduced: Tensor<i32, m![A]> = input.into_inner().reduce(|x, y| x.saturating_add(y), 0, false);
+    let expected = reduced.map(|x| x.wrapping_add(100));
+    assert_eq!(expected.into_buf(), result.into_buf());
 }
 
 // VCG-required reduce examples (ve_vcg_intra_*) were removed: the example mappings

@@ -5,22 +5,8 @@ use super::scalar::Scalar;
 /// Trait for types that can be cast during fetch operations.
 pub trait FetchCast<D: Scalar>: Into<D> + Cast<D> {}
 
-// TODO: complete list of fetch conversions
-// Int4ToInt5,
-// Int4ToInt32,
-// Int8ToInt9,
-// Int8ToInt32,
-// Int16ToInt32,
-// Float8e4m3ToFloat32,
-// Float8e5m2ToFloat32,
-// Bfloat16ToFloat32,
-// Float16ToFloat32,
-// Float32ToBfloat16,
-// // Renegade-S only
-// Int4ToInt9,
-// Int16ToInt9,
-// Float8e4m3ToBfloat16,
-// Float8e5m2ToBfloat16,
+// TODO: extend `FetchCast` with the remaining int/float widening and narrowing conversions
+// (including the Renegade-S-only variants).
 
 // Identity casts
 impl<D> FetchCast<D> for D where D: Scalar {}

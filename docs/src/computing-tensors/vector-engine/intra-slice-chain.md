@@ -37,6 +37,11 @@ fn staged_pipeline<'l, const T: Tu>(
     .vector_clip(ClipBinaryOpI32::Max, 0)
     .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+# 
+# let c: CollectTensor<'_, _, i32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = staged_pipeline(c);
 ```
 
 ### Pipeline
@@ -291,10 +296,10 @@ Shape semantics:
 axes![A = 512, B = 2, S = 64];
 
 fn vector_narrow_split_semantics<'l, const T: Tu>(
-    input: VectorBranchTensor<'l, T, i32, m![1], m![B], m![S # 16 / 4], m![S # 16 % 4], m![A % 8], i32, NoTensor, { stage::VeOrder::IntraFirst }>,
-) -> VectorNarrowTensor<'l, T, i32, m![1], m![B], m![S # 16 / 4], m![S # 16 % 4, A / 4 % 2], m![A % 4], i32, NoTensor, { stage::VeOrder::IntraFirst }>
+    input: VectorBranchTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![S % 4], m![A % 8], i32, NoTensor, { stage::VeOrder::IntraFirst }>,
+) -> VectorNarrowTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![S % 4, A / 4 % 2], m![A % 4], i32, NoTensor, { stage::VeOrder::IntraFirst }>
 {
-    input.vector_narrow_split::<m![S # 16 % 4, A / 4 % 2], m![A % 4]>()
+    input.vector_narrow_split::<m![S % 4, A / 4 % 2], m![A % 4]>()
     // shape semantics: [T], [P] -> [T, P / 2], [P % 4]
 }
 
@@ -305,6 +310,14 @@ fn vector_narrow_trim_semantics<'l, const T: Tu>(
     input.vector_narrow_trim::<m![A % 2 # 4]>()
     // shape semantics: [T], [P] -> [T], [P = 4]
 }
+# 
+# let mut ctx = Context::acquire();
+# 
+# let i: VectorBranchTensor<'_, _, i32, m![1], m![B], m![S / 4 # 256], m![S % 4], m![A % 8], i32, NoTensor, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let _o = vector_narrow_split_semantics(i);
+# 
+# let i: VectorBranchTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, NoTensor, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let _o = vector_narrow_trim_semantics(i);
 ```
 
 ### Float Cluster
@@ -392,11 +405,11 @@ Shape semantics:
 # #![feature(adt_const_params)]
 # extern crate furiosa_opt_std;
 # use furiosa_opt_std::prelude::*;
-axes![A = 512, B = 2, S = 64];
+axes![A = 512, B = 2, S = 64, R = 8];
 
 fn vector_widen_concat_semantics<'l, const T: Tu>(
-    input: VectorIntraSliceReduceTensor<'l, T, i32, m![1], m![B], m![S # 16 / 4], m![A / 4 % 2], m![A % 4], i32, NoTensor, { stage::VeOrder::IntraFirst }>,
-) -> VectorWidenTensor<'l, T, i32, m![1], m![B], m![S # 16 / 4], m![1], m![A % 8], i32, NoTensor, { stage::VeOrder::IntraFirst }>
+    input: VectorIntraSliceReduceTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![A / 4 % 2], m![A % 4], i32, NoTensor, { stage::VeOrder::IntraFirst }>,
+) -> VectorWidenTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![1], m![A % 8], i32, NoTensor, { stage::VeOrder::IntraFirst }>
 {
     input.vector_widen_concat::<m![1], m![A % 8]>()
     // shape semantics: [T, P / 2], [P % 4] -> [T], [P]
@@ -409,6 +422,19 @@ fn vector_widen_pad_semantics<'l, const T: Tu>(
     input.vector_widen_pad::<m![A % 2 # 8]>()
     // shape semantics: [T], [P] -> [T], [P # 8]
 }
+# 
+# let mut ctx = Context::acquire();
+# 
+# let i: VectorBranchTensor<'_, _, i32, m![1], m![B], m![S / 4 # 256], m![R, A / 4 % 2], m![A % 4 # 8], i32, NoTensor, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let i = i
+#     .vector_narrow_trim::<m![A % 4]>()
+#     .vector_intra_slice_reduce::<R, m![A / 4 % 2], m![A % 4]>(IntraSliceReduceOpI32::AddSat);
+# 
+# let _o = vector_widen_concat_semantics(i);
+# 
+# let i: VectorBranchTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, NoTensor, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let i = i.vector_narrow_trim::<m![A % 2 # 4]>().vector_fp_unary(FpUnaryOp::Exp);
+# let _o = vector_widen_pad_semantics(i);
 ```
 
 ### FpToFxp Conversion
@@ -482,6 +508,11 @@ fn add_constant<'l, const T: Tu>(
         .vector_fxp(FxpBinaryOp::AddFxp, 100)
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, i32, m![1], m![B], m![A / 8], m![1], m![A % 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = add_constant(i);
 ```
 
 ### `f32` Pipeline
@@ -506,6 +537,11 @@ fn sigmoid<'l, const T: Tu>(
         .vector_widen_pad::<m![A % 2 # 8]>() // Widen: Way4 -> Way8
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = sigmoid(i);
 ```
 
 ### Single-Stream Argument Mode
@@ -527,6 +563,11 @@ fn bias_minus_x<'l, const T: Tu>(
         .vector_fxp_with_mode(FxpBinaryOp::SubFxp, BinaryArgMode::Mode10, 7) // compute 7 - x
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, i32, m![1], m![B], m![A / 8], m![1], m![A % 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = bias_minus_x(i);
 ```
 
 ### VRF Operand
@@ -549,6 +590,12 @@ fn vrf_add<'l, const T: Tu>(
         .vector_fxp(FxpBinaryOp::AddFxp, VeRhs::vrf(vrf))
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, i32, m![1], m![B], m![A / 8], m![N], m![A % 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let v: VrfTensor<i32, m![1], m![B], m![A / 8], m![A % 8]> = unsafe { VrfTensor::from_addr(0) };
+# let _o = vrf_add(i, &v);
 ```
 
 ### Stash on the Fp-Only Path
@@ -575,6 +622,11 @@ fn residual_max<'l, const T: Tu>(
         .vector_clip(ClipBinaryOpF32::Max, Stash)             // max(2 * x, x)
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = residual_max(i);
 ```
 
 ### Stash on the Fxp-Only Path
@@ -599,6 +651,11 @@ fn stash_at_fxp<'l, const T: Tu>(
         .vector_clip(ClipBinaryOpI32::Max, Stash)           // compute max(x + bias, x)
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, i32, m![1], m![B], m![A / 8], m![1], m![A % 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = stash_at_fxp(i);
 ```
 
 ### Stash Across Narrow and Widen
@@ -625,6 +682,11 @@ fn stash_across_narrow_widen<'l, const T: Tu>(
         .vector_clip(ClipBinaryOpF32::Max, Stash)          // compute max(sigmoid(x), x)
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = stash_across_narrow_widen(i);
 ```
 
 ### Pair Add
@@ -646,6 +708,11 @@ fn pair_add<'l, const T: Tu>(
         .vector_clip_zip(ClipBinaryOpI32::AddFxp)
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, i32, m![1], m![B], m![A / 8], m![I], m![A % 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = pair_add(i);
 ```
 
 ### Pair Per-Side Preprocessing
@@ -668,6 +735,11 @@ fn pair_preprocess_one_side<'l, const T: Tu>(
         .vector_clip_zip(ClipBinaryOpI32::AddFxp)
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, i32, m![1], m![B], m![A / 8], m![I], m![A % 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = pair_preprocess_one_side(i);
 ```
 
 ### Pair Float Pipeline with Zip
@@ -686,11 +758,16 @@ fn pair_fp_mul_zip<'l, const T: Tu>(
     input
         .vector_init()
         .vector_intra_slice_unzip::<I, m![1 # 2], m![1]>()
-        .vector_narrow_split::<m![B], m![A % 2 # 4]>()        // both groups: Way8 -> Way4
+        .vector_narrow_split::<m![1 # 2], m![A % 2 # 4]>()        // both groups: Way8 -> Way4
         .vector_fp_zip(FpBinaryOp::MulF(FpMulAlu::Mul0))   // group0 * group1 (Way4)
         .vector_widen_concat::<m![1], m![A % 2 # 8]>()           // Way4 -> Way8
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, f32, m![1], m![B], m![A / 2], m![I], m![A % 2 # 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = pair_fp_mul_zip(i);
 ```
 
 ### Pair Per-Group Preprocessing
@@ -709,12 +786,17 @@ fn pair_asymmetric_preprocess<'l, const T: Tu>(
     input
         .vector_init()
         .vector_intra_slice_unzip::<I, m![1 # 2], m![1]>()
-        .vector_narrow_split::<m![B], m![A % 2 # 4]>()
+        .vector_narrow_split::<m![1 # 2], m![A % 2 # 4]>()
         .vector_fp_unary(FpUnaryOp::Exp, true, false)         // group 0: exp(x), group 1: skip
         .vector_fp_zip(FpBinaryOp::MulF(FpMulAlu::Mul0))   // exp(group0) * group1
         .vector_widen_concat::<m![1], m![A % 2 # 8]>()
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, f32, m![1], m![B], m![A / 2], m![I], m![A % 2 # 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = pair_asymmetric_preprocess(i);
 ```
 
 ### Pair Zip Argument Mode
@@ -733,11 +815,16 @@ fn pair_sub_reverse<'l, const T: Tu>(
     input
         .vector_init()
         .vector_intra_slice_unzip::<I, m![1 # 2], m![1]>()
-        .vector_narrow_split::<m![B], m![A % 2 # 4]>()
+        .vector_narrow_split::<m![1 # 2], m![A % 2 # 4]>()
         .vector_fp_zip_with_mode(FpBinaryOp::SubF, BinaryArgMode::Mode10) // compute group1 - group0
         .vector_widen_concat::<m![1], m![A % 2 # 8]>()
         .vector_final()
 }
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, f32, m![1], m![B], m![A / 2], m![I], m![A % 2 # 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = pair_sub_reverse(i);
 ```
 
 ## Performance

@@ -67,14 +67,14 @@ pub type BeginTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B =
 impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
     BeginTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
 {
-    const fn check_constraints() {
-        constraints::assert_cluster_size(Cluster::SIZE);
-        constraints::assert_slice_size(Slice::SIZE);
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
     }
 
     #[doc(hidden)]
     pub fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
-        const { Self::check_constraints() };
+        Self::check_constraints();
 
         Self {
             ctx,

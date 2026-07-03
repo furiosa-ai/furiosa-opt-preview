@@ -30,7 +30,8 @@ impl<D: Scalar, Chip: M, Element: M> From<&HbmTensorViewMut<'_, D, Chip, Element
 
 impl<D: Scalar, Chip: M, Element: M> From<Buffer> for HbmTensor<D, Chip, Element> {
     fn from(buf: Buffer) -> Self {
-        unsafe { Self::from_addr(lib().furiosa_npu_buffer_offset(buf.as_ptr())) }
+        let addr = unsafe { lib().furiosa_npu_buffer_offset(buf.as_ptr()) };
+        unsafe { Self::from_addr(addr) }.owns(buf)
     }
 }
 

@@ -83,7 +83,7 @@ axes![M = 32, N = 8, K = 16, L = 2, B = 5];
 fn stream_adapter_example<'l, const T: Tu>(
     input: CollectTensor<'l, { T }, bf16, m![1], m![1 # 2], m![1 # 256], m![M, L], m![K]>,
     trf: &TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![B, L, K]>,
-) -> ContractOuterTensor<'l, { T }, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![M, B], m![L, K]> {
+) -> ContractOuterTensor<'l, { T }, f32, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![M, B], m![L, K]> {
     // Packing (PackSize = 2):
     //   L = 2 (innermost Time) absorbed into Packet.
     //   PackTime = [M = 32], PackPacket = [L = 2, K = 16] = 32 bf16 = 64B.
@@ -102,7 +102,7 @@ fn stream_adapter_example<'l, const T: Tu>(
 
 ### Constraints
 
-- `OutPacket::SIZE * D::SIZE ∈ {32, 64}` bytes (on RNGD): 32 for `PackSize = 1`, 64 for `PackSize = 2`. The user picks this size and Packing's collect-flit count follows.
+- `OutPacket::SIZE * Storage::SIZE ∈ {32, 64}` bytes (on RNGD), where `Storage` is the pre-widen operand dtype (e.g. `bf16` = 2 B, *not* the widened `f32` accumulator the result tensor carries): 32 for `PackSize = 1`, 64 for `PackSize = 2`. The user picks this size and Packing's collect-flit count follows.
 - `PackSize ∈ {1, 2}` (see [Packing](#packing)).
 - `Lane::SIZE ∈ {1, 2, 4, 8}`.
 
@@ -154,7 +154,7 @@ axes![M = 32, N = 8, K = 32];
 fn trf_sequencer_full_read<'l, const T: Tu>(
     input: CollectTensor<'l, T, bf16, m![1], m![1 # 2], m![1 # 256], m![M, K / 16], m![K % 16]>,
     trf: &TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![K]>,
-) -> ContractOuterTensor<'l, T, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![M], m![K]> {
+) -> ContractOuterTensor<'l, T, f32, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![M], m![K]> {
     // Element         = K
     // ReadSize        = 32
     // PacketBroadcast = 1
@@ -181,7 +181,7 @@ axes![M = 32, N = 8, K = 16, L = 2, O = 2];
 fn trf_sequencer_partial_read<'l, const T: Tu>(
     input: CollectTensor<'l, T, bf16, m![1], m![1 # 2], m![1 # 256], m![O, M, L], m![K]>,
     trf: &TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![O, K]>,
-) -> ContractOuterTensor<'l, T, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![O, M], m![L, K]> {
+) -> ContractOuterTensor<'l, T, f32, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![O, M], m![L, K]> {
     // Element         = [O, K]
     // ReadSize        = 16
     // PacketBroadcast = L

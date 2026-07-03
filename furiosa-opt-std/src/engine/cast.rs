@@ -32,15 +32,15 @@ pub type CastTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = 
 impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
     CastTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
 {
-    const fn check_constraints() {
-        constraints::assert_cluster_size(Cluster::SIZE);
-        constraints::assert_slice_size(Slice::SIZE);
-        constraints::assert_packet_one_flit(D::BITS, Packet::SIZE);
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
+        constraints::assert_packet_one_flit::<D, Packet>();
     }
 
     #[doc(hidden)]
     pub fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
-        const { Self::check_constraints() };
+        Self::check_constraints();
 
         Self {
             ctx,

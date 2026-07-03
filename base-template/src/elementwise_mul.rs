@@ -9,8 +9,8 @@ async fn main() {
     let mut rng = SmallRng::seed_from_u64(42);
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
     let _out_hbm = launch(elementwise_mul_kernel, (&mut ctx, &lhs_hbm, &rhs_hbm)).await;
     println!("Elementwise Mul: kernel ran");
 }
@@ -27,8 +27,8 @@ mod tests {
         let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
         let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-        let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0).await;
-        let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+        let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+        let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
         // Reference: out[i] = lhs[i] * rhs[i].
         let lhs_buf: Vec<i32> = lhs.into_buf();

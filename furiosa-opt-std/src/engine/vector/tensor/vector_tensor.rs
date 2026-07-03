@@ -202,7 +202,7 @@ impl<
     pub(crate) fn apply_binary<NextStage: stage::Stage, NextFS: stage::VeTensorContext>(
         mut self,
         alu: RngdAlu,
-        op_fn: impl Fn(D, D) -> D,
+        op_fn: impl Fn(D, D) -> D + Sync,
         operands: &ArrayVec<BinaryOperandTag<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>, MAX_TAGS>,
     ) -> VeTensorData<NextStage, D, Chip, Cluster, Slice, Time, Packet, StashD, Stash, VE_ORDER, NextFS, W> {
         // Only read stash if actually used by an operand
@@ -948,7 +948,7 @@ fn blend_operand<D: VeScalar, Mapping: M>(
     operand0: &VeRhs<D, Mapping>,
     tag: &Tensor<u8, Mapping>,
     stash_data: Option<&Tensor<D, Mapping>>,
-    blend: impl Fn(D, D, u8) -> D,
+    blend: impl Fn(D, D, u8) -> D + Sync,
 ) -> <CurrentBackend as Backend>::Storage<D> {
     match operand0 {
         VeRhs::Vrf { data } => CurrentBackend::zip3_with(out, &data.inner, &tag.inner, blend),
@@ -969,7 +969,7 @@ fn blend_operand<D: VeScalar, Mapping: M>(
 pub(super) fn apply_binary_op<D: VeScalar, Mapping: M>(
     data: &Tensor<D, Mapping>,
     tag: &Tensor<u8, Mapping>,
-    op: impl Fn(D, D) -> D,
+    op: impl Fn(D, D) -> D + Sync,
     operands: &[BinaryOperandTag<D, Mapping>],
     stash_data: Option<&Tensor<D, Mapping>>,
 ) -> Tensor<D, Mapping> {
@@ -985,7 +985,7 @@ pub(super) fn apply_binary_op<D: VeScalar, Mapping: M>(
 /// Applies a unary operation to every position of `data`. Unary ops accept no branch [`OperandTag`].
 pub(super) fn apply_unary_op<D: VeScalar, Mapping: M>(
     data: &Tensor<D, Mapping>,
-    op: impl Fn(D) -> D,
+    op: impl Fn(D) -> D + Sync,
 ) -> Tensor<D, Mapping> {
     data.map(op)
 }
@@ -995,7 +995,7 @@ pub(super) fn apply_unary_op<D: VeScalar, Mapping: M>(
 pub(super) fn apply_ternary_op<Mapping: M>(
     data: &Tensor<f32, Mapping>,
     tag: &Tensor<u8, Mapping>,
-    op: impl Fn(f32, f32, f32) -> f32,
+    op: impl Fn(f32, f32, f32) -> f32 + Sync,
     operands: &[TernaryOperandTag<Mapping>],
     stash_data: Option<&Tensor<f32, Mapping>>,
 ) -> Tensor<f32, Mapping> {

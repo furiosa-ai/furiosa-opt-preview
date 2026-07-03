@@ -13,7 +13,7 @@ use crate::prelude::VeScalar;
 
 impl LogicBinaryOpI32 {
     /// Returns the raw binary operation function.
-    pub(crate) fn op_fn(&self) -> fn(i32, i32) -> i32 {
+    pub fn op_fn(&self) -> fn(i32, i32) -> i32 {
         match self {
             Self::BitAnd => |a, b| a & b,
             Self::BitOr => |a, b| a | b,
@@ -42,7 +42,7 @@ impl LogicBinaryOpF32 {
 
 impl FxpBinaryOp {
     /// Returns the raw binary operation function.
-    pub(crate) fn op_fn(&self) -> fn(i32, i32) -> i32 {
+    pub fn op_fn(&self) -> fn(i32, i32) -> i32 {
         match self {
             Self::AddFxp => |a, b| a.wrapping_add(b),
             Self::AddFxpSat => |a, b| a.saturating_add(b),
@@ -98,7 +98,6 @@ impl FpBinaryOp {
             Self::AddF => |a, b| a + b,
             Self::SubF => |a, b| a - b,
             Self::MulF(_) => |a, b| a * b,
-            Self::MaskMulF(_) => |_a, _b| todo!("MaskMulF not implemented"),
             Self::DivF => |a, b| a / b,
         }
     }
@@ -109,7 +108,6 @@ impl FpTernaryOp {
     pub(crate) fn op_fn(&self) -> fn(f32, f32, f32) -> f32 {
         match self {
             Self::FmaF => |a, b, c| a.mul_add(b, c),
-            Self::MaskFmaF => |_a, _b, _c| todo!("MaskFmaF not implemented"),
         }
     }
 }
@@ -151,7 +149,7 @@ impl ClipBinaryOpF32 {
 
 impl FxpToFp {
     /// Returns the conversion function.
-    pub(crate) fn op_fn(&self) -> impl Fn(i32) -> f32 {
+    pub(crate) fn op_fn(&self) -> impl Fn(i32) -> f32 + Sync {
         let int_width = self.int_width();
         move |x| crate::float::fixedpoint_to_float(x, int_width)
     }
@@ -159,7 +157,7 @@ impl FxpToFp {
 
 impl FpToFxp {
     /// Returns the conversion function.
-    pub(crate) fn op_fn(&self) -> impl Fn(f32) -> i32 {
+    pub(crate) fn op_fn(&self) -> impl Fn(f32) -> i32 + Sync {
         let int_width = self.int_width();
         move |x| crate::float::float_to_fixedpoint(x, int_width)
     }
@@ -168,17 +166,17 @@ impl FpToFxp {
 /// Trait for ops that provide conversion operation.
 pub trait HasConversionOp<D: VeScalar, D2: VeScalar>: Clone + Copy {
     /// Returns the conversion function.
-    fn conversion_op_fn(&self) -> impl Fn(D) -> D2;
+    fn conversion_op_fn(&self) -> impl Fn(D) -> D2 + Sync;
 }
 
 impl HasConversionOp<i32, f32> for FxpToFp {
-    fn conversion_op_fn(&self) -> impl Fn(i32) -> f32 {
+    fn conversion_op_fn(&self) -> impl Fn(i32) -> f32 + Sync {
         self.op_fn()
     }
 }
 
 impl HasConversionOp<f32, i32> for FpToFxp {
-    fn conversion_op_fn(&self) -> impl Fn(f32) -> i32 {
+    fn conversion_op_fn(&self) -> impl Fn(f32) -> i32 + Sync {
         self.op_fn()
     }
 }
@@ -290,20 +288,20 @@ impl FpDivBinaryOp {
 /// Trait for ops that provide unary operation function.
 pub trait HasUnaryOp<D>: Clone + Copy {
     /// Returns a function that applies this unary operation to mainstream values.
-    fn unary_op_fn(self) -> impl Fn(D) -> D;
+    fn unary_op_fn(self) -> impl Fn(D) -> D + Sync;
 }
 
 /// Trait for ops that provide binary operation function.
 pub trait HasBinaryOp<D>: Clone + Copy {
     /// Returns a function that applies this binary operation with the given mode.
     /// If mode is None, uses the default mode (Mode01).
-    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(D, D) -> D;
+    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(D, D) -> D + Sync;
 }
 
 /// Trait for ops that provide ternary operation function.
 pub trait HasTernaryOp<D>: Clone + Copy {
     /// Returns a function that applies this ternary operation.
-    fn ternary_op_fn(self, mode: Option<TernaryArgMode>) -> impl Fn(D, D, D) -> D;
+    fn ternary_op_fn(self, mode: Option<TernaryArgMode>) -> impl Fn(D, D, D) -> D + Sync;
 }
 
 // ============================================================================
@@ -311,55 +309,55 @@ pub trait HasTernaryOp<D>: Clone + Copy {
 // ============================================================================
 
 impl HasBinaryOp<i32> for LogicBinaryOpI32 {
-    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(i32, i32) -> i32 {
+    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(i32, i32) -> i32 + Sync {
         mode.unwrap_or(BinaryArgMode::Mode01).apply(self.op_fn())
     }
 }
 
 impl HasBinaryOp<f32> for LogicBinaryOpF32 {
-    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(f32, f32) -> f32 {
+    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(f32, f32) -> f32 + Sync {
         mode.unwrap_or(BinaryArgMode::Mode01).apply(self.op_fn())
     }
 }
 
 impl HasBinaryOp<i32> for FxpBinaryOp {
-    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(i32, i32) -> i32 {
+    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(i32, i32) -> i32 + Sync {
         mode.unwrap_or(BinaryArgMode::Mode01).apply(self.op_fn())
     }
 }
 
 impl HasUnaryOp<f32> for FpUnaryOp {
-    fn unary_op_fn(self) -> impl Fn(f32) -> f32 {
+    fn unary_op_fn(self) -> impl Fn(f32) -> f32 + Sync {
         self.op_fn()
     }
 }
 
 impl HasBinaryOp<f32> for FpBinaryOp {
-    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(f32, f32) -> f32 {
+    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(f32, f32) -> f32 + Sync {
         mode.unwrap_or(BinaryArgMode::Mode01).apply(self.op_fn())
     }
 }
 
 impl HasTernaryOp<f32> for FpTernaryOp {
-    fn ternary_op_fn(self, mode: Option<TernaryArgMode>) -> impl Fn(f32, f32, f32) -> f32 {
+    fn ternary_op_fn(self, mode: Option<TernaryArgMode>) -> impl Fn(f32, f32, f32) -> f32 + Sync {
         mode.unwrap_or(TernaryArgMode::Mode012).apply(self.op_fn())
     }
 }
 
 impl HasBinaryOp<f32> for FpDivBinaryOp {
-    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(f32, f32) -> f32 {
+    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(f32, f32) -> f32 + Sync {
         mode.unwrap_or(BinaryArgMode::Mode01).apply(self.op_fn())
     }
 }
 
 impl HasBinaryOp<i32> for ClipBinaryOpI32 {
-    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(i32, i32) -> i32 {
+    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(i32, i32) -> i32 + Sync {
         mode.unwrap_or(BinaryArgMode::Mode01).apply(self.op_fn())
     }
 }
 
 impl HasBinaryOp<f32> for ClipBinaryOpF32 {
-    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(f32, f32) -> f32 {
+    fn binary_op_fn(self, mode: Option<BinaryArgMode>) -> impl Fn(f32, f32) -> f32 + Sync {
         mode.unwrap_or(BinaryArgMode::Mode01).apply(self.op_fn())
     }
 }

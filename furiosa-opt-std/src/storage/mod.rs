@@ -8,14 +8,92 @@
 
 use abi_stable::std_types::RResult;
 use furiosa_mapping::*;
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 
 mod buf;
 mod math;
+mod par_iters;
 mod phantom;
 
 pub use buf::BufStorage;
 pub use math::MathStorage;
 pub use phantom::PhantomStorage;
+
+/// A raw `*mut T` + length carried into a rayon closure for a disjoint-index scatter. `Sync` is the
+/// unchecked part: the caller must guarantee every parallel write targets a *distinct* index (no two
+/// jobs touch the same slot), which is what makes the concurrent writes through this pointer
+/// data-race-free. The `len` bound is checked, so an out-of-range index is a caught panic, not UB.
+/// The pointer is private and [`Self::write`] is the sole write entry point, so a caller cannot read
+/// it back or write through the bare pointer by accident. Drive it through [`par_scatter`] rather than
+/// hand-rolling the rayon loop where the plan is one write per step.
+pub(crate) struct DisjointScatter<T> {
+    base: *mut T,
+    len: usize,
+}
+// SAFETY: see the type doc -- every parallel write hits a distinct slot, so sharing the pointer is sound.
+unsafe impl<T> Sync for DisjointScatter<T> {}
+
+impl<T> DisjointScatter<T> {
+    /// Wraps a destination slice's base pointer and length.
+    pub(crate) fn new(dst: &mut [T]) -> Self {
+        Self {
+            base: dst.as_mut_ptr(),
+            len: dst.len(),
+        }
+    }
+
+    /// Writes `value` at element `idx`, bounds-checking `idx` against the wrapped length (a violation
+    /// is a caught panic in every build, not UB).
+    ///
+    /// # Safety
+    /// No two concurrent calls (across rayon jobs) may share an `idx` -- the caller's disjoint-write
+    /// invariant (see the type doc). The bound is checked here; distinctness is the caller's.
+    pub(crate) unsafe fn write(&self, idx: usize, value: T) {
+        assert!(idx < self.len, "DisjointScatter index {idx} out of bounds {}", self.len);
+        // SAFETY: `idx < self.len` (asserted) bounds the offset; distinct-index is the caller's invariant.
+        unsafe { *self.base.add(idx) = value };
+    }
+}
+
+/// Scatters `plan`'s writes into `dst` across the rayon pool. Consolidates the disjoint-write
+/// parallel-scatter loop shared by the storages' relayouts (transpose / reshape / scatter_buf /
+/// canonical_bases): each produces one `Option<(index, value)>` per plan step in a safe closure and
+/// hands them here, so the sole raw write and its bound live in one place ([`DisjointScatter::write`]).
+/// Each step is `Some((idx, value))` to write or `None` to skip -- the `Option` (rather than a
+/// `filter`) keeps the plan an [`IndexedParallelIterator`], so `with_min_len` can hold a small scatter
+/// to one (serial) job. Sites that SKIP an out-of-range or padding write yield `None`; a site where an
+/// out-of-range index is a bug yields `Some` unconditionally and lets the write's bound assert fail loud.
+///
+/// # Safety invariant (caller)
+/// The `Some` indices must be pairwise distinct (a bijection over the live cells) -- no two steps may
+/// share an index, so no two jobs write one slot. The bound is checked by [`DisjointScatter::write`].
+pub(crate) fn par_scatter<T: Send>(dst: &mut [T], plan: impl IndexedParallelIterator<Item = Option<(usize, T)>>) {
+    let scatter = DisjointScatter::new(dst);
+    let scatter = &scatter;
+    plan.with_min_len(PAR_MIN_JOB).for_each(|write| {
+        if let Some((idx, value)) = write {
+            // SAFETY: the caller guarantees distinct indices (see the fn doc); `write` bounds `idx`.
+            unsafe { scatter.write(idx, value) };
+        }
+    });
+}
+
+/// Minimum work per parallel job, in scalar operations (multiply-adds / fold steps), for the storages'
+/// rayon-parallel ops (`contraction`, `reduce`, `transpose`): rayon never splits below this, so a small
+/// op stays one (effectively serial) job rather than fragmenting into micro-jobs whose dispatch overhead
+/// would dominate (acute on a many-core box, where rayon splits aggressively). Each call site converts
+/// it to its own split unit: an op whose split element does one scalar op (a stream position) uses it as
+/// `with_min_len` directly, while a per-output-cell op divides by the inner block length so a job still
+/// does about `PAR_MIN_JOB` scalar ops.
+pub(crate) const PAR_MIN_JOB: usize = 1 << 16;
+
+/// The `with_min_len` for a per-output-cell parallel op: how many output cells make one job do about
+/// [`PAR_MIN_JOB`] scalar ops, given each cell folds an `inner_block`-length run. Clamped to `>= 1` so a
+/// huge inner block does not yield `with_min_len(0)` (rayon would then over-split). Shared by the
+/// storages' per-cell `reduce` / `contraction` / `gather`.
+pub(crate) fn min_cells_per_job(inner_block: usize) -> usize {
+    (PAR_MIN_JOB / inner_block.max(1)).max(1)
+}
 
 // Concrete per-backend storage types.
 //
@@ -240,9 +318,9 @@ mod concrete_tests {
     }
 
     /// `reduce` over a PADDED source mapping agrees between `MathStorage` and `BufStorage`. `BufStorage`
-    /// indexes the source by the logical odometer position `stream_pos / bsize` while `transpose` uses
-    /// physical sequencer offsets; this pins that the two stay equal when the source carries a `# N`
-    /// Top pad (where logical odometer order and physical wire order could diverge).
+    /// reads the source by its `ReadPlan` base + live-residue deltas (the `# N` Top-pad residue positions
+    /// dropped, never folded); this pins that the two backends stay equal when the source carries a `# N`
+    /// Top pad (where a padded residue cell, if folded, would double-count its live sibling).
     #[test]
     fn reduce_padded_source_math_and_buf() {
         // m![Hp, Ep = 2 # 4] (Hp=3): a source padded on its inner axis (Ep live 2, wire extent 4).

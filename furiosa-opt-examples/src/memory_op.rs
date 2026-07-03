@@ -11,15 +11,15 @@ use furiosa_opt_std::prelude::*;
 axes![A = 256, B = 4096];
 axes![Q = 896, T = 512];
 
-/// `DmTensor::to_dm`: relayout a DM tensor into a different slice/element split
-/// at a new address (DM → DM DMA copy).
+/// `DmTensor::to_dm`: relayout a DM tensor's `Element` payload (DM → DM DMA copy, auto-placed).
+/// The `Slice` size is preserved (`m![A]` and `m![1 # 2, A / 2]` are both 256).
 #[device(chip = 1)]
 pub fn dm_relayout(
     ctx: &mut Context,
     hbm: &HbmTensor<i32, m![1], m![A, B]>,
 ) -> HbmTensor<i32, m![1], m![A / 2, A % 2, B]> {
-    let dm: DmTensor<i32, m![1], m![1], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
-    let relaid: DmTensor<i32, m![1], m![1], m![A / 2], m![A % 2, B]> = dm.to_dm(&mut ctx.tdma, 0x10_0000);
+    let dm: DmTensor<i32, m![1], m![1 # 2], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
+    let relaid: DmTensor<i32, m![1], m![1 # 2], m![1 # 2, A / 2], m![A % 2, B]> = dm.to_dm(&mut ctx.tdma);
     relaid.to_hbm(&mut ctx.tdma, 0x20_0000)
 }
 

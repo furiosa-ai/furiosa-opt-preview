@@ -18,7 +18,7 @@ async fn test_transpose_simple() {
     let input_data: Vec<f32> = (0..total).map(|x| x as f32).collect();
 
     let hbm_input: HbmTensor<f32, m![1], m![A, B, C]> = HostTensor::<f32, m![A, B, C]>::from_buf(input_data.clone())
-        .to_hbm::<m![1], m![A, B, C]>(&mut ctx.pdma, 0x0)
+        .to_hbm::<m![1], m![A, B, C]>(&mut ctx.pdma)
         .await;
 
     let output = launch(transpose_simple, (&mut *ctx, &hbm_input)).await;

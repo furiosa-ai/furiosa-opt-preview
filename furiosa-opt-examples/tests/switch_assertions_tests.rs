@@ -26,7 +26,7 @@ mod alignment {
                 })
                 .collect::<Vec<_>>(),
         )
-        .to_hbm::<m![1], m![A, B # 64]>(&mut ctx.pdma, 0)
+        .to_hbm::<m![1], m![A, B # 64]>(&mut ctx.pdma)
         .await;
 
         let mut output = unsafe { HbmTensor::<i4, m![1], m![A, B # 64]>::from_addr(0x1000) };
@@ -39,7 +39,7 @@ mod alignment {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![A, B]>::from_addr(0x1000) };
@@ -55,7 +55,7 @@ mod alignment {
                 .map(|x| bf16::from_f32(x as f32))
                 .collect::<Vec<_>>(),
         )
-        .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+        .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
         .await;
 
         let mut output = unsafe { HbmTensor::<bf16, m![1], m![A, B]>::from_addr(0x1000) };
@@ -74,7 +74,7 @@ pub mod packet {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![A, B]>::from_addr(0x1000) };
@@ -88,7 +88,7 @@ pub mod packet {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![A, B]>::from_addr(0x1000) };
@@ -102,7 +102,7 @@ pub mod packet {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![A, B]>::from_addr(0x1000) };
@@ -116,7 +116,7 @@ pub mod packet {
 
         let input =
             HostTensor::<i8, m![A, C]>::from_buf((0..<m![A, C]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, C]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, C]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![A, C / 16, C % 16]>::from_addr(0x1000) };
@@ -130,7 +130,7 @@ pub mod packet {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![A, B]>::from_addr(0x1000) };
@@ -149,7 +149,7 @@ pub mod slice {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![A, B]>::from_addr(0x1000) };
@@ -168,7 +168,7 @@ mod broadcast1 {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output =
@@ -183,7 +183,7 @@ mod broadcast1 {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![C / 4, 1 # 4, A, C % 4, B]>::from_addr(0x1000) };
@@ -201,7 +201,7 @@ mod broadcast01 {
         let mut ctx = Context::acquire();
 
         let input = HostTensor::<i8, m![B]>::from_buf((0..<m![B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-            .to_hbm::<m![1], m![B]>(&mut ctx.pdma, 0)
+            .to_hbm::<m![1], m![B]>(&mut ctx.pdma)
             .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![F / 4, E / 4, B]>::from_addr(0x1000) };
@@ -215,7 +215,7 @@ mod broadcast01 {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output =
@@ -230,7 +230,7 @@ mod broadcast01 {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![C / 4, 1 # 4, A, C / 2 % 2, C % 2, B]>::from_addr(0x1000) };
@@ -249,7 +249,7 @@ mod transpose {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![C / 64, C % 2, C / 2 % 32, A, B]>::from_addr(0x1000) };
@@ -263,7 +263,7 @@ mod transpose {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![C / 128, C % 8, C / 8 % 16, A, B]>::from_addr(0x1000) };
@@ -277,7 +277,7 @@ mod transpose {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![C / 16, C % 4, C / 4 % 4, A, B]>::from_addr(0x1000) };
@@ -296,7 +296,7 @@ mod inter_transpose {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe {
@@ -312,7 +312,7 @@ mod inter_transpose {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![A, C % 32, C / 32 % 8, B]>::from_addr(0x1000) };

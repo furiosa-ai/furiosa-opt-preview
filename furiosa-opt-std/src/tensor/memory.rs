@@ -2,6 +2,7 @@
 
 use rand::Rng;
 use rand::distr::StandardUniform;
+use std::any::Any;
 use std::fmt::{self, Display, Formatter};
 use std::marker::PhantomData;
 
@@ -10,6 +11,7 @@ use furiosa_opt_lower::{RelaxedDivision, config_divide_relaxed};
 use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
+use crate::constraints;
 use crate::context::*;
 use crate::engine::vector::scalar::VeScalar;
 use crate::runtime::CurrentBackend;
@@ -153,13 +155,12 @@ impl<D: Scalar, Element: M, B: Backend> HostTensor<D, Element, B> {
         Tensor::from_buf(data).into()
     }
 
-    /// Converts to HBM tensor at `address`.
+    /// Stages this host tensor into a fresh HBM region assigned by the runtime allocator.
     pub async fn to_hbm<Chip: M, Element2: M>(
         &self,
         _dma: &mut DmaContext<{ Dma::Pcie }>,
-        address: Address,
     ) -> HbmTensor<D, Chip, Element2, B> {
-        B::to_hbm(self, address).await
+        B::to_hbm(self).await
     }
 
     /// Consumes self and returns the inner tensor.
@@ -250,13 +251,23 @@ impl<D: Scalar, Element: M> HostTensor<D, Element, crate::backend::Simulation> {
 
 /// Tensor stored in HBM memory.
 #[primitive(HbmTensor)]
-#[derive(Debug)]
 pub struct HbmTensor<D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend> {
     inner: Tensor<D, Pair<Chip, Element>, B>,
     // An HBM tensor always carries a concrete address (every producer supplies one and
     // `to_host` reads through it), so this is `Address`, not `Option<Address>`, unlike the
     // on-chip DM/VRF/TRF tensors.
     address: Address,
+    // Owns a backend resource (e.g. the Npu device allocation) so it is freed when this tensor
+    // drops, not before `launch` reads it. `None` for compiler-managed / `from_addr` tensors.
+    owner: Option<Box<dyn Any + Send + Sync>>,
+}
+
+impl<D: Scalar, Chip: M, Element: M, B: Backend> std::fmt::Debug for HbmTensor<D, Chip, Element, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HbmTensor")
+            .field("address", &self.address)
+            .finish_non_exhaustive()
+    }
 }
 
 // Manual impl: inner `Tensor` is not DeviceSend
@@ -274,7 +285,16 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     pub type Mapping = m![{ Chip }, { Element }];
 
     pub(crate) fn new(inner: Tensor<D, Self::Mapping, B>, address: Address) -> Self {
-        Self { inner, address }
+        Self {
+            inner,
+            address,
+            owner: None,
+        }
+    }
+
+    pub(crate) fn owns(mut self, owner: impl Any + Send + Sync) -> Self {
+        self.owner = Some(Box::new(owner));
+        self
     }
 
     pub(crate) fn inner(&self) -> &Tensor<D, Self::Mapping, B> {
@@ -365,20 +385,43 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     /// `Element2`, mirroring `Element3` from the index tensor) replace that gather-key axis:
     /// `output[..pre, k, ..post] = self[..pre, index[k], ..post]`.
     ///
-    /// Inverse of [`DmTensor::dma_scatter`]. `scaled` matches `dma_scatter`'s semantics:
-    /// `true` interprets index values as byte-offsets along the gather axis (divided
-    /// internally by `payload_size * sizeof(D)` to recover the row position); `false`
-    /// treats index values as raw row-position indices.
+    /// Inverse of [`DmTensor::dma_scatter`]. Index values are byte offsets along the gather
+    /// axis: to gather row `r`, pass `r` times one row's byte size (its element count times
+    /// `size_of::<D>()`; e.g. `128 * 2 = 256` for a 128-wide `bf16` row). Gathering with a raw,
+    /// SPM-resident index is [`Self::dma_gather_unscaled`].
     #[primitive(HbmTensor::dma_gather)]
     pub fn dma_gather<Cluster2: M, Slice2: M, Element2: M, Element3: M>(
         &self,
         index: &HbmTensor<i32, Chip, Element3, B>,
+    ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
+        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::new(Tensor::uninit(), None);
+        self.inner.gather::<_, _>(&mut output.inner, &index.inner, true);
+        output
+    }
+
+    /// Gather DRAM rows into SRAM at `address`. See [`Self::dma_gather`].
+    #[primitive(HbmTensor::dma_gather_at)]
+    pub fn dma_gather_at<Cluster2: M, Slice2: M, Element2: M, Element3: M>(
+        &self,
+        index: &HbmTensor<i32, Chip, Element3, B>,
         address: Address,
-        scaled: bool,
     ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
         let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = unsafe { DmTensor::from_addr(address) };
-        self.inner.gather::<_, _>(&mut output.inner, &index.inner, scaled);
+        self.inner.gather::<_, _>(&mut output.inner, &index.inner, true);
         output
+    }
+
+    /// Gather DRAM rows into SRAM at positions given by an SPM-resident (on-chip) index,
+    /// interpreting index values as raw row positions.
+    ///
+    /// Complements [`Self::dma_gather`]'s DRAM byte-offset index, for indices computed
+    /// on-chip. Not yet implemented.
+    // TODO: register the `DmTensor` index as the unscaled indirect-DMA SPM index tensor.
+    pub fn dma_gather_unscaled<IdxCluster: M, IdxSlice: M, IdxElement: M, Cluster2: M, Slice2: M, Element2: M>(
+        &self,
+        _index: &DmTensor<i32, Chip, IdxCluster, IdxSlice, IdxElement, B>,
+    ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
+        todo!("unscaled dma_gather (SPM-resident raw index) is not implemented yet")
     }
 }
 
@@ -612,7 +655,17 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     /// Logical shape (mapping) of this tensor.
     pub type Mapping = m![{ Chip }, { Cluster }, { Slice }, { Element }];
 
+    /// `Cluster` / `Slice` map to physical SRAM partitions; checked in `new` so every DM tensor
+    /// constructor validates them at compile time. One `const` block per check so a bad `Cluster`
+    /// and a bad `Slice` each report their own error (a single block stops at the first panic).
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
+    }
+
     pub(crate) fn new(inner: Tensor<D, Self::Mapping, B>, address: Option<Address>) -> Self {
+        Self::check_constraints();
+
         Self {
             inner,
             address,
@@ -623,6 +676,16 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
 
 impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<D, Chip, Cluster, Slice, Element, B> {
     /// Creates a DM tensor handle at the given raw address.
+    ///
+    /// `Cluster` / `Slice` are validated at compile time (see [`Self::new`]). A bad partition is
+    /// rejected before codegen; because each check sits in its own `const` block, every violated
+    /// check reports its own error (here `Cluster = 3` and `Slice = 5` both do, in one compile):
+    ///
+    /// ```compile_fail
+    /// use furiosa_opt_std::prelude::*;
+    /// // Cluster must be 1 | 2 and Slice must be 64 | 128 | 256.
+    /// let _ = unsafe { DmTensor::<i32, m![1], m![3], m![5], m![8]>::from_addr(0) };
+    /// ```
     ///
     /// # Safety
     ///
@@ -678,12 +741,16 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     ///
     /// (data - Chip).divide(K) = [N, V]
     /// ```
+    ///
+    /// Index values are byte offsets along the scatter axis (the dual of [`HbmTensor::dma_gather`]):
+    /// to write row `r`, pass `r` times one row's byte size (its element count times
+    /// `size_of::<D>()`; e.g. `128 * 2 = 256` for a 128-wide `bf16` row). Scattering with a raw,
+    /// SPM-resident index is [`Self::dma_scatter_unscaled`].
     #[primitive(DmTensor::dma_scatter)]
     pub fn dma_scatter<Key: M, Element2: M, Element3: M>(
         &self,
         index: &HbmTensor<i32, Chip, Element3, B>,
         output: &mut HbmTensor<D, Chip, Element2, B>,
-        scaled: bool,
     ) {
         let src = Pair::<Slice, Element>::to_value();
         let key = Key::to_value();
@@ -695,36 +762,76 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
              If the key axis is split across Chip and Element, indirect DMA cannot address it.",
         );
 
-        self.inner.scatter::<Key, _, _>(&mut output.inner, &index.inner, scaled);
+        self.inner.scatter::<Key, _, _>(&mut output.inner, &index.inner, true);
     }
 
-    /// Converts to data memory tensor.
+    /// Scatter SRAM values to DRAM at positions given by an SPM-resident (on-chip) index,
+    /// interpreting index values as raw row positions.
+    ///
+    /// Complements [`Self::dma_scatter`]'s DRAM byte-offset index, for indices computed
+    /// on-chip. `Key` names the scatter-key axis, exactly as in [`Self::dma_scatter`]: the
+    /// unscaled path scatters along the same key, so the caller must still specify it.
+    /// Not yet implemented.
+    // TODO: register the `DmTensor` index as the unscaled indirect-DMA SPM index tensor.
+    pub fn dma_scatter_unscaled<Key: M, IdxCluster: M, IdxSlice: M, IdxElement: M, Element2: M>(
+        &self,
+        _index: &DmTensor<i32, Chip, IdxCluster, IdxSlice, IdxElement, B>,
+        _output: &mut HbmTensor<D, Chip, Element2, B>,
+    ) {
+        // Same key-containment contract as `dma_scatter`.
+        let src = Pair::<Slice, Element>::to_value();
+        let key = Key::to_value();
+        assert!(
+            sequence(&[&key], &[&src], SequencerMode::Read).is_ok(),
+            "scatter key `{key}` must be fully contained in source `{src}`. \
+             If the key axis is split across Chip and Element, indirect DMA cannot address it.",
+        );
+        todo!("unscaled dma_scatter (SPM-resident raw index) is not implemented yet")
+    }
+
+    /// Converts to data memory tensor. A DM → DM transfer only relayouts the `Element` payload;
+    /// the `Slice` partition size is preserved (`Slice::SIZE == Slice2::SIZE`).
     #[primitive(DmTensor::to_dm)]
     pub fn to_dm<Slice2: M, Element2: M>(
         &self,
         _dma: &mut DmaContext<{ Dma::Tensor }>,
+    ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
+        assert_dma_layout::<D, m![{ Cluster }, { Slice }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
+        DmTensor::new(self.inner.transpose(true), None)
+    }
+
+    /// Converts to data memory tensor at `address`. See [`Self::to_dm`].
+    #[primitive(DmTensor::to_dm_at)]
+    pub fn to_dm_at<Slice2: M, Element2: M>(
+        &self,
+        _dma: &mut DmaContext<{ Dma::Tensor }>,
         address: Address,
     ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
         assert_dma_layout::<D, m![{ Cluster }, { Slice }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
         DmTensor::new(self.inner.transpose(true), Some(address))
     }
 
-    /// Copies into a fresh DM tensor via parallel copy.
+    /// Copies into a fresh DM tensor via parallel copy. Like [`Self::to_dm`], the `Slice` size is
+    /// preserved (`Slice::SIZE == Slice2::SIZE`).
     #[primitive(DmTensor::to_dm_pcopy)]
     pub fn to_dm_pcopy<Slice2: M, Element2: M>(
         &self,
         _sub: &mut TuContext<{ Tu::Sub }>,
     ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
         DmTensor::new(self.inner.transpose(true), None)
     }
 
-    /// Copies into a fresh DM tensor at `address` via parallel copy.
+    /// Copies into a fresh DM tensor at `address` via parallel copy. See [`Self::to_dm_pcopy`].
     #[primitive(DmTensor::to_dm_pcopy_at)]
     pub fn to_dm_pcopy_at<Slice2: M, Element2: M>(
         &self,
         _sub: &mut TuContext<{ Tu::Sub }>,
         address: Address,
     ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
         DmTensor::new(self.inner.transpose(true), Some(address))
     }
 
@@ -741,10 +848,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     pub unsafe fn reshape<Chip2: M, Cluster2: M, Slice2: M, Element2: M>(
         &self,
     ) -> DmTensor<D, Chip2, Cluster2, Slice2, Element2, B> {
-        assert_eq!(Chip::SIZE, Chip2::SIZE);
-        assert_eq!(Cluster::SIZE, Cluster2::SIZE);
-        assert_eq!(Slice::SIZE, Slice2::SIZE);
-        assert_eq!(Element::SIZE, Element2::SIZE);
+        constraints::assert_reshape_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
         let reshaped = unsafe {
             self.inner
                 .reshape::<m![{ Chip2 }, { Cluster2 }, { Slice2 }, { Element2 }]>()
@@ -805,6 +909,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         _dma: &mut DmaContext<{ Dma::Tensor }>,
         mut dst: DmTensorViewMut<'l, D, Chip2, Cluster2, Slice2, Element2, B>,
     ) {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
         assert_dma_layout::<D, m![{ Cluster }, { Slice }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
         dst.inner.transpose(self.inner, true);
     }
@@ -816,6 +921,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         _sub: &mut TuContext<{ Tu::Sub }>,
         mut dst: DmTensorViewMut<'l, D, Chip2, Cluster2, Slice2, Element2, B>,
     ) {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
         dst.inner.transpose(self.inner, false);
     }
 
@@ -825,6 +931,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         &self,
         start: usize,
     ) -> DmTensorView<'l, D, Chip2, Cluster, Slice, Element, B> {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster, Slice, Slice>();
         let inner = self.inner.tile::<Index, _, LEN>(start);
         DmTensorView { inner }
     }
@@ -835,6 +942,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         &self,
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Cluster2, Slice, Element, B> {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster2, Slice, Slice>();
         let inner = self.inner.tile::<Index, _, LEN>(start);
         DmTensorView { inner }
     }
@@ -845,6 +953,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         &self,
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Cluster, Slice2, Element, B> {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
         let inner = self.inner.tile::<Index, _, LEN>(start);
         DmTensorView { inner }
     }
@@ -917,6 +1026,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         self,
         start: usize,
     ) -> DmTensorViewMut<'l, D, Chip2, Cluster, Slice, Element, B> {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster, Slice, Slice>();
         let inner = self.inner.tile::<Index, _, LEN>(start);
         DmTensorViewMut { inner }
     }
@@ -927,6 +1037,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         self,
         start: usize,
     ) -> DmTensorViewMut<'l, D, Chip, Cluster2, Slice, Element, B> {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster2, Slice, Slice>();
         let inner = self.inner.tile::<Index, _, LEN>(start);
         DmTensorViewMut { inner }
     }

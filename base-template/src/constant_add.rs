@@ -8,7 +8,7 @@ async fn main() {
     let mut ctx = Context::acquire();
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![A]>::rand(&mut rng);
-    let in_hbm = input.to_hbm(&mut ctx.pdma, 0).await;
+    let in_hbm = input.to_hbm(&mut ctx.pdma).await;
     let _out_hbm = launch(constant_add_kernel, (&mut ctx, &in_hbm)).await;
     println!("Constant Add: kernel ran");
 }
@@ -23,7 +23,7 @@ mod tests {
 
         let mut rng = SmallRng::seed_from_u64(42);
         let input = HostTensor::<i32, m![A]>::rand(&mut rng);
-        let in_hbm = input.to_hbm(&mut ctx.pdma, 0).await;
+        let in_hbm = input.to_hbm(&mut ctx.pdma).await;
 
         // Reference: out[i] = in[i] + 1.
         let in_buf: Vec<i32> = input.into_buf();

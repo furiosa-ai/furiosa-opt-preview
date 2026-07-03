@@ -37,11 +37,14 @@ pub(crate) const CONTRACT_LANE_OUT_PACKET_ELEMENTS: usize = 8;
 
 /// Asserts a reduce packet's element count is a power of two and at most
 /// [`TEMPORAL_ACCUMULATOR_COLS`] (`packet_reduce` / `time_reduce` output).
-const fn assert_packet_pow2_within_accumulator_cols(size: usize) {
-    assert!(
-        size != 0 && size & (size - 1) == 0 && size <= TEMPORAL_ACCUMULATOR_COLS,
-        "Packet element count must be a power of two and at most the accumulator column count (32)"
-    );
+fn assert_packet_pow2_within_accumulator_cols<Packet: M>() {
+    const {
+        let size = Packet::SIZE;
+        assert!(
+            size != 0 && size & (size - 1) == 0 && size <= TEMPORAL_ACCUMULATOR_COLS,
+            "Packet element count must be a power of two and at most the accumulator column count (32)"
+        );
+    };
 }
 
 /// After the contraction engine.
@@ -94,10 +97,10 @@ pub struct ContractTimeTensor<
 impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M, Packet: M, B: Backend>
     ContractPacketTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
 {
-    const fn check_constraints() {
-        constraints::assert_cluster_size(Cluster::SIZE);
-        constraints::assert_slice_size(Slice::SIZE);
-        assert_packet_pow2_within_accumulator_cols(Packet::SIZE);
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
+        assert_packet_pow2_within_accumulator_cols::<Packet>();
     }
 
     #[doc(hidden)]
@@ -105,7 +108,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M
         ctx: &'l mut TuContext<{ T }>,
         inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Pair<Lane, Pair<Time, Packet>>>>>, B>,
     ) -> Self {
-        const { Self::check_constraints() };
+        Self::check_constraints();
         Self { ctx, inner }
     }
 }
@@ -113,10 +116,10 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M
 impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M, Packet: M, B: Backend>
     ContractTimeTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
 {
-    const fn check_constraints() {
-        constraints::assert_cluster_size(Cluster::SIZE);
-        constraints::assert_slice_size(Slice::SIZE);
-        assert_packet_pow2_within_accumulator_cols(Packet::SIZE);
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
+        assert_packet_pow2_within_accumulator_cols::<Packet>();
     }
 
     #[doc(hidden)]
@@ -125,7 +128,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M
         inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Pair<Lane, Pair<Time, Packet>>>>>, B>,
         pre_reduce_time: Mapping,
     ) -> Self {
-        const { Self::check_constraints() };
+        Self::check_constraints();
         Self {
             ctx,
             inner,
@@ -171,15 +174,15 @@ pub type ContractTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, 
 impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
     ContractTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
 {
-    const fn check_constraints() {
-        constraints::assert_cluster_size(Cluster::SIZE);
-        constraints::assert_slice_size(Slice::SIZE);
-        constraints::assert_packet_one_flit(D::BITS, Packet::SIZE);
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
+        constraints::assert_packet_one_flit::<D, Packet>();
     }
 
     #[doc(hidden)]
     pub fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
-        const { Self::check_constraints() };
+        Self::check_constraints();
 
         Self {
             ctx,

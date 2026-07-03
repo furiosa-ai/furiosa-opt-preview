@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use std::ops::{Add, Div, Mul, Rem, Sub};
 
 /// A trait for scalar types.
-pub trait Scalar: ndarray::LinalgScalar + Debug + Clone + Copy + PartialEq + Num {
+pub trait Scalar: ndarray::LinalgScalar + Debug + Clone + Copy + PartialEq + Num + Send + Sync {
     /// Number of bits per element.
     const BITS: usize;
 
@@ -41,21 +41,46 @@ pub trait ScalarBytes: Scalar {
     fn from_le_bytes(bytes: &[u8]) -> Self;
 }
 
-macro_rules! impl_scalar_std {
-    ($($t:ty),*) => {
+/// Implements [`Scalar`] (`BITS = size_of * 8`) and [`ScalarBytes`] (delegating to the type's inherent
+/// `from_le_bytes([u8; BITS/8])`) for each byte-aligned type. `f8`/`bf16`/`f8e4m3` are defined later in
+/// the module and supply their own inherent `from_le_bytes`. Sub-byte `i4` is hand-written below.
+macro_rules! impl_scalar {
+    ($($t:ty);* $(;)?) => {
         $(
             impl Scalar for $t {
-                const BITS: usize = std::mem::size_of::<Self>() * 8;
+                const BITS: usize = ::std::mem::size_of::<$t>() * 8;
             }
             impl ScalarBytes for $t {
                 fn from_le_bytes(bytes: &[u8]) -> Self {
-                    <$t>::from_le_bytes(bytes.try_into().expect("byte length mismatch"))
+                    // Convert the slice to the inherent `from_le_bytes`'s fixed-length array, which both
+                    // checks the length and disambiguates from this trait method (the delegate below
+                    // is the array-taking inherent, not a recursion).
+                    let arr = bytes.try_into().unwrap_or_else(|_| {
+                        panic!(
+                            "{} expects {} bytes, got {}",
+                            stringify!($t),
+                            <$t as Scalar>::BITS / 8,
+                            bytes.len()
+                        )
+                    });
+                    <$t>::from_le_bytes(arr)
                 }
             }
         )*
     };
 }
-impl_scalar_std!(i8, i16, i32, f32, u8);
+
+// The byte-aligned scalars.
+impl_scalar! {
+    i8;
+    u8;
+    i16;
+    i32;
+    f8;
+    f8e4m3;
+    bf16;
+    f32;
+}
 
 /// A data type that can be either initialized or uninitialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +93,7 @@ pub enum Opt<D> {
 
 impl<D> Opt<D> {
     /// Maps the initialized value using the provided function, or returns uninitialized.
+    #[inline]
     pub fn map<D2>(self, f: impl FnOnce(D) -> D2) -> Opt<D2> {
         match self {
             Opt::Init(val) => Opt::Init(f(val)),
@@ -76,6 +102,7 @@ impl<D> Opt<D> {
     }
 
     /// Combines two Opt values with a function. Returns Init only if both are Init.
+    #[inline]
     pub fn zip_map<D2, R>(self, other: Opt<D2>, f: impl FnOnce(D, D2) -> R) -> Opt<R> {
         match (self, other) {
             (Opt::Init(a), Opt::Init(b)) => Opt::Init(f(a, b)),
@@ -92,31 +119,13 @@ impl<D> Opt<D> {
     }
 }
 
+// `Opt` carries `Add` / `Mul` only for the `num_traits::Zero` / `One` supertraits the fold seed needs
+// (`Opt::Init(zero())`); both compose via `zip_map`.
 impl<D: Add<Output = D>> Add for Opt<D> {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Opt<D> {
-        let Opt::Init(lhs) = self else {
-            return Opt::Uninit;
-        };
-        let Opt::Init(rhs) = rhs else {
-            return Opt::Uninit;
-        };
-        Opt::Init(lhs + rhs)
-    }
-}
-
-impl<D: Sub<Output = D>> Sub for Opt<D> {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Opt<D> {
-        let Opt::Init(lhs) = self else {
-            return Opt::Uninit;
-        };
-        let Opt::Init(rhs) = rhs else {
-            return Opt::Uninit;
-        };
-        Opt::Init(lhs - rhs)
+        self.zip_map(rhs, |l, r| l + r)
     }
 }
 
@@ -124,27 +133,7 @@ impl<D: Mul<Output = D>> Mul for Opt<D> {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Opt<D> {
-        let Opt::Init(lhs) = self else {
-            return Opt::Uninit;
-        };
-        let Opt::Init(rhs) = rhs else {
-            return Opt::Uninit;
-        };
-        Opt::Init(lhs * rhs)
-    }
-}
-
-impl<D: Div<Output = D>> Div for Opt<D> {
-    type Output = Self;
-
-    fn div(self, rhs: Self) -> Opt<D> {
-        let Opt::Init(lhs) = self else {
-            return Opt::Uninit;
-        };
-        let Opt::Init(rhs) = rhs else {
-            return Opt::Uninit;
-        };
-        Opt::Init(lhs / rhs)
+        self.zip_map(rhs, |l, r| l * r)
     }
 }
 
@@ -243,13 +232,10 @@ impl rand::distr::Distribution<f8> for StandardUniform {
     }
 }
 
-impl Scalar for f8 {
-    const BITS: usize = 8;
-}
-
-impl ScalarBytes for f8 {
-    fn from_le_bytes(bytes: &[u8]) -> Self {
-        assert_eq!(bytes.len(), 1, "f8 expects 1 byte");
+impl f8 {
+    /// Decodes one element from its little-endian byte; the inherent peer the `impl_scalar!`-generated
+    /// [`ScalarBytes`] delegates to (matching `std`'s `from_le_bytes([u8; N])` shape).
+    pub(crate) fn from_le_bytes(bytes: [u8; 1]) -> Self {
         f8(::f8::f8::from(bytes[0]))
     }
 }
@@ -331,18 +317,13 @@ impl rand::distr::Distribution<bf16> for StandardUniform {
     }
 }
 
-impl Scalar for bf16 {
-    const BITS: usize = 16;
-}
-
-impl ScalarBytes for bf16 {
-    fn from_le_bytes(bytes: &[u8]) -> Self {
-        let raw = u16::from_le_bytes(bytes.try_into().expect("bf16 expects 2 bytes"));
-        bf16(half::bf16::from_bits(raw))
-    }
-}
-
 impl bf16 {
+    /// Decodes one element from its little-endian bytes; the inherent peer the `impl_scalar!`-generated
+    /// [`ScalarBytes`] delegates to (matching `std`'s `from_le_bytes([u8; N])` shape).
+    pub(crate) fn from_le_bytes(bytes: [u8; 2]) -> Self {
+        bf16(half::bf16::from_bits(u16::from_le_bytes(bytes)))
+    }
+
     /// Creates `bf16` from `f32`.
     pub fn from_f32(val: f32) -> Self {
         bf16(half::bf16::from_f32(val))
@@ -437,18 +418,13 @@ impl rand::distr::Distribution<f8e4m3> for StandardUniform {
     }
 }
 
-impl Scalar for f8e4m3 {
-    const BITS: usize = 8;
-}
-
-impl ScalarBytes for f8e4m3 {
-    fn from_le_bytes(bytes: &[u8]) -> Self {
-        assert_eq!(bytes.len(), 1, "f8e4m3 expects 1 byte");
+impl f8e4m3 {
+    /// Decodes one element from its little-endian byte; the inherent peer the `impl_scalar!`-generated
+    /// [`ScalarBytes`] delegates to (matching `std`'s `from_le_bytes([u8; N])` shape).
+    pub(crate) fn from_le_bytes(bytes: [u8; 1]) -> Self {
         f8e4m3(bytes[0])
     }
-}
 
-impl f8e4m3 {
     /// Creates `f8e4m3` from `f32`.
     pub fn from_f32(val: f32) -> Self {
         f8e4m3(crate::float::f8_e4_from_f32(val))
@@ -538,6 +514,8 @@ impl Num for i4 {
     }
 }
 
+// `BITS = 4` is explicit (`size_of` would round the `i8` storage up to 8); `i4` is not a `ScalarBytes`
+// since a single 4-bit element is not byte-addressable.
 impl Scalar for i4 {
     const BITS: usize = 4;
 }

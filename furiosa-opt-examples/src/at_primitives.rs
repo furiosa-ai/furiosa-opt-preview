@@ -1,8 +1,8 @@
 //! Codegen coverage for the address-taking `*_at` primitives.
 //!
 //! This PR strips explicit addresses from the on-chip transfers, which removes the only
-//! callers of the `*_at` variants (`to_dm_at`, `to_vrf_at`, `to_trf_at`, `commit_at`,
-//! `to_dm_pcopy_at`).
+//! callers of the `*_at` variants (`HbmTensor[View]::to_dm_at`, `DmTensor::to_dm_at`,
+//! `dma_gather_at`, `to_vrf_at`, `to_trf_at`, `commit_at`, `to_dm_pcopy_at`).
 //! These kernels keep each one exercised so the primitive still compiles and codegens.
 //! They mirror the address-free examples, swapping the on-chip call for its `*_at` form
 //! with an explicit address. (`to_hbm` is not split: an HBM tensor always takes an
@@ -135,5 +135,43 @@ pub mod pcopy {
         let src: DmTensor<i32, m![1], m![1], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
         let dst: DmTensor<i32, m![1], m![1], m![A], m![B]> = src.to_dm_pcopy_at(&mut ctx.sub, 0x10_0000);
         dst.to_hbm(&mut ctx.tdma, 0x20_0000)
+    }
+}
+
+/// `DmTensor::to_dm_at` (mirrors `memory_op::dm_relayout`). The DM → DM `to_dm` reaches MIR only,
+/// so this twin is exercised at the simulation level in `at_primitives_tests`.
+pub mod relayout {
+    use super::*;
+
+    axes![A = 256, B = 4096];
+
+    #[device(chip = 1)]
+    pub fn dm_relayout_at(
+        ctx: &mut Context,
+        hbm: &HbmTensor<i32, m![1], m![A, B]>,
+    ) -> HbmTensor<i32, m![1], m![A / 2, A % 2, B]> {
+        let dm: DmTensor<i32, m![1], m![1 # 2], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
+        let relaid: DmTensor<i32, m![1], m![1 # 2], m![1 # 2, A / 2], m![A % 2, B]> =
+            dm.to_dm_at(&mut ctx.tdma, 0x10_0000);
+        relaid.to_hbm(&mut ctx.tdma, 0x20_0000)
+    }
+}
+
+/// `HbmTensor::dma_gather_at` (mirrors `scatter_gather::gather_minimal`, which uses the address-free
+/// form). Like that example it reaches the VISA stage only, so this is codegen coverage.
+pub mod gather {
+    use super::*;
+
+    type Cluster = m![1 # 2];
+    axes![K = 512, D = 128, C = 612];
+
+    #[device(chip = 1)]
+    pub fn gather_at(
+        ctx: &mut Context,
+        table: &HbmTensor<bf16, Chip, m![K, D]>,
+        index: &HbmTensor<i32, Chip, m![C]>,
+    ) -> HbmTensor<bf16, Chip, m![C, D]> {
+        let values_dm: DmTensor<bf16, Chip, Cluster, m![D], m![C]> = table.dma_gather_at(index, 0x0);
+        values_dm.to_hbm(&mut ctx.tdma, 0x1000)
     }
 }

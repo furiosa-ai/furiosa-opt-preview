@@ -17,7 +17,8 @@ use crate::scalar::*;
 impl<
     'l,
     const T: Tu,
-    D: Scalar + ContractionCast,
+    D: Scalar,
+    Storage: ContractionCast<Output = D>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -25,17 +26,16 @@ impl<
     Time: M,
     Packet: M,
     B: Backend,
-> ContractOuterTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
+> ContractOuterTensor<'l, T, D, Storage, Chip, Cluster, Slice, Lane, Time, Packet, B>
 {
     /// Spatial reduction within `Packet`: reduce-add along the contracted axes inside `Packet`
-    /// of the product already produced by the Outer stage.
-    /// The product type is the widened contraction output type: `i4`/`i8` -> `i32`, `f8`/`bf16` -> `f32`.
+    /// of the product already produced by the Outer stage. `D` is the widened accumulator carried
+    /// unchanged through this reduce; the DPE input packet is still sized in `Storage` bytes.
     #[primitive(ContractOuterTensor::contract_packet)]
     pub fn contract_packet<OutPacket: M>(
         self,
-    ) -> ContractPacketTensor<'l, T, <D as ContractionCast>::Output, Chip, Cluster, Slice, Lane, Time, OutPacket, B>
-    {
-        verify_contract_packet::<D, Packet, OutPacket>();
+    ) -> ContractPacketTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, OutPacket, B> {
+        verify_contract_packet::<Storage, Packet, OutPacket>();
         ContractPacketTensor::new(self.ctx, self.inner.reduce_add())
     }
 }
@@ -44,12 +44,13 @@ impl<
 /// Validates the Packet Reducer.
 ///
 /// Checks:
-/// 1. `Packet` should be 32 or 64 bytes (mirroring the Outer stage's `OutPacket`).
+/// 1. `Packet` should be 32 or 64 bytes (mirroring the Outer stage's `OutPacket`). The size is taken
+///    in `Storage` (pre-widen) bytes: the DPE reads storage-width input flits, not accumulator-width.
 /// 2. `OutPacket::SIZE` should be a power of two and at most
 ///    `TEMPORAL_ACCUMULATOR_COLS` and be obtainable from `Packet` by splitting
 ///    at a power-of-two sized boundary.
-pub(crate) fn verify_contract_packet<D: Scalar, Packet: M, OutPacket: M>() {
-    let packet_size = D::size_in_bytes_from_length(Packet::SIZE);
+pub(crate) fn verify_contract_packet<Storage: Scalar, Packet: M, OutPacket: M>() {
+    let packet_size = Storage::size_in_bytes_from_length(Packet::SIZE);
     assert!(
         [32, 64].contains(&packet_size),
         "Packet must be 32 or 64 bytes, got {packet_size} bytes"

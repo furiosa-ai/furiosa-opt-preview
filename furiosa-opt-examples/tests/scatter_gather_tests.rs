@@ -25,19 +25,17 @@ async fn test_scatter_minimal() {
             .map(|i| bf16::from_f32(i as f32))
             .collect::<Vec<_>>(),
     )
-    .to_hbm(&mut ctx.pdma, 0x0)
+    .to_hbm(&mut ctx.pdma)
     .await;
 
     // Convert row indices to byte offsets (scaled=true).
     let entry_bytes = (<m![D]>::SIZE * std::mem::size_of::<bf16>()) as i32;
     let index: HbmTensor<i32, m![1], m![K]> =
         HostTensor::<i32, m![K]>::from_buf((0..<m![K]>::SIZE as i32).map(|i| i * entry_bytes).collect::<Vec<_>>())
-            .to_hbm(&mut ctx.pdma, 0x1000_0000)
+            .to_hbm(&mut ctx.pdma)
             .await;
 
-    let mut output: HbmTensor<bf16, m![1], m![C, D]> = HostTensor::<bf16, m![C, D]>::zero()
-        .to_hbm(&mut ctx.pdma, 0x2000_0000)
-        .await;
+    let mut output: HbmTensor<bf16, m![1], m![C, D]> = HostTensor::<bf16, m![C, D]>::zero().to_hbm(&mut ctx.pdma).await;
 
     launch(scatter_minimal, (&mut *ctx, &data, &index, &mut output)).await;
 

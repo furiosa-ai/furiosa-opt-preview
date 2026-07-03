@@ -20,8 +20,9 @@ use std::fmt::Debug;
 use furiosa_mapping::Mapping as MappingValue;
 use furiosa_mapping::*;
 
+use crate::cast::ContractionCast;
 use crate::scalar::Scalar;
-use crate::tensor::memory::{Address, HbmTensor, HostTensor};
+use crate::tensor::memory::{HbmTensor, HostTensor};
 
 pub use emulation::Emulation;
 pub use npu::Npu;
@@ -69,14 +70,16 @@ pub trait Backend: Sized + 'static {
     /// propagates `Uninit`, Emulation/Npu walk the `BufStorage` buffer over bare `D`, Typecheck
     /// no-ops on the phantom. Mapping-free: elementwise ops preserve the source layout, so no mapping
     /// type parameter is needed.
-    fn map<D: Scalar, D2: Scalar>(src: &Self::Storage<D>, f: impl FnMut(D) -> D2) -> Self::Storage<D2>;
+    /// The closure must be `Fn + Sync` (not `FnMut`): an elementwise map has no cross-cell state, and
+    /// [`Simulation`] folds the cells across the rayon pool.
+    fn map<D: Scalar, D2: Scalar>(src: &Self::Storage<D>, f: impl Fn(D) -> D2 + Sync) -> Self::Storage<D2>;
 
     /// Element-wise zip of two same-layout tensors to a new scalar. See [`Self::map`]; the result is
     /// defined only where both inputs are.
     fn zip_with<D: Scalar, D2: Scalar, D3: Scalar>(
         a: &Self::Storage<D>,
         b: &Self::Storage<D2>,
-        f: impl Fn(D, D2) -> D3,
+        f: impl Fn(D, D2) -> D3 + Sync,
     ) -> Self::Storage<D3>;
 
     /// Element-wise zip of three same-layout tensors to a new scalar, the ternary peer of
@@ -88,7 +91,7 @@ pub trait Backend: Sized + 'static {
         a: &Self::Storage<D>,
         b: &Self::Storage<D2>,
         c: &Self::Storage<D3>,
-        f: impl Fn(D, D2, D3) -> D4,
+        f: impl Fn(D, D2, D3) -> D4 + Sync,
     ) -> Self::Storage<D4>;
 
     /// Writes a transposed/broadcast view of `src` into `dst`. `src_offset` / `dst_offset` allow
@@ -115,12 +118,63 @@ pub trait Backend: Sized + 'static {
     /// plain reduce that asserts `Dst` is a pure factor and *rejects* an unintended extra axis;
     /// `true` permits the broadcast axes. The reduce fn works over bare scalars; the backend lifts
     /// it to its cell representation.
+    ///
+    /// `reduce_fn` should be associative: the parallel backends may regroup the fold across threads. An
+    /// associative fn gives a deterministic, serial-identical result; a non-associative one (saturating
+    /// integer add, float add/mul) can differ from a serial left-fold and vary run-to-run on
+    /// [`Emulation`] (the [`Simulation`] per-output-cell fold stays serial-identical).
     fn reduce<D: Scalar, Src: M, Dst: M>(
         src: &Self::Storage<D>,
-        reduce_fn: impl Fn(D, D) -> D,
+        reduce_fn: impl Fn(D, D) -> D + Sync,
         identity: D,
         allow_broadcast: bool,
     ) -> Self::Storage<D>;
+
+    /// Contracts `lhs` and `rhs` into an `Out`-shaped result: a generalized matmul
+    /// `out[..] = sum over the axes of Union absent from Out of (lhs * rhs)`. `Union` is the full
+    /// index space; `Lhs` / `Rhs` / `Out` are its sub-mappings (the contracted axes are those in
+    /// `Union` but not `Out`).
+    ///
+    /// The default materializes `Union`: it broadcasts both operands into the `Union` shape,
+    /// multiplies, then reduces, costing O(`Union`) memory. The host backends ([`Simulation`],
+    /// [`Emulation`]) override this with a fused single-pass O(`Out`)-memory version, which also lets
+    /// contractions far larger than memory's `Union` bound run.
+    ///
+    /// Like [`Self::reduce`], the per-output-cell sum is exact and deterministic on [`Simulation`]
+    /// (one worker folds each cell), but [`Emulation`] regroups it across threads, so its `f32` result
+    /// can differ from serial and vary run-to-run.
+    ///
+    /// `D: ContractionCast` is required by the host-backend overrides, whose folds widen to
+    /// [`ContractionCast::Output`]; the bound must cover every overriding impl even though this default
+    /// folds in narrow `D` and does not use it.
+    fn contraction<D: Scalar + ContractionCast, Union: M, Lhs: M, Rhs: M, Out: M>(
+        lhs: &Self::Storage<D>,
+        rhs: &Self::Storage<D>,
+    ) -> Self::Storage<D> {
+        let union = Union::to_value();
+        let mut lhs_u = Self::uninit::<D>(&union);
+        Self::transpose::<D, Lhs, Union>(
+            &mut lhs_u,
+            lhs,
+            &Index::new(),
+            &Index::new(),
+            &Lhs::to_value(),
+            &union,
+            true,
+        );
+        let mut rhs_u = Self::uninit::<D>(&union);
+        Self::transpose::<D, Rhs, Union>(
+            &mut rhs_u,
+            rhs,
+            &Index::new(),
+            &Index::new(),
+            &Rhs::to_value(),
+            &union,
+            true,
+        );
+        let prod = Self::zip_with::<D, D, D>(&lhs_u, &rhs_u, |a, b| a * b);
+        Self::reduce::<D, Union, Out>(&prod, |a, b| a + b, num_traits::Zero::zero(), false)
+    }
 
     /// Scatters `src` into `dst` at positions read from the same-backend `i32` index tensor.
     fn scatter<D: Scalar, Src: M, Key: M, Dst: M, Idx: M>(
@@ -168,7 +222,6 @@ pub trait Backend: Sized + 'static {
     /// from device kernel MIR, so no `#[primitive(...)]` annotation is needed.
     fn to_hbm<D: Scalar, Element: M, Chip: M, Element2: M>(
         host: &HostTensor<D, Element, Self>,
-        address: Address,
     ) -> impl std::future::Future<Output = HbmTensor<D, Chip, Element2, Self>>;
 
     /// Transfer HBM tensor to host. Host-only; see the `to_hbm` note above.

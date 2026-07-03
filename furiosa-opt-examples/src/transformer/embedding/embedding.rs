@@ -51,5 +51,5 @@ pub(super) fn embed(
     let ids_hbm: HbmTensor<i32, Chip, m![S % 4, S / 4]> = ids_reshaped.to_hbm(&mut ctx.tdma, 0x10e36000);
 
     // Gather embedding rows for each token id.
-    embedding_table.dma_gather(&ids_hbm, 0x0, true)
+    embedding_table.dma_gather(&ids_hbm)
 }

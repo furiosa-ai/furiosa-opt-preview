@@ -9,6 +9,7 @@ use self::view::*;
 use crate::scalar::*;
 
 use crate::backend::Backend;
+use crate::cast::ContractionCast;
 use crate::runtime::CurrentBackend;
 use crate::storage::MathStorage;
 
@@ -124,7 +125,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     /// primitive imposed across storages.
     pub fn map<D2: Scalar, F>(&self, f: F) -> Tensor<D2, Mapping, B>
     where
-        F: FnMut(D) -> D2,
+        F: Fn(D) -> D2 + Sync,
     {
         Tensor::from_inner(B::map(&self.inner, f))
     }
@@ -133,7 +134,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     /// the result is defined only where both inputs are.
     pub fn zip_with<D2: Scalar, D3: Scalar, F>(&self, other: &Tensor<D2, Mapping, B>, f: F) -> Tensor<D3, Mapping, B>
     where
-        F: Fn(D, D2) -> D3,
+        F: Fn(D, D2) -> D3 + Sync,
     {
         Tensor::from_inner(B::zip_with(&self.inner, &other.inner, f))
     }
@@ -156,7 +157,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     /// matching `Opt`'s arithmetic; Emulation/Npu have no undefined cells.
     pub fn reduce<Dst: M>(
         &self,
-        reduce_fn: impl Fn(D, D) -> D,
+        reduce_fn: impl Fn(D, D) -> D + Sync,
         identity: D,
         allow_broadcast: bool,
     ) -> Tensor<D, Dst, B> {
@@ -187,11 +188,15 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
         Self::from_buf((0..Mapping::SIZE).map(|_| rng.random::<D>()))
     }
 
-    /// Performs contraction between two tensors.
-    pub fn contraction<Union: M, Lhs: M, Rhs: M>(lhs: &Tensor<D, Lhs, B>, rhs: &Tensor<D, Rhs, B>) -> Self {
-        lhs.transpose::<Union>(true)
-            .zip_with(&rhs.transpose(true), |a, b| a * b)
-            .reduce_add()
+    /// Performs contraction between two tensors: a generalized matmul that multiplies `lhs` and `rhs`
+    /// over the shared `Union` index space and reduces the axes absent from the output `Mapping`.
+    /// Delegates to [`Backend::contraction`], which the host backends fuse into a single accumulating
+    /// pass (Simulation and Emulation do, so no full `Union` outer product is materialized).
+    pub fn contraction<Union: M, Lhs: M, Rhs: M>(lhs: &Tensor<D, Lhs, B>, rhs: &Tensor<D, Rhs, B>) -> Self
+    where
+        D: ContractionCast,
+    {
+        Tensor::from_inner(B::contraction::<D, Union, Lhs, Rhs, Mapping>(&lhs.inner, &rhs.inner))
     }
 }
 

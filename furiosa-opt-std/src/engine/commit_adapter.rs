@@ -55,15 +55,15 @@ pub type CommitTrimTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet
 impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
     CommitTrimTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
 {
-    const fn check_constraints() {
-        constraints::assert_cluster_size(Cluster::SIZE);
-        constraints::assert_slice_size(Slice::SIZE);
-        constraints::assert_packet_aligned_by_access_width_max_flit(D::BITS, Packet::SIZE);
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
+        constraints::assert_packet_aligned_by_access_width_max_flit::<D, Packet>();
     }
 
     #[doc(hidden)]
     pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
-        const { Self::check_constraints() };
+        Self::check_constraints();
 
         Self {
             ctx,
@@ -86,14 +86,14 @@ pub type CommitCastTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet
 impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
     CommitCastTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
 {
-    const fn check_constraints() {
-        constraints::assert_cluster_size(Cluster::SIZE);
-        constraints::assert_slice_size(Slice::SIZE);
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
     }
 
     #[doc(hidden)]
     pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
-        const { Self::check_constraints() };
+        Self::check_constraints();
 
         Self {
             ctx,
@@ -116,14 +116,14 @@ pub type CommitValidCountPackTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Ti
 impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
     CommitValidCountPackTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
 {
-    const fn check_constraints() {
-        constraints::assert_cluster_size(Cluster::SIZE);
-        constraints::assert_slice_size(Slice::SIZE);
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
     }
 
     #[doc(hidden)]
     pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
-        const { Self::check_constraints() };
+        Self::check_constraints();
 
         Self {
             ctx,

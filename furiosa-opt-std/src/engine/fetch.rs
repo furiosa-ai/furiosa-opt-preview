@@ -34,9 +34,9 @@ pub type FetchTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B =
 impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
     FetchTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
 {
-    const fn check_constraints() {
-        constraints::assert_cluster_size(Cluster::SIZE);
-        constraints::assert_slice_size(Slice::SIZE);
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
         // Packet alignment is deferred on purpose: a fetch packet may be sub-8-byte here and only
         // become 8-byte aligned after `fetch_cast` widens the element type. The final stream packet
         // is checked at the consumer (Switch/Collect) with the post-cast dtype.
@@ -44,7 +44,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
 
     #[doc(hidden)]
     pub fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
-        const { Self::check_constraints() };
+        Self::check_constraints();
 
         Self {
             ctx,

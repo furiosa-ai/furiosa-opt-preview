@@ -19,7 +19,7 @@ async fn test_ve_intra_slice_reduce_add_fxp_sat() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![A, R]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_intra_slice_reduce_add_fxp_sat, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
@@ -35,7 +35,7 @@ async fn test_ve_intra_slice_reduce_max_i32() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![A, R]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_intra_slice_reduce_max_i32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
@@ -51,7 +51,7 @@ async fn test_ve_intra_slice_reduce_min_i32() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![A, R]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_intra_slice_reduce_min_i32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
@@ -67,7 +67,7 @@ async fn test_ve_intra_slice_reduce_add_f32() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<f32, m![A, R]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_intra_slice_reduce_add_f32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
@@ -83,7 +83,7 @@ async fn test_ve_intra_slice_reduce_max_f32() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<f32, m![A, R]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_intra_slice_reduce_max_f32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
@@ -99,7 +99,7 @@ async fn test_ve_intra_slice_reduce_min_f32() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<f32, m![A, R]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_intra_slice_reduce_min_f32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
@@ -117,7 +117,7 @@ async fn test_ve_intra_slice_reduce_split_time_packet() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![R, A]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_intra_slice_reduce_split_time_packet, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
@@ -137,7 +137,7 @@ async fn test_ve_inter_slice_reduce_add_sat_i32() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![R, A]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_inter_slice_reduce_add_sat_i32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
@@ -152,7 +152,7 @@ async fn test_ve_inter_slice_reduce_max_i32() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![R, A]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_inter_slice_reduce_max_i32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
@@ -167,7 +167,7 @@ async fn test_ve_inter_slice_reduce_add_f32() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<f32, m![R, A]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_inter_slice_reduce_add_f32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
@@ -186,7 +186,7 @@ async fn test_ve_vru_then_vau_i32() {
 
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![R, A]>::rand(&mut rng);
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_vru_then_vau_i32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;

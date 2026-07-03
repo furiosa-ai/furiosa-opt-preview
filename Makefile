@@ -110,6 +110,9 @@ download-release:
 	printf 'cp %s ~/.cargo/bin/cargo-furiosa-opt\n' \
 	    "$$(pwd)/$(PREBUILT_DIR)/cargo-furiosa-opt-$$VERSION-$$TARGET/cargo-furiosa-opt" \
 	    > "$(PREBUILT_DIR)/activate.sh"; \
+	printf 'cp %s ~/.cargo/bin/furiosa-opt-driver\n' \
+	    "$$(pwd)/$(PREBUILT_DIR)/cargo-furiosa-opt-$$VERSION-$$TARGET/furiosa-opt-driver" \
+	    >> "$(PREBUILT_DIR)/activate.sh"; \
 	printf 'export FURIOSA_MAPPING_IMPL_LOCAL_PREBUILT=%s\n' \
 	    "$$(pwd)/$(PREBUILT_DIR)/libfuriosa_mapping_impl-$$VERSION-$$TARGET.a" \
 	    >> "$(PREBUILT_DIR)/activate.sh"; \

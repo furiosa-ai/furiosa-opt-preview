@@ -11,7 +11,7 @@ async fn test_reshape() {
 
     let hbm_tensor: HbmTensor<i32, m![A / 4 % 4], m![A / 16, A % 4, B]> =
         HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
-            .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma, 0x1000)
+            .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma)
             .await;
 
     let output = launch(reshape, (&mut *ctx, &hbm_tensor)).await;
@@ -51,7 +51,7 @@ async fn test_reshape_different_num_axes() {
 
     let hbm_tensor: HbmTensor<i32, m![A / 4 % 4], m![A / 16, A % 4, B]> =
         HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
-            .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma, 0x1000)
+            .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma)
             .await;
 
     let output = launch(reshape_different_num_axes, (&mut *ctx, &hbm_tensor)).await;

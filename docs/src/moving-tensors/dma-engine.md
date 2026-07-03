@@ -568,32 +568,32 @@ fn scatter_minimal(
     let data_dm: DmTensor<bf16, m![1], m![1 # 2], m![K / 2], m![K % 2, D]> =
         data.to_dm(&mut ctx.tdma);
 
-    data_dm.dma_scatter::<m![K], _, _>(index, output, true);
+    data_dm.dma_scatter::<m![K], _, _>(index, output);
 }
 
 fn gather_minimal(
     table: &HbmTensor<bf16, m![1], m![K, D]>,
     index: &HbmTensor<i32, m![1], m![C]>,
-) -> DmTensor<bf16, m![1], m![1 # 2], m![C / 2], m![C % 2, D]> {
-    table.dma_gather::<m![1 # 2], m![C / 2], m![C % 2, D], _>(index, 0x0, true)
+    // `C = 612` has no valid Slice divisor, so partition by the payload `D` (a valid 128-slice).
+) -> DmTensor<bf16, m![1], m![1 # 2], m![D], m![C]> {
+    table.dma_gather::<m![1 # 2], m![D], m![C], _>(index)
 }
 #
 # #[tokio::main]
 # async fn main() {
 #     let mut ctx = Context::acquire();
 # 
-#     let index = &(HostTensor::<i32, m![K]>::zero().to_hbm(&mut ctx.pdma, 0).await);
+#     let index = &(HostTensor::<i32, m![K]>::zero().to_hbm(&mut ctx.pdma).await);
 #     let data = unsafe { HbmTensor::<bf16, m![1], m![K, D]>::from_addr(0) };
 #     let mut output_hbm = unsafe { HbmTensor::<bf16, m![1], m![C, D]>::from_addr(0) };
 # 
 #     scatter_minimal(&mut ctx, &data, &index, &mut output_hbm);
-#     gather_minimal(&data, &(HostTensor::<i32, m![C]>::zero().to_hbm(&mut ctx.pdma, 0).await));
+#     gather_minimal(&data, &(HostTensor::<i32, m![C]>::zero().to_hbm(&mut ctx.pdma).await));
 # }
 ```
 
-`scaled` matches `dma_scatter`'s convention.
-`true` treats index values as byte-offsets along the gather axis (divided internally to recover the row position).
-`false` treats index values as raw row positions.
+Index values are byte offsets along the gather/scatter axis: to address row `r`, pass `r` times one row's byte size (its element count times `size_of::<D>()`; e.g. `128 * 2 = 256` for a 128-wide `bf16` row).
+The raw, SPM-resident index variants (`dma_gather_unscaled` / `dma_scatter_unscaled`) are not yet implemented.
 
 ## PCIe DMA
 
@@ -614,8 +614,8 @@ async fn upload_and_download(ctx: &mut Context) {
     let mut rng = SmallRng::seed_from_u64(0);
     let host: HostTensor<i8, m![A, B]> = HostTensor::rand(&mut rng);
 
-    // Host → HBM at address 0x1000
-    let hbm: HbmTensor<i8, m![A], m![B]> = host.to_hbm(&mut ctx.pdma, 0x1000).await;
+    // Host → HBM (allocator-assigned address)
+    let hbm: HbmTensor<i8, m![A], m![B]> = host.to_hbm(&mut ctx.pdma).await;
 
     // HBM → host (back to system memory)
     let _round_tripped: HostTensor<i8, m![A, B]> = hbm.to_host(&mut ctx.pdma).await;

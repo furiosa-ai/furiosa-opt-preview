@@ -223,8 +223,6 @@ pub enum FpBinaryOp {
     SubF,
     /// Floating-point multiplication.
     MulF(FpMulAlu),
-    /// Masked floating-point multiplication.
-    MaskMulF(FpMulAlu),
     /// Floating-point division.
     DivF,
 }
@@ -234,7 +232,7 @@ impl FpBinaryOp {
     pub(crate) fn alu(&self) -> RngdAlu {
         match self {
             Self::AddF | Self::SubF => RngdAlu::FpFma,
-            Self::MulF(alu) | Self::MaskMulF(alu) => alu.to_alu(),
+            Self::MulF(alu) => alu.to_alu(),
             Self::DivF => RngdAlu::FpFpu,
         }
     }
@@ -246,15 +244,12 @@ impl FpBinaryOp {
 pub enum FpTernaryOp {
     /// Fused multiply-add: a * b + c.
     FmaF,
-    /// Masked fused multiply-add.
-    MaskFmaF,
 }
 
 impl Display for FpTernaryOp {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::FmaF => write!(f, "FpTernaryOp::FmaF"),
-            Self::MaskFmaF => write!(f, "FpTernaryOp::MaskFmaF"),
         }
     }
 }

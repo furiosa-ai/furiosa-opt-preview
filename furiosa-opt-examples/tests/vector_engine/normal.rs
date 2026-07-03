@@ -27,8 +27,8 @@ async fn test_vrf_add() {
     let rhs = HostTensor::<i32, m![B]>::rand(&mut rng);
 
     // Transfer to HBM
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     // Execute the operation
     let out_hbm = launch(vrf_add, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
@@ -55,7 +55,7 @@ async fn test_ve_elementwise_fxp_const() {
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_elementwise_fxp_const, (&mut *ctx, &input_hbm)).await;
 
@@ -78,7 +78,7 @@ async fn test_ve_elementwise_fxp_chain() {
             let mut rng = SmallRng::seed_from_u64(42);
             let input = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-            let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+            let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
             launch(ve_elementwise_fxp_chain, (&mut *ctx, &input_hbm)).await;
         });
@@ -97,7 +97,7 @@ async fn test_ve_elementwise_full_pipeline() {
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_elementwise_full_pipeline, (&mut *ctx, &input_hbm)).await;
 
@@ -119,7 +119,7 @@ async fn test_ve_elementwise_stash_f32() {
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<f32, m![A]>::rand(&mut rng);
 
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_elementwise_stash_f32, (&mut *ctx, &input_hbm)).await;
 
@@ -138,7 +138,7 @@ async fn test_ve_elementwise_stash_i32() {
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_elementwise_stash_i32, (&mut *ctx, &input_hbm)).await;
 
@@ -157,7 +157,7 @@ async fn test_ve_stash_fxp_fxp() {
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_stash_fxp_fxp, (&mut *ctx, &input_hbm)).await;
 
@@ -180,7 +180,7 @@ async fn test_ve_stash_fxp_fp() {
             let mut rng = SmallRng::seed_from_u64(42);
             let input = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-            let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+            let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
             launch(ve_stash_fxp_fp, (&mut *ctx, &input_hbm)).await;
         });
@@ -199,7 +199,7 @@ async fn test_ve_stash_fp_fp() {
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<f32, m![A]>::rand(&mut rng);
 
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_stash_fp_fp, (&mut *ctx, &input_hbm)).await;
 
@@ -223,7 +223,7 @@ async fn test_ve_stash_fp_fxp() {
             let mut rng = SmallRng::seed_from_u64(42);
             let input = HostTensor::<f32, m![A]>::rand(&mut rng);
 
-            let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+            let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
             launch(ve_stash_fp_fxp, (&mut *ctx, &input_hbm)).await;
         });
@@ -242,7 +242,7 @@ async fn test_ve_elementwise_logic() {
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_elementwise_logic, (&mut *ctx, &input_hbm)).await;
 
@@ -263,8 +263,8 @@ async fn test_ve_elementwise_vrf() {
     let lhs = HostTensor::<i32, m![A, B]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![B]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_elementwise_vrf, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -287,9 +287,9 @@ async fn test_ve_elementwise_multi_vrf() {
     let vrf1 = HostTensor::<i32, m![B]>::rand(&mut rng);
     let vrf2 = HostTensor::<i32, m![B]>::rand(&mut rng);
 
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let vrf1_hbm = vrf1.to_hbm(&mut ctx.pdma, 1 << 28).await;
-    let vrf2_hbm = vrf2.to_hbm(&mut ctx.pdma, 2 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
+    let vrf1_hbm = vrf1.to_hbm(&mut ctx.pdma).await;
+    let vrf2_hbm = vrf2.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_elementwise_multi_vrf, (&mut *ctx, &input_hbm, &vrf1_hbm, &vrf2_hbm)).await;
 
@@ -319,7 +319,7 @@ async fn test_ve_elementwise_ternary() {
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<f32, m![A]>::rand(&mut rng);
 
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_elementwise_ternary, (&mut *ctx, &input_hbm)).await;
 
@@ -338,7 +338,7 @@ async fn test_ve_elementwise_ternary_stash() {
     let mut rng = SmallRng::seed_from_u64(42);
     let input = HostTensor::<f32, m![A]>::rand(&mut rng);
 
-    let input_hbm = input.to_hbm(&mut ctx.pdma, 0 << 28).await;
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_elementwise_ternary_stash, (&mut *ctx, &input_hbm)).await;
 

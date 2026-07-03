@@ -57,7 +57,7 @@ pub fn compile_llama3_1_mlperf_latest_8pe_4chip_w8a16kv16_prefill_first_block_b1
         .to_hbm(&mut ctx.tdma, 0x936ac000);
 
     let embeddings_sram: DmTensor<bf16, Chip, m![S / 512], m![S / 128 % 4, E / 128], m![E % 128]> =
-        embedding_table_hbm.dma_gather(&input_ids_scaled_dram, 0x00018000, true);
+        embedding_table_hbm.dma_gather(&input_ids_scaled_dram);
 
     let norm_weight_sram_0: DmTensor<f32, Chip, m![X], m![E / 128, 1 # 2], m![E % 64]> =
         norm_weight_hbm.to_dm(&mut ctx.tdma);

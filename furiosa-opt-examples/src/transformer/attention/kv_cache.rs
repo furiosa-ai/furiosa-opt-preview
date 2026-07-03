@@ -83,7 +83,7 @@ pub(super) fn cache_kv(
         unsafe { DmTensor::from_addr(0x200) };
 
     // Scatter V rows into cache positions selected by the prepared indices.
-    v_scatter_reshaped.dma_scatter::<m![T], _, _>(&v_idx_hbm, out_v_cache, true);
+    v_scatter_reshaped.dma_scatter::<m![T], _, _>(&v_idx_hbm, out_v_cache);
 
     // K scatter index path.
 
@@ -149,5 +149,5 @@ pub(super) fn cache_kv(
         unsafe { DmTensor::from_addr(0x5e00) };
 
     // Scatter K rows into cache positions selected by the prepared indices.
-    k_scatter_reshaped.dma_scatter::<m![T], _, _>(&k_idx_hbm, out_k_cache, true);
+    k_scatter_reshaped.dma_scatter::<m![T], _, _>(&k_idx_hbm, out_k_cache);
 }

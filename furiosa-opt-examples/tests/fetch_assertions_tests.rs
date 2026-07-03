@@ -11,7 +11,7 @@ mod cluster_size {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![A, B]>::from_addr(0x1000) };
@@ -30,7 +30,7 @@ mod slice_size {
 
         let input =
             HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
-                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+                .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
         let mut output = unsafe { HbmTensor::<i8, m![1], m![A, B]>::from_addr(0x1000) };

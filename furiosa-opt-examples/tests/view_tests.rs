@@ -11,7 +11,7 @@ async fn test_view_simpl() {
 
     // Create input tensor with shape (A=512)(B=8).
     let input = HostTensor::<i32, m![A, B]>::from_buf((0..4096).collect::<Vec<_>>())
-        .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+        .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
         .await;
 
     // Call the device function.
@@ -39,23 +39,25 @@ async fn test_view_padding() {
 
     let mut ctx = Context::acquire();
 
-    // Create input tensor with shape (A=9)(B=7)=63, one padding slot at index 63.
-    let input = HostTensor::<i32, m![[A, B] # 64]>::from_opt_buf(
-        (0..64)
+    // Create input tensor with shape (A=9)(B=7)=63 real values, padded up to 1024 so the DM slice
+    // dimension is a valid 64; indices 63..1024 are padding slots.
+    let input = HostTensor::<i32, m![[A, B] # 1024]>::from_opt_buf(
+        (0..1024)
             .map(|i| if i < 63 { Opt::Init(i) } else { Opt::Uninit })
             .collect::<Vec<_>>(),
     )
-    .to_hbm::<m![1], m![[A, B] # 64]>(&mut ctx.pdma, 0x1000)
+    .to_hbm::<m![1], m![[A, B] # 1024]>(&mut ctx.pdma)
     .await;
 
     // Call the device function.
     let output = launch(view_padding, (&mut *ctx, &input)).await;
 
-    // Verify the output tensor content: [[3,0,1,2,7,4,5],[6,11,8,9,10,15,11],...], with 63 replaced with uninitialized value.
+    // The view copies rotate each group of 4 as [3,0,1,2] across the whole tensor, with any value
+    // >= 63 replaced by the uninitialized padding value.
     assert_eq!(
-        output.to_host::<m![[A, B] # 64]>(&mut ctx.pdma).await.to_buf_opt(),
-        Tensor::<i32, m![[A, B] # 64]>::from_opt_buf(
-            (0..16)
+        output.to_host::<m![[A, B] # 1024]>(&mut ctx.pdma).await.to_buf_opt(),
+        Tensor::<i32, m![[A, B] # 1024]>::from_opt_buf(
+            (0..256)
                 .flat_map(|x| [4 * x + 3, 4 * x, 4 * x + 1, 4 * x + 2])
                 .map(|x| if x < 63 { Opt::Init(x) } else { Opt::Uninit })
                 .collect::<Vec<_>>(),

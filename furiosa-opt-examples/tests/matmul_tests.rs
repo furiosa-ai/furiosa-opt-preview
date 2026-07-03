@@ -21,8 +21,8 @@ async fn test_matmul_16384() {
     let mut rng = SmallRng::seed_from_u64(42);
     let lhs = HostTensor::<i8, m![A, B]>::rand(&mut rng);
     let rhs = HostTensor::<i8, m![B, C]>::rand(&mut rng);
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     // Call the device function.
     let out = launch(matmul_16384, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
@@ -51,8 +51,8 @@ async fn test_matmul_4096() {
     let mut rng = SmallRng::seed_from_u64(42);
     let lhs = HostTensor::<i8, m![A, B]>::rand(&mut rng);
     let rhs = HostTensor::<i8, m![B]>::rand(&mut rng);
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     // Call the device function.
     let out = launch(matmul_4096, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
@@ -80,8 +80,8 @@ async fn test_matmul_wo_broadcast() {
     let mut rng = SmallRng::seed_from_u64(42);
     let lhs = HostTensor::<i8, m![A, B]>::rand(&mut rng);
     let rhs = HostTensor::<i8, m![A, B]>::rand(&mut rng);
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out = launch(matmul_wo_broadcast, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -107,8 +107,8 @@ async fn test_matmul_with_split_reduce() {
     let mut rng = SmallRng::seed_from_u64(42);
     let lhs = HostTensor::<i8, m![A, B]>::rand(&mut rng);
     let rhs = HostTensor::<i8, m![B]>::rand(&mut rng);
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out = launch(matmul_with_split_reduce, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -132,11 +132,11 @@ async fn test_matmul_with_split_reduce2() {
     let mut rng = SmallRng::seed_from_u64(42);
     let lhs = HostTensor::<bf16, m![M, K]>::rand(&mut rng);
     let rhs = HostTensor::<bf16, m![K, N]>::rand(&mut rng);
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let acc_zero = HostTensor::<bf16, m![M, N]>::zero();
-    let acc_zero_hbm = acc_zero.to_hbm(&mut ctx.pdma, 2 << 28).await;
+    let acc_zero_hbm = acc_zero.to_hbm(&mut ctx.pdma).await;
 
     let out = launch(
         matmul_with_split_reduce2,
@@ -182,8 +182,8 @@ async fn test_matmul_with_cluster_reduce() {
     let mut rng = SmallRng::seed_from_u64(42);
     let lhs = HostTensor::<i8, m![A, B]>::rand(&mut rng);
     let rhs = HostTensor::<i8, m![B, C]>::rand(&mut rng);
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     // Call the device function.
     let out = launch(matmul_cluster_reduce, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
@@ -213,8 +213,8 @@ async fn test_matmul_with_chip_reduce() {
     let mut rng = SmallRng::seed_from_u64(42);
     let lhs = HostTensor::<i8, m![A, B]>::rand(&mut rng);
     let rhs = HostTensor::<i8, m![B, C]>::rand(&mut rng);
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     // Call the device function (4 chips).
     let out = launch(matmul_chip_reduce, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;

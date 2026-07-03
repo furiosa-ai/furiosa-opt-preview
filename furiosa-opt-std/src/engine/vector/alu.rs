@@ -60,7 +60,7 @@ pub enum RngdAlu {
 
 /// Float cluster Mul ALU selection.
 ///
-/// Used to specify which ALU to use for MulF/MaskMulF operations,
+/// Used to specify which ALU to use for MulF operations,
 /// since they can use FpMul0, FpMul1, or FpFma.
 #[primitive(ve::FpMulAlu)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

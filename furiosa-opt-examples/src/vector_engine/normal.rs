@@ -78,6 +78,42 @@ pub fn ve_elementwise_full_pipeline(
     result.to_hbm(&mut ctx.tdma, 0x3000)
 }
 
+/// Exercises the scalar float `Neg` lowering on the const-fold path.
+///
+/// `-offset` is a genuine MIR `Neg`, the same shape as LayerNorm/RMSNorm mean-centering
+/// `x + (-mean)`. The driver compiles device fns at `-Zmir-opt-level=0`, so `-offset` over a
+/// named f32 binding stays a `Rvalue::UnaryOp(Neg)` in MIR. Its operand is the literal `100.0`,
+/// so it const-folds to the immediate `F32(-100.0)`, and `vector_fp_binary(AddF, -offset)`
+/// computes `x - 100.0` per element. (A non-constant float negate would instead lower to the
+/// faithful unary `NegF` sign-flip, never `0.0 - x`; that arm is unit-tested in `eval.rs`.)
+#[device(chip = 1)]
+pub fn ve_elementwise_neg_offset_f32(
+    ctx: &mut Context,
+    input: &HbmTensor<f32, Chip, m![A]>,
+) -> HbmTensor<f32, Chip, m![A]> {
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
+
+    let offset = 100.0f32;
+    let neg_offset = -offset;
+
+    let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![1], m![A % 2]>()
+        .fetch_cast::<f32>()
+        .collect::<m![1], m![A % 2 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_trim::<m![A % 2 # 4]>()
+        .vector_fp_binary(FpBinaryOp::AddF, neg_offset)
+        .vector_widen_pad::<m![A % 2 # 8]>()
+        .vector_final()
+        .commit_trim::<m![A % 2]>()
+        .commit();
+
+    result.to_hbm(&mut ctx.tdma, 0x3000)
+}
+
 #[device(chip = 1)]
 pub fn ve_elementwise_stash_f32(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -> HbmTensor<f32, Chip, m![A]> {
     let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);

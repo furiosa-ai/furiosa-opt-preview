@@ -2,7 +2,7 @@ use furiosa_mapping::M;
 
 use crate::prelude::HostTensor;
 use crate::scalar::Scalar;
-use crate::tensor::memory::{Address, HbmTensor};
+use crate::tensor::memory::HbmTensor;
 
 use super::Npu;
 use super::ffi;
@@ -41,6 +41,16 @@ impl Buffer {
 
     pub(crate) fn npu(addr: u64, len: usize) -> Self {
         Buffer::from_raw(unsafe { ffi::lib().furiosa_npu_buffer_from(ffi::rt(), addr, len) })
+    }
+
+    pub(crate) fn alloc(size: usize) -> Self {
+        let ptr = unsafe { ffi::lib().furiosa_npu_buffer(ffi::rt(), size) };
+        assert!(!ptr.is_null(), "failed to allocate buffer");
+        Buffer::from_raw(ptr)
+    }
+
+    pub(crate) fn offset(&self) -> u64 {
+        unsafe { ffi::lib().furiosa_npu_buffer_offset(self.0) }
     }
 }
 
@@ -132,9 +142,7 @@ impl Kernel {
 
     /// Allocate a buffer on the device.
     pub fn alloc(&self, size: usize) -> Buffer {
-        let ptr = unsafe { ffi::lib().furiosa_npu_buffer(ffi::rt(), size) };
-        assert!(!ptr.is_null(), "failed to allocate buffer");
-        Buffer::from_raw(ptr)
+        Buffer::alloc(size)
     }
 
     /// Copies a host staging tensor to NPU HBM via DMA.
@@ -143,12 +151,10 @@ impl Kernel {
     /// function's HBM input; value-producing tensor operations are performed on the NPU.
     pub async fn write<D: Scalar, Element: M, Chip: M, Element2: M>(
         host: &HostTensor<D, Element, Npu>,
-        addr: Address,
     ) -> HbmTensor<D, Chip, Element2, Npu> {
         let stride = std::mem::size_of::<D>();
         let buf = host.clone().into_buf();
         let len = buf.len() * stride;
-        log::debug!("write: addr=0x{addr:x}, len={len}");
 
         let src = CpuBuffer::cpu(len);
         let ptr = src.data_ptr();
@@ -159,12 +165,14 @@ impl Kernel {
             }
         }
 
-        let dst = Buffer::npu(addr, len);
+        let dst = Buffer::alloc(len);
+        let addr = dst.offset();
+        log::debug!("write: addr=0x{addr:x}, len={len}");
         assert!(
             unsafe { ffi::lib().furiosa_write(ffi::rt(), src.as_ptr(), dst.as_ptr()) } == 0,
             "DMA write failed"
         );
-        unsafe { HbmTensor::from_addr(addr) }
+        unsafe { HbmTensor::from_addr(addr) }.owns(dst)
     }
 
     /// Copies an NPU HBM tensor back into a host staging tensor via DMA.

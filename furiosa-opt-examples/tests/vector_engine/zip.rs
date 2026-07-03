@@ -21,8 +21,8 @@ async fn test_ve_group_pair_add() {
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_add, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -42,8 +42,8 @@ async fn test_ve_group_pair_preprocess_both() {
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_preprocess_both, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -66,8 +66,8 @@ async fn test_ve_group_pair_preprocess_g0() {
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_preprocess_g0, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -90,8 +90,8 @@ async fn test_ve_group_pair_preprocess_g1() {
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_preprocess_g1, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -113,8 +113,8 @@ async fn test_ve_group_pair_chain() {
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_chain, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -136,8 +136,8 @@ async fn test_ve_group_pair_fxp() {
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_fxp, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -157,8 +157,8 @@ async fn test_ve_group_pair_logic() {
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_logic, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -179,8 +179,8 @@ async fn test_ve_group_pair_fp() {
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_fp, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -203,8 +203,8 @@ async fn test_ve_group_pair_unary() {
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_unary, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -228,8 +228,8 @@ async fn test_ve_group_pair_unary_selective() {
     let lhs = HostTensor::<i32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<i32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_unary_selective, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -252,8 +252,8 @@ async fn test_ve_group_pair_ternary() {
     let lhs = HostTensor::<f32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<f32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_ternary, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 
@@ -275,8 +275,8 @@ async fn test_ve_group_pair_ternary_selective() {
     let lhs = HostTensor::<f32, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<f32, m![A]>::rand(&mut rng);
 
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_group_pair_ternary_selective, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
 

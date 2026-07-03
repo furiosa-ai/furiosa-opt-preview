@@ -9,7 +9,7 @@ async fn test_fetch_commit_simple_host() {
 
     // Create input tensor with shape (A=4096)(B=8).
     let input = HostTensor::<i8, m![A, B]>::from_buf((0..32768).map(|x| x as i8).collect::<Vec<_>>())
-        .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma, 0)
+        .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
         .await;
 
     // Call the device function.

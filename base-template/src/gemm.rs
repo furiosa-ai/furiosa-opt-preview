@@ -9,8 +9,8 @@ async fn main() {
     let mut rng = SmallRng::seed_from_u64(42);
     let a = HostTensor::<bf16, m![I, K]>::rand(&mut rng);
     let b = HostTensor::<bf16, m![J, K]>::rand(&mut rng);
-    let a_hbm = a.to_hbm(&mut ctx.pdma, 0 << 28).await;
-    let b_hbm = b.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let a_hbm = a.to_hbm(&mut ctx.pdma).await;
+    let b_hbm = b.to_hbm(&mut ctx.pdma).await;
     let _out_hbm = launch(gemm_kernel, (&mut ctx, &a_hbm, &b_hbm)).await;
     println!("GEMM: kernel ran");
 }
@@ -27,8 +27,8 @@ mod tests {
         let a = HostTensor::<bf16, m![I, K]>::rand(&mut rng);
         let b = HostTensor::<bf16, m![J, K]>::rand(&mut rng);
 
-        let a_hbm = a.to_hbm(&mut ctx.pdma, 0 << 28).await;
-        let b_hbm = b.to_hbm(&mut ctx.pdma, 1 << 28).await;
+        let a_hbm = a.to_hbm(&mut ctx.pdma).await;
+        let b_hbm = b.to_hbm(&mut ctx.pdma).await;
 
         // Reference: C[i, j] = sum_k A[i, k] * B[j, k] in f32, rounded to bf16.
         let a_buf: Vec<bf16> = a.into_buf();

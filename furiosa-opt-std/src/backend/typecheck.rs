@@ -4,7 +4,7 @@ use furiosa_mapping::*;
 use crate::scalar::Scalar;
 use crate::storage::PhantomStorage;
 use crate::tensor::Tensor;
-use crate::tensor::memory::{Address, HbmTensor, HostTensor};
+use crate::tensor::memory::{HbmTensor, HostTensor};
 
 use crate::backend::Backend;
 
@@ -41,14 +41,14 @@ impl Backend for Typecheck {
         storage.into_buf(mapping)
     }
 
-    fn map<D: Scalar, D2: Scalar>(src: &Self::Storage<D>, f: impl FnMut(D) -> D2) -> Self::Storage<D2> {
+    fn map<D: Scalar, D2: Scalar>(src: &Self::Storage<D>, f: impl Fn(D) -> D2 + Sync) -> Self::Storage<D2> {
         src.map(f)
     }
 
     fn zip_with<D: Scalar, D2: Scalar, D3: Scalar>(
         a: &Self::Storage<D>,
         b: &Self::Storage<D2>,
-        f: impl Fn(D, D2) -> D3,
+        f: impl Fn(D, D2) -> D3 + Sync,
     ) -> Self::Storage<D3> {
         a.zip_with(b, f)
     }
@@ -57,7 +57,7 @@ impl Backend for Typecheck {
         a: &Self::Storage<D>,
         b: &Self::Storage<D2>,
         c: &Self::Storage<D3>,
-        f: impl Fn(D, D2, D3) -> D4,
+        f: impl Fn(D, D2, D3) -> D4 + Sync,
     ) -> Self::Storage<D4> {
         a.zip3_with(b, c, f)
     }
@@ -77,7 +77,7 @@ impl Backend for Typecheck {
 
     fn reduce<D: Scalar, Src: M, Dst: M>(
         src: &Self::Storage<D>,
-        reduce_fn: impl Fn(D, D) -> D,
+        reduce_fn: impl Fn(D, D) -> D + Sync,
         identity: D,
         allow_broadcast: bool,
     ) -> Self::Storage<D> {
@@ -117,9 +117,8 @@ impl Backend for Typecheck {
 
     async fn to_hbm<D: Scalar, Element: M, Chip: M, Element2: M>(
         _host: &HostTensor<D, Element, Self>,
-        address: Address,
     ) -> HbmTensor<D, Chip, Element2, Self> {
-        HbmTensor::new(Tensor::empty(), address)
+        HbmTensor::new(Tensor::empty(), 0)
     }
 
     async fn from_hbm<D: Scalar, Chip: M, Element: M, Element2: M>(

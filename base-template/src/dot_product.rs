@@ -9,8 +9,8 @@ async fn main() {
     let mut rng = SmallRng::seed_from_u64(42);
     let lhs = HostTensor::<bf16, m![A]>::rand(&mut rng);
     let rhs = HostTensor::<bf16, m![A]>::rand(&mut rng);
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
     let _out_hbm = launch(dot_product_kernel, (&mut ctx, &lhs_hbm, &rhs_hbm)).await;
     println!("Dot Product: kernel ran");
 }
@@ -27,8 +27,8 @@ mod tests {
         let lhs = HostTensor::<bf16, m![A]>::rand(&mut rng);
         let rhs = HostTensor::<bf16, m![A]>::rand(&mut rng);
 
-        let lhs_hbm = lhs.to_hbm(&mut ctx.pdma, 0).await;
-        let rhs_hbm = rhs.to_hbm(&mut ctx.pdma, 1 << 28).await;
+        let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
+        let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
 
         // Reference: sum_i lhs[i] * rhs[i] in f32, then round to bf16.
         let lhs_buf: Vec<bf16> = lhs.into_buf();

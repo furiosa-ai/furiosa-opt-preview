@@ -4,21 +4,25 @@ use std::marker::PhantomData;
 use furiosa_mapping::M;
 
 use crate::{
-    engine::vector::{alu::RngdAlu, scalar::VeScalar},
+    engine::vector::{
+        alu::RngdAlu,
+        scalar::VeScalar,
+        stash_slot::{Fresh, Occupied, Spent, StashSlot},
+    },
     tensor::Tensor,
-    tensor_state::{HasTensor, NoTensor, TensorState},
 };
 
 /// VE state that tracks stash and ALU usage.
 ///
 /// The type parameter `D` ties the stash's scalar type to the pipeline's current scalar type,
-/// ensuring at compile time that stash reads match the pipeline's `D`.
+/// ensuring at compile time that stash reads match the pipeline's `D`. The `Stash` parameter is one
+/// of the stash-slot states ([`Fresh`] / [`Occupied`] / [`Spent`]); see the stash-slot
+/// [module docs] for the state machine.
 ///
-/// - `VeState<D, NoTensor>` — stash is empty.
-/// - `VeState<D, HasTensor<D, Mapping>>` — stash holds a `Tensor<D, Mapping>`.
+/// [module docs]: crate::engine::vector::stash_slot
 #[derive(Debug)]
-pub struct VeState<D: VeScalar, Stash: TensorState<D>> {
-    /// Stash state — either [`NoTensor`] or [`HasTensor`] holding the actual tensor.
+pub struct VeState<D: VeScalar, Stash: StashSlot<D>> {
+    /// Stash-slot state: [`Fresh`], [`Occupied`] (holding the tensor), or [`Spent`].
     pub(crate) stash: Stash,
     /// Set of ALUs that have been used.
     pub(crate) used_alus: HashSet<RngdAlu>,
@@ -26,7 +30,7 @@ pub struct VeState<D: VeScalar, Stash: TensorState<D>> {
     _marker: PhantomData<D>,
 }
 
-impl<D: VeScalar, Stash: TensorState<D>> VeState<D, Stash> {
+impl<D: VeScalar, Stash: StashSlot<D>> VeState<D, Stash> {
     /// Checks if ALU is available and marks it as used.
     /// Panics if ALU is already in use.
     pub(crate) fn use_alu(&mut self, alu: RngdAlu) {
@@ -34,12 +38,21 @@ impl<D: VeScalar, Stash: TensorState<D>> VeState<D, Stash> {
         self.used_alus.insert(alu);
     }
 
-    /// Clones the stash data, transposing to target mapping if needed.
+    /// Clones the stash data, transposing to target mapping and relabeling its scalar to the
+    /// reading pipeline's `D2`. The stashed `D` and the requested `D2` must share a KIND (a
+    /// cross-KIND stash read is rejected upstream by the typestate); both are i32 or both f32, so
+    /// the relabel is a per-element identity via [`VeScalar::reinterpret`] (an exact-type `Any`
+    /// downcast).
     ///
-    /// TODO: This should checked at compile-time, or replaced with clone_stash_as.
+    /// The per-element downcast is `unwrap_unchecked` for perf (no panic landing-pad on the hot
+    /// map); its soundness rests on the two-`VeScalar` invariant — see the SAFETY note below and the
+    /// `# Panics` assert.
+    ///
+    /// TODO: fold the KIND equality into the typestate so this stays statically total; that also
+    /// retires the `unsafe`.
     ///
     /// # Panics
-    /// Panics if the target type D2 does not match the stashed type D.
+    /// Panics if the requested `D2` KIND does not match the stashed `D` KIND.
     pub(crate) fn force_clone_stash_as<D2: VeScalar, TargetMapping: M>(&self) -> Option<Tensor<D2, TargetMapping>> {
         assert!(
             D::KIND == D2::KIND,
@@ -48,35 +61,49 @@ impl<D: VeScalar, Stash: TensorState<D>> VeState<D, Stash> {
             D2::KIND
         );
 
-        let cloned = self.stash.clone_tensor_as::<TargetMapping>();
-
-        // SAFETY: Runtime assert above ensures D and D2 are the same concrete type
-        // (both i32 or both f32), so Tensor<D, _> and Tensor<D2, _> have identical layout.
-        cloned.map(|t| unsafe {
-            // `transmute` is rejected because the compiler can't see that D and D2 have the same
-            // size; `transmute_copy` + `forget` achieves the same move without that check.
-            let converted = std::mem::transmute_copy(&t);
-            std::mem::forget(t);
-            converted
-        })
+        self.stash
+            .clone_tensor_as::<TargetMapping>()
+            // SAFETY: the `assert!(D::KIND == D2::KIND)` above holds, and `VeScalar` is implemented only for
+            // `i32` and `f32`, whose KINDs are distinct — so equal KIND means the SAME concrete type, and
+            // `reinterpret::<D2>()` (an exact-type `Any` downcast) is always `Some` here. If a third
+            // `VeScalar` sharing a KIND is ever added, this precondition breaks (the assert would pass but the
+            // downcast return `None`); fold the KIND equality into the typestate (see the TODO) before then.
+            .map(|t| t.map(|x| unsafe { x.reinterpret::<D2>().unwrap_unchecked() }))
     }
 }
 
-impl<D: VeScalar> VeState<D, NoTensor> {
+impl<D: VeScalar, StashMapping: M> VeState<D, Occupied<D, StashMapping>> {
+    /// Empties the stash, moving the state to [`Spent`] and preserving ALU usage. `D` here is the
+    /// stashed scalar type, which may differ from the reading pipeline's scalar (cross-type stash).
+    /// The read lands in `Spent` rather than `Fresh` so the write cannot be re-armed; see the
+    /// stash-slot [module docs] for the state machine. The stashed tensor's data was already read by
+    /// the op that calls this.
+    ///
+    /// [module docs]: crate::engine::vector::stash_slot
+    pub(crate) fn consume_stash(self) -> VeState<D, Spent> {
+        VeState {
+            stash: Spent,
+            used_alus: self.used_alus,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<D: VeScalar> VeState<D, Fresh> {
     /// Creates a new empty VeState.
     pub(crate) fn new() -> Self {
         Self {
-            stash: NoTensor,
+            stash: Fresh,
             used_alus: HashSet::new(),
             _marker: PhantomData,
         }
     }
 
     /// Stores the tensor data in the stash, returning a new VeState with the stash's mapping.
-    /// Consumes self to change the `TensorState` parameter.
-    pub(crate) fn stash<NewMapping: M>(self, data: &Tensor<D, NewMapping>) -> VeState<D, HasTensor<D, NewMapping>> {
+    /// Consumes self to change the `StashSlot` parameter.
+    pub(crate) fn stash<NewMapping: M>(self, data: &Tensor<D, NewMapping>) -> VeState<D, Occupied<D, NewMapping>> {
         VeState {
-            stash: HasTensor::new(data.clone()),
+            stash: Occupied::new(data.clone()),
             used_alus: self.used_alus,
             _marker: PhantomData,
         }
@@ -86,14 +113,14 @@ impl<D: VeScalar> VeState<D, NoTensor> {
     /// Used when combining two groups in binary operations.
     /// Since both groups share the same ALU state (global resource),
     /// this simply performs a union of used ALUs.
-    pub(crate) fn merge(&mut self, other: VeState<D, NoTensor>) {
+    pub(crate) fn merge(&mut self, other: VeState<D, Fresh>) {
         self.used_alus.extend(other.used_alus);
     }
 
     /// Converts VeState to different scalar type parameters, preserving ALU tracking.
-    pub(crate) fn retype<NewD: VeScalar>(self) -> VeState<NewD, NoTensor> {
+    pub(crate) fn retype<NewD: VeScalar>(self) -> VeState<NewD, Fresh> {
         VeState {
-            stash: NoTensor,
+            stash: Fresh,
             used_alus: self.used_alus,
             _marker: PhantomData,
         }

@@ -38,5 +38,5 @@ pub fn scalar_cast_missing_const(
         .commit_trim::<m![A % 2]>()
         .commit();
 
-    result.to_hbm(&mut ctx.tdma, 0x3000)
+    result.to_hbm(&mut ctx.tdma)
 }

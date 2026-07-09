@@ -61,7 +61,7 @@ pub fn matmul_chip_reduce(
     let reduced = reduce_over_chip(ctx, &mul_result);
 
     // Write back to HBM
-    reduced.to_hbm(&mut ctx.tdma, 0x3000)
+    reduced.to_hbm(&mut ctx.tdma)
 }
 
 /// Reduce over chip axis using ReduceScatter pattern for Chip=4.

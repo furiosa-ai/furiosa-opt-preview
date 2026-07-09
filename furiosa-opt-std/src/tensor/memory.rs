@@ -7,7 +7,6 @@ use std::fmt::{self, Display, Formatter};
 use std::marker::PhantomData;
 
 use furiosa_mapping::*;
-use furiosa_opt_lower::{RelaxedDivision, config_divide_relaxed};
 use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
@@ -26,36 +25,33 @@ pub type Address = u64;
 const DMA_SRAM_WRITE_WIDTH: usize = 8;
 
 /// Asserts that a DMA transfer from an `Src`-mapped tensor to a `Dst`-mapped
-/// tensor satisfies the hardware DMA layout constraints. Two checks share a
-/// single `divide(src, dst)` and a single [`Extents`] computation:
+/// tensor satisfies the hardware DMA layout constraints. Two checks run:
 ///
-/// 1. **Tail alignment** — the reachable destination tail end (the largest
-///    contiguous packet the destination can expose, walked from stride 1 via
-///    [`Extents::contiguous_tail`]) must be a multiple of `min_align` bytes.
-///    This part looks only at divisor-side spans, so it is invariant under
-///    any outer src structure (cluster/slice partitioning).
-/// 2. **Address stride alignment** — matched terms whose `divisor_stride`
-///    reaches at or past the contiguous tail must have that stride aligned
-///    to `min_align` bytes (their iteration jumps across packets).
+/// 1. **Tail alignment** -- the reachable destination tail end (the burst packet
+///    the source can feed into the destination element, from [`Mapping::dma_tails`]
+///    over the two `Element` payloads) must be a multiple of `min_align` bytes.
+/// 2. **Address stride alignment** -- sequencing the full `Dst` access against the
+///    full `Src` buffer ([`sequence`] under [`SequencerMode::Carve`]), every stream
+///    stride at or past that tail must be `min_align`-aligned (it jumps across packets).
 ///
 /// `min_align` is the hardware DMA access width in bytes:
 /// [`DMA_SRAM_WRITE_WIDTH`] for writes into SRAM (HBM→DM, DM→DM), 1 for
 /// writes into DRAM (DM→HBM, HBM→HBM).
-pub(crate) fn assert_dma_layout<D: Scalar, Src: M, Dst: M>(min_align: usize) {
+pub(crate) fn assert_dma_layout<D: Scalar, Src: M, SrcElement: M, Dst: M, DstElement: M>(min_align: usize) {
     assert!(min_align > 0, "min_align must be positive");
-    let src = Src::to_value();
-    let dst = Dst::to_value();
-    let division = config_divide_relaxed(&src, &dst);
 
-    // `check_dma_tail` returned, so `D::size_in_bytes_from_length(packet_end)`
-    // is a multiple of `min_align`. `check_dma_address_stride` consumes that
-    // invariant below.
-    let packet_end = check_dma_tail::<D>(&division, &src, &dst, min_align);
-    check_dma_address_stride::<D>(&division, &src, &dst, min_align, packet_end);
+    // Tail: `dma_tails` over the two `Element` payloads -- the burst packet is the contiguous run
+    // shared WITHIN the elements. It sees just the payload (not the full mappings), so the asymmetric
+    // outer classes (only one side carries Cluster/Slice) do not mis-read the packet.
+    let packet_end = check_dma_tail::<D>(&SrcElement::to_value(), &DstElement::to_value(), min_align);
+
+    // Address stride: over the FULL Src/Dst layouts (the outer Cluster/Slice strides are what jump
+    // across packets and must stay aligned).
+    check_dma_address_stride::<D>(&Src::to_value(), &Dst::to_value(), min_align, packet_end);
 }
 
-fn check_dma_tail<D: Scalar>(division: &RelaxedDivision, src: &Mapping, dst: &Mapping, min_align: usize) -> usize {
-    let reachable_end = division.contiguous_tail;
+fn check_dma_tail<D: Scalar>(src_element: &Mapping, dst_element: &Mapping, min_align: usize) -> usize {
+    let reachable_end = reachable_end(src_element, dst_element);
     let reachable_end_bytes = D::size_in_bytes_from_length(reachable_end);
 
     assert!(
@@ -64,33 +60,45 @@ fn check_dma_tail<D: Scalar>(division: &RelaxedDivision, src: &Mapping, dst: &Ma
          end is not aligned to {min_align} bytes.\n  \
          reachable destination tail end (elements) = {reachable_end}\n  \
          reachable destination tail end (bytes) = {reachable_end_bytes}\n  \
-         src mapping = {src:?}\n  \
-         dst mapping = {dst:?}",
+         src element mapping = {src_element:?}\n  \
+         dst element mapping = {dst_element:?}",
     );
 
     reachable_end
 }
 
-fn check_dma_address_stride<D: Scalar>(
-    division: &RelaxedDivision,
-    src: &Mapping,
-    dst: &Mapping,
-    min_align: usize,
-    packet_end: usize,
-) {
-    for bound in division.matched.iter().filter(|b| b.divisor_stride >= packet_end) {
-        let dst_stride = bound.divisor_stride;
-        let dst_bytes = D::size_in_bytes_from_length(dst_stride);
-        assert!(
-            dst_bytes.is_multiple_of(min_align),
-            "DMA address stride alignment violation: matched term {term:?} beginning at \
-             or past the contiguous tail has dst stride {dst_bytes} bytes, not aligned to \
-             {min_align}-byte granularity.\n  \
-             reachable packet end (elements) = {packet_end}\n  \
-             src mapping = {src:?}\n  \
-             dst mapping = {dst:?}",
-            term = bound,
-        );
+/// The reachable destination tail: the DMA burst packet the source can feed into the destination
+/// element (`dma_tails`'s dst packet over the two element payloads) -- the same in-slice tail the
+/// lowering pins the alignment to (see `DmaCommandArgs::dma_shapes`). Shared by `check_dma_tail` and
+/// its unit tests, which exercise it without the alignment assertion.
+fn reachable_end(src_element: &Mapping, dst_element: &Mapping) -> usize {
+    let (_src_packet, dst_packet, _valid) = src_element.dma_tails(dst_element);
+    dst_packet
+}
+
+fn check_dma_address_stride<D: Scalar>(src: &Mapping, dst: &Mapping, min_align: usize, packet_end: usize) {
+    // Carve the destination access pattern (stream) against the source buffer (memory). Each config is
+    // keyed by its stream-side (destination) buffer stride; a stride at or past the burst packet jumps
+    // across packets, so its byte stride must be `min_align`-aligned. Sequencing (not the factor-algebra
+    // division) covers a decomposed/padded destination axis such as `A # 4 / 2, A # 4 % 2`.
+    let configs = sequence(&[src], &[dst], SequencerMode::Carve)
+        .expect("dma layout: destination stream must be covered by the source");
+    for config in &configs {
+        for (&stream_stride, _entry) in config.0.iter() {
+            if stream_stride < packet_end {
+                continue;
+            }
+            let stride_bytes = D::size_in_bytes_from_length(stream_stride);
+            assert!(
+                stride_bytes.is_multiple_of(min_align),
+                "DMA address stride alignment violation: destination stream stride {stream_stride} \
+                 (at or past the burst packet) is {stride_bytes} bytes, not aligned to {min_align}-byte \
+                 granularity.\n  \
+                 reachable packet end (elements) = {packet_end}\n  \
+                 src mapping = {src:?}\n  \
+                 dst mapping = {dst:?}",
+            );
+        }
     }
 }
 
@@ -365,17 +373,14 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
         }
     }
 
-    /// Converts to HBM tensor at `address`.
-    ///
-    /// An HBM tensor always carries a concrete address: `HbmTensor::to_host` reads back
-    /// through it, so unlike the on-chip transfers there is no address-free variant.
+    /// Converts to an HBM tensor. The output region's address is assigned by the backend, not the
+    /// caller.
     #[primitive(HbmTensor::to_hbm)]
     pub fn to_hbm<const DMA: Dma, Element2: M>(
         &self,
         _dma: &mut DmaContext<{ DMA }>,
-        address: Address,
     ) -> HbmTensor<D, Chip, Element2, B> {
-        HbmTensor::new(self.inner.transpose(true), address)
+        HbmTensor::new(self.inner.transpose(true), 0)
     }
 
     /// Gather DRAM rows into SRAM at positions given by index tensor.
@@ -433,7 +438,13 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
         &self,
         _dma: &mut DmaContext<{ Dma::Tensor }>,
     ) -> DmTensor<D, Chip, Cluster, Slice, Element2, B> {
-        assert_dma_layout::<D, m![{ Chip }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
+        assert_dma_layout::<
+            D,
+            m![{ Chip }, { Element }],
+            Element,
+            m![{ Chip }, { Cluster }, { Slice }, { Element2 }],
+            Element2,
+        >(DMA_SRAM_WRITE_WIDTH);
         DmTensor::new(self.inner.transpose(true), None)
     }
 
@@ -444,7 +455,13 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
         _dma: &mut DmaContext<{ Dma::Tensor }>,
         address: Address,
     ) -> DmTensor<D, Chip, Cluster, Slice, Element2, B> {
-        assert_dma_layout::<D, m![{ Chip }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
+        assert_dma_layout::<
+            D,
+            m![{ Chip }, { Element }],
+            Element,
+            m![{ Chip }, { Cluster }, { Slice }, { Element2 }],
+            Element2,
+        >(DMA_SRAM_WRITE_WIDTH);
         DmTensor::new(self.inner.transpose(true), Some(address))
     }
 }
@@ -506,7 +523,13 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         _dma: &mut DmaContext<{ Dma::Tensor }>,
         mut dst: DmTensorViewMut<'l, D, Chip2, Cluster, Slice, Element2, B>,
     ) {
-        assert_dma_layout::<D, m![{ Chip }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
+        assert_dma_layout::<
+            D,
+            m![{ Chip }, { Element }],
+            Element,
+            m![{ Chip2 }, { Cluster }, { Slice }, { Element2 }],
+            Element2,
+        >(DMA_SRAM_WRITE_WIDTH);
         dst.inner.transpose(self.inner, true);
     }
 
@@ -557,7 +580,13 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         self,
         _dma: &mut DmaContext<{ Dma::Tensor }>,
     ) -> DmTensor<D, Chip, Cluster, Slice, Element2, B> {
-        assert_dma_layout::<D, m![{ Chip }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
+        assert_dma_layout::<
+            D,
+            m![{ Chip }, { Element }],
+            Element,
+            m![{ Chip }, { Cluster }, { Slice }, { Element2 }],
+            Element2,
+        >(DMA_SRAM_WRITE_WIDTH);
         DmTensor::new(self.inner.read().transpose(true), None)
     }
 
@@ -568,7 +597,13 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         _dma: &mut DmaContext<{ Dma::Tensor }>,
         address: Address,
     ) -> DmTensor<D, Chip, Cluster, Slice, Element2, B> {
-        assert_dma_layout::<D, m![{ Chip }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
+        assert_dma_layout::<
+            D,
+            m![{ Chip }, { Element }],
+            Element,
+            m![{ Chip }, { Cluster }, { Slice }, { Element2 }],
+            Element2,
+        >(DMA_SRAM_WRITE_WIDTH);
         DmTensor::new(self.inner.read().transpose(true), Some(address))
     }
 
@@ -719,17 +754,11 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
         }
     }
 
-    /// Converts to HBM tensor at `address`.
-    ///
-    /// An HBM tensor always carries a concrete address: `HbmTensor::to_host` reads back
-    /// through it, so unlike the on-chip transfers there is no address-free variant.
+    /// Converts to an HBM tensor. The output region's address is assigned by the backend, not the
+    /// caller.
     #[primitive(DmTensor::to_hbm)]
-    pub fn to_hbm<Element2: M>(
-        &self,
-        _dma: &mut DmaContext<{ Dma::Tensor }>,
-        address: Address,
-    ) -> HbmTensor<D, Chip, Element2, B> {
-        HbmTensor::new(self.inner.transpose(true), address)
+    pub fn to_hbm<Element2: M>(&self, _dma: &mut DmaContext<{ Dma::Tensor }>) -> HbmTensor<D, Chip, Element2, B> {
+        HbmTensor::new(self.inner.transpose(true), 0)
     }
 
     /// Scatter SRAM values to DRAM at positions given by index tensor.
@@ -797,7 +826,13 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
         _dma: &mut DmaContext<{ Dma::Tensor }>,
     ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
-        assert_dma_layout::<D, m![{ Cluster }, { Slice }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
+        assert_dma_layout::<
+            D,
+            m![{ Cluster }, { Slice }, { Element }],
+            Element,
+            m![{ Cluster }, { Slice2 }, { Element2 }],
+            Element2,
+        >(DMA_SRAM_WRITE_WIDTH);
         DmTensor::new(self.inner.transpose(true), None)
     }
 
@@ -809,7 +844,13 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
         address: Address,
     ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
-        assert_dma_layout::<D, m![{ Cluster }, { Slice }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
+        assert_dma_layout::<
+            D,
+            m![{ Cluster }, { Slice }, { Element }],
+            Element,
+            m![{ Cluster }, { Slice2 }, { Element2 }],
+            Element2,
+        >(DMA_SRAM_WRITE_WIDTH);
         DmTensor::new(self.inner.transpose(true), Some(address))
     }
 
@@ -910,7 +951,13 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         mut dst: DmTensorViewMut<'l, D, Chip2, Cluster2, Slice2, Element2, B>,
     ) {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
-        assert_dma_layout::<D, m![{ Cluster }, { Slice }, { Element }], Element2>(DMA_SRAM_WRITE_WIDTH);
+        assert_dma_layout::<
+            D,
+            m![{ Cluster }, { Slice }, { Element }],
+            Element,
+            m![{ Cluster2 }, { Slice2 }, { Element2 }],
+            Element2,
+        >(DMA_SRAM_WRITE_WIDTH);
         dst.inner.transpose(self.inner, true);
     }
 
@@ -1197,17 +1244,13 @@ mod tests {
 
     use crate::scalar::Scalar;
 
-    fn reachable_end<Src: M, Dst: M>() -> usize {
-        config_divide_relaxed(&Src::to_value(), &Dst::to_value()).contiguous_tail
-    }
-
     #[test]
     fn unittest_extents_reachable_end_with_dst_padding_absorb() {
         axes![A = 8, B = 3];
         // matched B (directcast, [1,3)) + divisor padding [3,8) extend the tail.
         // matched A is non-directcast (divisor_stride=8 ≠ dividend_stride=3),
         // so the walk stops at 8 — A's iteration breaks src-side contiguity.
-        assert_eq!(reachable_end::<m![A, B], m![A, B # 8]>(), 8);
+        assert_eq!(reachable_end(&<m![A, B]>::to_value(), &<m![A, B # 8]>::to_value()), 8);
     }
 
     #[test]
@@ -1216,8 +1259,8 @@ mod tests {
         // The tail check looks only at divisor-side spans, so adding outer
         // cluster/slice axes to the source must produce the same answer.
         assert_eq!(
-            reachable_end::<m![A], m![A # 16]>(),
-            reachable_end::<m![Cl, Sl, A], m![A # 16]>(),
+            reachable_end(&<m![A]>::to_value(), &<m![A # 16]>::to_value()),
+            reachable_end(&<m![Cl, Sl, A]>::to_value(), &<m![A # 16]>::to_value()),
         );
     }
 
@@ -1225,7 +1268,7 @@ mod tests {
     fn unittest_extents_reachable_end_single_element_underflows_alignment() {
         axes![A = 1];
         // Single i32 tail = 4 bytes; not aligned to DMA_SRAM_WRITE_WIDTH (= 8).
-        let end = reachable_end::<m![A], m![A]>();
+        let end = reachable_end(&<m![A]>::to_value(), &<m![A]>::to_value());
         assert_eq!(end, 1);
         assert_eq!(<i32 as Scalar>::size_in_bytes_from_length(end), 4);
         assert!(!<i32 as Scalar>::size_in_bytes_from_length(end).is_multiple_of(DMA_SRAM_WRITE_WIDTH));
@@ -1236,13 +1279,13 @@ mod tests {
         // End-to-end wrapper test on a realistic DM-tier shape:
         // outer Cluster/Slice partitioning, inner element data.
         axes![Cl = 2, Sl = 4, A = 8, B = 4];
-        assert_dma_layout::<i32, m![Cl, Sl, A, B], m![A, B]>(DMA_SRAM_WRITE_WIDTH);
+        assert_dma_layout::<i32, m![Cl, Sl, A, B], m![A, B], m![Cl, Sl, A, B], m![A, B]>(DMA_SRAM_WRITE_WIDTH);
     }
 
     #[test]
     fn unittest_assert_dma_layout_dst_padding_absorbed() {
         axes![A = 8, B = 3];
-        assert_dma_layout::<i32, m![A, B], m![A, B # 8]>(DMA_SRAM_WRITE_WIDTH);
+        assert_dma_layout::<i32, m![A, B], m![A, B], m![A, B # 8], m![A, B # 8]>(DMA_SRAM_WRITE_WIDTH);
     }
 
     #[test]
@@ -1252,9 +1295,21 @@ mod tests {
         // contract so future refactors of either check cannot regress the
         // DRAM-write path.
         axes![A = 1];
-        assert_dma_layout::<i32, m![A], m![A]>(1);
+        assert_dma_layout::<i32, m![A], m![A], m![A], m![A]>(1);
 
         axes![Cl = 2, Sl = 4, B = 3];
-        assert_dma_layout::<i32, m![Cl, Sl, B], m![B # 7]>(1);
+        assert_dma_layout::<i32, m![Cl, Sl, B], m![B], m![Cl, Sl, B # 7], m![B # 7]>(1);
+    }
+
+    #[test]
+    fn unittest_assert_dma_layout_decomposed_padded_axis() {
+        // Destination splits a padded axis: `A` (live 3) padded to 4, then `(A # 4) / 2, (A # 4) % 2`.
+        // The factor-algebra division does not surface the `/ 2` outer stride, so it never checked it;
+        // sequencing enumerates every stream stride. For i32 (4 B) the `% 2` packet is 8 B and the
+        // `/ 2` stride is 8 B, both aligned, so the layout passes.
+        axes![Cl = 2, Sl = 4, A = 3];
+        assert_dma_layout::<i32, m![Cl, Sl, A], m![A], m![Cl, Sl, A # 4 / 2, A # 4 % 2], m![A # 4 / 2, A # 4 % 2]>(
+            DMA_SRAM_WRITE_WIDTH,
+        );
     }
 }

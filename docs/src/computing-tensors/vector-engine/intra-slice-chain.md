@@ -109,6 +109,7 @@ The `Stash` source comes from `vector_stash()`, which snapshots the running tens
 The typical use is a residual or skip-connection like `max(f(x), x)`, where the original `x` must survive across intermediate stages.
 Call `vector_stash()` at any `Stashable` stage (`Branch`, `Logic`, `Fxp`, `Narrow`, `Fp`, `FpDiv`, `Clip`); the snapshot stays live until the Tensor Unit invocation ends and feeds any later binary or ternary call that takes `Stash`.
 The slot is single-use (a second `vector_stash()` is a compile-time error) and typed, so an `f32` stash only feeds `f32` ops.
+The stash is also read-once: it feeds exactly one later op (reading it moves the slot past `Occupied`, so a second `Stash` read is a compile-time error). A value that must be read more than once is not a stash - put it in a read-many VRF (`VeRhs::vrf`).
 The mapping follows the running tensor, so a stash taken before `Narrow` is still usable after `Widen`.
 Stash is unavailable in [Pair Mode](#pair-mode), and the `IntraFirst` transition to the [inter-slice reducer](./inter-slice-reducer.md) drops it, so anything stashed before `vector_inter_slice_reduce()` is gone afterward.
 
@@ -296,16 +297,16 @@ Shape semantics:
 axes![A = 512, B = 2, S = 64];
 
 fn vector_narrow_split_semantics<'l, const T: Tu>(
-    input: VectorBranchTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![S % 4], m![A % 8], i32, NoTensor, { stage::VeOrder::IntraFirst }>,
-) -> VectorNarrowTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![S % 4, A / 4 % 2], m![A % 4], i32, NoTensor, { stage::VeOrder::IntraFirst }>
+    input: VectorBranchTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![S % 4], m![A % 8], i32, Fresh, { stage::VeOrder::IntraFirst }>,
+) -> VectorNarrowTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![S % 4, A / 4 % 2], m![A % 4], i32, Fresh, { stage::VeOrder::IntraFirst }>
 {
     input.vector_narrow_split::<m![S % 4, A / 4 % 2], m![A % 4]>()
     // shape semantics: [T], [P] -> [T, P / 2], [P % 4]
 }
 
 fn vector_narrow_trim_semantics<'l, const T: Tu>(
-    input: VectorBranchTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, NoTensor, { stage::VeOrder::IntraFirst }>,
-) -> VectorNarrowTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 4], f32, NoTensor, { stage::VeOrder::IntraFirst }>
+    input: VectorBranchTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, Fresh, { stage::VeOrder::IntraFirst }>,
+) -> VectorNarrowTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 4], f32, Fresh, { stage::VeOrder::IntraFirst }>
 {
     input.vector_narrow_trim::<m![A % 2 # 4]>()
     // shape semantics: [T], [P] -> [T], [P = 4]
@@ -313,10 +314,10 @@ fn vector_narrow_trim_semantics<'l, const T: Tu>(
 # 
 # let mut ctx = Context::acquire();
 # 
-# let i: VectorBranchTensor<'_, _, i32, m![1], m![B], m![S / 4 # 256], m![S % 4], m![A % 8], i32, NoTensor, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let i: VectorBranchTensor<'_, _, i32, m![1], m![B], m![S / 4 # 256], m![S % 4], m![A % 8], i32, Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
 # let _o = vector_narrow_split_semantics(i);
 # 
-# let i: VectorBranchTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, NoTensor, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let i: VectorBranchTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
 # let _o = vector_narrow_trim_semantics(i);
 ```
 
@@ -408,16 +409,16 @@ Shape semantics:
 axes![A = 512, B = 2, S = 64, R = 8];
 
 fn vector_widen_concat_semantics<'l, const T: Tu>(
-    input: VectorIntraSliceReduceTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![A / 4 % 2], m![A % 4], i32, NoTensor, { stage::VeOrder::IntraFirst }>,
-) -> VectorWidenTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![1], m![A % 8], i32, NoTensor, { stage::VeOrder::IntraFirst }>
+    input: VectorIntraSliceReduceTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![A / 4 % 2], m![A % 4], i32, Fresh, { stage::VeOrder::IntraFirst }>,
+) -> VectorWidenTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![1], m![A % 8], i32, Fresh, { stage::VeOrder::IntraFirst }>
 {
     input.vector_widen_concat::<m![1], m![A % 8]>()
     // shape semantics: [T, P / 2], [P % 4] -> [T], [P]
 }
 
 fn vector_widen_pad_semantics<'l, const T: Tu>(
-    input: VectorFpTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 4], f32, NoTensor, { stage::VeOrder::IntraFirst }>,
-) -> VectorWidenTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, NoTensor, { stage::VeOrder::IntraFirst }>
+    input: VectorFpTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 4], f32, Fresh, { stage::VeOrder::IntraFirst }>,
+) -> VectorWidenTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, Fresh, { stage::VeOrder::IntraFirst }>
 {
     input.vector_widen_pad::<m![A % 2 # 8]>()
     // shape semantics: [T], [P] -> [T], [P # 8]
@@ -425,14 +426,14 @@ fn vector_widen_pad_semantics<'l, const T: Tu>(
 # 
 # let mut ctx = Context::acquire();
 # 
-# let i: VectorBranchTensor<'_, _, i32, m![1], m![B], m![S / 4 # 256], m![R, A / 4 % 2], m![A % 4 # 8], i32, NoTensor, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let i: VectorBranchTensor<'_, _, i32, m![1], m![B], m![S / 4 # 256], m![R, A / 4 % 2], m![A % 4 # 8], i32, Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
 # let i = i
 #     .vector_narrow_trim::<m![A % 4]>()
 #     .vector_intra_slice_reduce::<R, m![A / 4 % 2], m![A % 4]>(IntraSliceReduceOpI32::AddSat);
 # 
 # let _o = vector_widen_concat_semantics(i);
 # 
-# let i: VectorBranchTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, NoTensor, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let i: VectorBranchTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
 # let i = i.vector_narrow_trim::<m![A % 2 # 4]>().vector_fp_unary(FpUnaryOp::Exp);
 # let _o = vector_widen_pad_semantics(i);
 ```
@@ -587,7 +588,7 @@ fn vrf_add<'l, const T: Tu>(
     input
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_fxp(FxpBinaryOp::AddFxp, VeRhs::vrf(vrf))
+        .vector_fxp(FxpBinaryOp::AddFxp, vrf)
         .vector_final()
 }
 # 

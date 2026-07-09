@@ -67,7 +67,7 @@ pub(crate) fn rope(
         .commit();
 
     // Spill reshaped offsets to HBM and use them as gather indices.
-    let pos_hbm: HbmTensor<i32, Chip, m![S]> = pos_reshaped.to_hbm(&mut ctx.tdma, 0x10e36000);
+    let pos_hbm: HbmTensor<i32, Chip, m![S]> = pos_reshaped.to_hbm(&mut ctx.tdma);
 
     // Gather per-position RoPE coefficients from `rope_table`.
     let rope_dm: DmTensor<bf16, Chip, Cluster, m![S, D / 16 % 2], m![D % 16, R, R]> = rope_table.dma_gather(&pos_hbm);

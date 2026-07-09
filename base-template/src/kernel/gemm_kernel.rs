@@ -46,5 +46,5 @@ pub fn gemm_kernel(
         .commit();
 
     // Transfer result to HBM
-    result.to_hbm(&mut ctx.tdma, 2 << 28)
+    result.to_hbm(&mut ctx.tdma)
 }

@@ -2,6 +2,9 @@ use furiosa_opt_std::prelude::*;
 
 axes![A = 512, B = 32, D = 64];
 
+// A size-1 ("unit") named axis, e.g. the decode-attention single-query-token axis.
+axes![One = 1];
+
 /// Device function that transposes a tensor from shape [A, B] to [B, A].
 #[device(chip = 1)]
 pub fn tile_simple(ctx: &mut Context, input: HbmTensorView<'_, i8, m![1], m![A, B]>) -> HbmTensor<i8, m![1], m![B, A]> {
@@ -13,6 +16,52 @@ pub fn tile_simple(ctx: &mut Context, input: HbmTensorView<'_, i8, m![1], m![A, 
         input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
     }
     output
+}
+
+/// Reads a DM tensor column-by-column where each column is selected by a *computed* tile offset
+/// `b = g * GROUP + j` rather than a bare loop variable, returning an identity copy of the input.
+/// Splits the `B = 32` axis into `GROUPS = 2` groups of `GROUP = 16`; for each `(g, j)` it reads
+/// `input[.., b]` (the load-bearing computed-offset tile) into a loop-local scratch sink.
+///
+/// The tiled view is **DM (SRAM)**, so the `for g { for j { .. } }` nest is unrolled at
+/// `visa -> lir` and the computed offset's loop-variable leaves are substituted and folded to the
+/// concrete column constant. (An HBM-tiled loop is *not* unrolled — it lowers as a kept VISA `Loop`
+/// whose offset must be a bare scalar variable — so a computed offset must tile an SRAM view.)
+///
+/// Documents the SDK "expected an axis view offset" fix: a computed tile/view offset
+/// (`ScalarExpr::BinaryOp`) used to be rejected at `mir_ast_to_visa`; it now materializes and folds
+/// past that wall. The authoritative, oracle-backed coverage of the fold is the `npu-visa-translate`
+/// unit tests. The matching `test_tile_computed_offset` end-to-end check is `#[ignore]`d: see that
+/// test for why (toolchain refresh + a downstream unrolled mutable-view write-back limitation that
+/// is orthogonal to the offset fix).
+#[device(chip = 1)]
+pub fn tile_computed_offset(
+    ctx: &mut Context,
+    input_hbm: &HbmTensor<i8, m![1], m![A, B]>,
+) -> HbmTensor<i8, m![1], m![A, B]> {
+    const GROUPS: usize = 2;
+    const GROUP: usize = 16;
+    let input = input_hbm.to_dm::<m![A / 256], m![A % 256], m![B]>(&mut ctx.tdma);
+    let mut output = unsafe { DmTensor::<i8, m![1], m![A / 256], m![A % 256], m![B]>::from_addr(0x3000) };
+
+    // Define the whole output up front (identity copy), so the result equals the input.
+    input.view().to_dm_view(&mut ctx.tdma, output.view_mut());
+
+    // Read each column at the *computed* offset `b = g * GROUP + j` into a loop-local scratch tile.
+    // This is the read-side computed-offset pattern (a Q-head select `qh = kv_head * GQA_GROUP + g`):
+    // the GROUPS x GROUP iterations sweep every column, so the loop nest is SRAM-tiled and unrolled
+    // and the computed offset folds. The read is the load-bearing exercise; `scratch` (allocated
+    // inside the loop body, so the write target is in scope) is a per-iteration sink.
+    for g in 0..GROUPS {
+        for j in 0..GROUP {
+            let b = g * GROUP + j;
+            let mut scratch = unsafe { DmTensor::<i8, m![1], m![A / 256], m![A % 256], m![1 # 32]>::from_addr(0x6000) };
+            let input_col = input.view().tile::<m![B], 1, m![B = 1 # 32]>(b);
+            input_col.to_dm_view(&mut ctx.tdma, scratch.view_mut());
+        }
+    }
+
+    output.to_hbm(&mut ctx.tdma)
 }
 
 type Chip = m![1];
@@ -40,7 +89,7 @@ pub fn tile_window_commit(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![D]>
         .commit_trim::<m![D = 32 % 8]>()
         .commit_view(result.view_mut().tile::<m![D], 32, m![D = 32 #{!} 64]>(32));
 
-    result.to_hbm(&mut ctx.tdma, 0x3000)
+    result.to_hbm(&mut ctx.tdma)
 }
 
 /// Same transpose as [`tile_simple`], but the input is aliased with a bare `view()`
@@ -125,5 +174,20 @@ pub fn tile_chunked_output(
         let output_slice = output.view_mut().tile::<m![D / 16], 1, m![B, 1 #{!} 4, D % 16]>(i);
         input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
     }
+    output
+}
+
+/// Identity-copy a tensor tiled along a size-1 named axis (the decode-attention `One = 1`
+/// single-query-token pattern). The `.tile()` references the `One_1` tag that trivial-axis stripping
+/// removed from the shape, exercising the absent-unit-axis no-op lowering (`is_absent_unit_axis`).
+#[device(chip = 1)]
+pub fn tile_unit_axis(
+    ctx: &mut Context,
+    input: &HbmTensor<i8, m![1], m![One, B, D]>,
+) -> HbmTensor<i8, m![1], m![One, B, D]> {
+    let mut output = unsafe { HbmTensor::<i8, m![1], m![One, B, D]>::from_addr(0x3000) };
+    let input_slice = input.view().tile::<m![One], 1, m![1, B, D]>(0);
+    let output_slice = output.view_mut().tile::<m![One], 1, m![1, B, D]>(0);
+    input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
     output
 }

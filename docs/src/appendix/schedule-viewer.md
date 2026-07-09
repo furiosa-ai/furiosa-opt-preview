@@ -29,11 +29,10 @@ furiosa-schedule-viewer --host 127.0.0.1 --port 9254
 ### Generate a Schedule JSON File
 
 `--dump-schedule` writes the compiled schedule to a JSON file.
-It is available in direct compiler mode when building a single device function:
+It is available when compiling a single device function:
 
 ```bash
-cargo furiosa-opt compiler build \
-  --device-function <device-function> \
+cargo furiosa-opt compile <device-function> \
   --dump-schedule <path-to-json-file>
 ```
 

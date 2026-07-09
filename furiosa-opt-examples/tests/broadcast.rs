@@ -9,7 +9,7 @@ async fn test_view_broadcast() {
     // Create input tensor with shape (A=512)(B=4).
     let input = HostTensor::<i32, m![A]>::from_buf((0..512).collect::<Vec<_>>());
     let hbm1 = input.to_hbm::<m![1], m![A]>(&mut ctx.pdma).await;
-    let hbm2 = hbm1.to_hbm::<{ Dma::Tensor }, m![A, B]>(&mut ctx.tdma, 0);
+    let hbm2 = hbm1.to_hbm::<{ Dma::Tensor }, m![A, B]>(&mut ctx.tdma);
     let output = hbm2.to_host::<m![A, B]>(&mut ctx.pdma).await;
 
     assert_eq!(

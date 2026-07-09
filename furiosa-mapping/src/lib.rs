@@ -10,7 +10,7 @@
 pub use furiosa_mapping_macro::*;
 pub use furiosa_mapping_types::*;
 
-use abi_stable::std_types::{RResult, RSlice, RVec, Tuple2};
+use abi_stable::std_types::{RResult, RSlice, RVec, Tuple2, Tuple3};
 
 /// Raw `extern "C-unwind"` decls for the prebuilt impl's exports.
 mod sys {
@@ -24,6 +24,7 @@ mod sys {
             mode: SequencerMode,
         ) -> RResult<RVec<SequencerConfig>, SequencerError>;
         pub(super) fn mapping_normalize(slf: &Mapping) -> Mapping;
+        pub(super) fn mapping_dma_tails(src: &Mapping, dst: &Mapping) -> Tuple3<usize, usize, usize>;
         pub(super) fn mapping_split_at(slf: &Mapping, target: usize) -> Tuple2<Mapping, Mapping>;
         pub(super) fn mapping_index(slf: &Mapping, position: usize) -> Index;
         pub(super) fn mapping_indexes(slf: &Mapping) -> RVec<Index>;
@@ -43,6 +44,13 @@ mod sys {
 pub trait MappingExt: Sized {
     /// Normalizes to canonical form.
     fn normalize(&self) -> Self;
+    /// The DMA burst tails for copying source `self` into destination `dst`, as
+    /// `(src_packet, dst_packet, valid)`: each side's own contiguous packet (its innermost padded
+    /// segment for the shared axis, padding included) plus the shared live size. Each side peels its own
+    /// packet, so the two may differ (a padded source vs a dense sink); `valid` is the largest run both
+    /// cover with live cells, no trailing padding, which a DRAM sink pins its tail to. `(1, 1, 1)` for a
+    /// transpose.
+    fn dma_tails(&self, dst: &Self) -> (usize, usize, usize);
     /// Returns true if `self` is a resize (innermost prefix) of `original`.
     fn is_resize_of(&self, original: &Self) -> bool;
     /// Splits at buffer `target` into `(outer, inner)`: `outer` strides past the first `target`
@@ -102,6 +110,11 @@ pub fn sequence(
 impl MappingExt for Mapping {
     fn normalize(&self) -> Self {
         unsafe { sys::mapping_normalize(self) }
+    }
+
+    fn dma_tails(&self, dst: &Self) -> (usize, usize, usize) {
+        let Tuple3(src_packet, dst_packet, valid) = unsafe { sys::mapping_dma_tails(self, dst) };
+        (src_packet, dst_packet, valid)
     }
 
     fn is_resize_of(&self, original: &Self) -> bool {

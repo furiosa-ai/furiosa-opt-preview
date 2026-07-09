@@ -25,7 +25,7 @@ pub mod a {
         hbm: &HbmTensor<i32, m![1], m![A, B]>,
     ) -> HbmTensor<i32, m![1], m![A, B]> {
         let dm: DmTensor<i32, m![1], m![1], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
-        dm.to_hbm(&mut ctx.tdma, 0x20_0000)
+        dm.to_hbm(&mut ctx.tdma)
     }
 }
 
@@ -40,6 +40,6 @@ pub mod b {
         hbm: &HbmTensor<i32, m![1], m![A, B]>,
     ) -> HbmTensor<i32, m![1], m![A, B]> {
         let dm: DmTensor<i32, m![1], m![1], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
-        dm.to_hbm(&mut ctx.tdma, 0x30_0000)
+        dm.to_hbm(&mut ctx.tdma)
     }
 }

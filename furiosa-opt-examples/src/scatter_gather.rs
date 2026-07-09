@@ -8,6 +8,10 @@
 //! `num_slices` (the sparse `C / 2 = 306` would round up past it and fail to lower).
 //! `gather_unaligned` covers a non-power-of-2 count (`U = 768`, 3 rows/slice) that still meets
 //! the 256-slice constraint.
+//!
+//! `gather_paged_kv` gathers over a 4-D DRAM pool whose gather-key label `NBlocks` is reused in
+//! the gathered output. That reused key is what the visa->LIR indirect-key relabeling isolates by
+//! subtracting the index's own labels.
 
 use furiosa_opt_std::prelude::*;
 
@@ -17,6 +21,16 @@ axes![
     C = 612, // Cache length (non-power-of-2, > K: stresses unaligned coverage)
     G = 512, // Slice-aligned gather count (G / 2 = 256)
     U = 768  // Unaligned gather count (non-power-of-2, > K: 3 rows/slice, U / 3 = 256)
+];
+
+// Multi-dim DRAM-pool gather axes. `NBlocks * PBlock = 256` fills the slices; the gather remaps
+// the leading `NBlocks` rows to physical pool rows via a byte-offset index, carrying a
+// `[KvHeads, HeadDim]` payload per gathered row.
+axes![
+    NBlocks = 16,  // gathered block count
+    PBlock = 16,   // block size (lane-aligned); NBlocks * PBlock = 256
+    KvHeads = 8,   // outer payload axis
+    HeadDim = 128  // inner payload axis
 ];
 
 type Chip = m![1];
@@ -49,7 +63,7 @@ pub fn gather_minimal(
 ) -> HbmTensor<bf16, Chip, m![G, D]> {
     let values_dm: DmTensor<bf16, Chip, Cluster, m![G / 2], m![G % 2, D]> = table.dma_gather(index);
 
-    values_dm.to_hbm(&mut ctx.tdma, 0x1000)
+    values_dm.to_hbm(&mut ctx.tdma)
 }
 
 /// Gather an unaligned count `U = 768` (`= 3 * num_slices`, non-power-of-2, `> K`) from the
@@ -64,5 +78,28 @@ pub fn gather_unaligned(
 ) -> HbmTensor<bf16, Chip, m![U, D]> {
     let values_dm: DmTensor<bf16, Chip, Cluster, m![U / 3], m![U % 3, D]> = table.dma_gather(index);
 
-    values_dm.to_hbm(&mut ctx.tdma, 0x1000)
+    values_dm.to_hbm(&mut ctx.tdma)
+}
+
+/// Gather over a multi-dimensional DRAM pool `[NBlocks, KvHeads, PBlock, HeadDim]`, remapping the
+/// leading `NBlocks` rows to physical pool rows via a byte-offset index. The gathered output
+/// regroups the two sub-axes `[NBlocks, PBlock]` onto the 256 slices with a `[KvHeads, HeadDim]`
+/// payload per slice.
+///
+/// Unlike the 2-D `[K, D]` gathers above, the gather-key label `NBlocks` is reused in the gathered
+/// output (the gathered rows stay ordered by the same `NBlocks` axis the index addresses). That
+/// reuse hits the operator-verify wall (`index_axis.len() (0) != 1`) unless the visa->LIR
+/// relabeling subtracts the index's own labels before deciding which table axis is genuinely kept,
+/// see `LirBuilder::relabel_indirect_key_axis`.
+#[device(chip = 1)]
+pub fn gather_paged_kv(
+    ctx: &mut Context,
+    pool: &HbmTensor<bf16, Chip, m![NBlocks, KvHeads, PBlock, HeadDim]>,
+    block_table: &HbmTensor<i32, Chip, m![NBlocks]>,
+) -> HbmTensor<bf16, Chip, m![NBlocks, KvHeads, PBlock, HeadDim]> {
+    // HBM write-back past the pool; only distinctness matters for a lowering probe.
+    let gathered: DmTensor<bf16, Chip, Cluster, m![NBlocks, PBlock], m![KvHeads, HeadDim]> =
+        pool.dma_gather(block_table);
+
+    gathered.to_hbm(&mut ctx.tdma)
 }

@@ -65,5 +65,5 @@ pub fn vrf_add_segmented(
     let result = vrf_add_kernel_segmented(ctx, lhs.view(), rhs.view(), result);
 
     // Write result back to HBM
-    result.to_hbm(&mut ctx.tdma, 0x3000)
+    result.to_hbm(&mut ctx.tdma)
 }

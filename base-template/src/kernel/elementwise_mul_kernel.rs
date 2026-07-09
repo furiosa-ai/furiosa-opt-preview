@@ -39,5 +39,5 @@ pub fn elementwise_mul_kernel(
         .commit_trim::<m![A % 8]>()
         .commit::<m![A % 8]>();
 
-    result.to_hbm(&mut ctx.tdma, 1 << 28)
+    result.to_hbm(&mut ctx.tdma)
 }

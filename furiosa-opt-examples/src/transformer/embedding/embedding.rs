@@ -48,7 +48,7 @@ pub(super) fn embed(
         .commit();
 
     // Move reshaped indices to HBM for gather input.
-    let ids_hbm: HbmTensor<i32, Chip, m![S % 4, S / 4]> = ids_reshaped.to_hbm(&mut ctx.tdma, 0x10e36000);
+    let ids_hbm: HbmTensor<i32, Chip, m![S % 4, S / 4]> = ids_reshaped.to_hbm(&mut ctx.tdma);
 
     // Gather embedding rows for each token id.
     embedding_table.dma_gather(&ids_hbm)

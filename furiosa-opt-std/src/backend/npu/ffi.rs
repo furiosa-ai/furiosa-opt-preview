@@ -1,9 +1,4 @@
-#[expect(
-    dead_code,
-    missing_docs,
-    unsafe_op_in_unsafe_fn,
-    reason = "bindgen output; bindgen does not emit docs or mark ffi wrappers as safe"
-)]
+#[expect(dead_code, missing_docs, reason = "bindgen output; bindgen does not emit docs")]
 mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
@@ -11,20 +6,9 @@ mod bindings {
 pub use bindings::NpuDesc;
 pub(crate) use bindings::*;
 
-use std::sync::{LazyLock, OnceLock};
+use std::sync::OnceLock;
 
 use crate::context::Device;
-
-pub(crate) fn lib() -> &'static DeviceRuntime {
-    static LIB: LazyLock<DeviceRuntime> = LazyLock::new(|| {
-        let lib = unsafe { DeviceRuntime::new(env!("DEVICE_RUNTIME_SO")) }
-            .unwrap_or_else(|e| panic!("failed to load libdevice_runtime.so: {e}"));
-        let ver = unsafe { std::ffi::CStr::from_ptr(lib.furiosa_version()) };
-        log::info!("device-runtime: {}", ver.to_string_lossy());
-        lib
-    });
-    &LIB
-}
 
 pub(crate) fn rt() -> *const Runtime {
     struct Handle(*mut Runtime);
@@ -33,6 +17,8 @@ pub(crate) fn rt() -> *const Runtime {
 
     static RT: OnceLock<Handle> = OnceLock::new();
     RT.get_or_init(|| {
+        let ver = unsafe { std::ffi::CStr::from_ptr(furiosa_version()) };
+        log::info!("device-runtime: {}", ver.to_string_lossy());
         let Device { chip: chips, pe: pes } = *DEVICE.get_or_init(|| Device { chip: 1, pe: 8 });
         let npus: Vec<NpuDesc> = (0..chips)
             .flat_map(|chip| match pes {
@@ -55,7 +41,7 @@ pub(crate) fn rt() -> *const Runtime {
                 }],
             })
             .collect();
-        let ptr = unsafe { lib().furiosa_runtime_init(npus.as_ptr(), npus.len()) };
+        let ptr = unsafe { furiosa_runtime_init(npus.as_ptr(), npus.len()) };
         assert!(!ptr.is_null(), "failed to acquire NPU");
         Handle(ptr)
     })

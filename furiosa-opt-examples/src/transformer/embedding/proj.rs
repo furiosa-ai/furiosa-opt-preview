@@ -268,7 +268,7 @@ pub(crate) fn q_proj(
         .commit_trim::<m![S % 32 % 16]>()
         .commit();
 
-    result_d0b.to_hbm(&mut ctx.tdma, 0x10e36000)
+    result_d0b.to_hbm(&mut ctx.tdma)
 }
 
 /// K projection: normalized input × K_weight → K in HBM.
@@ -347,5 +347,5 @@ pub(crate) fn k_proj(
         .commit();
 
     // DMA K result → DRAM (for RoPE)
-    k_xpose.to_hbm(&mut ctx.tdma, 0x8c800)
+    k_xpose.to_hbm(&mut ctx.tdma)
 }

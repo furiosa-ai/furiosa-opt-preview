@@ -14,12 +14,11 @@ resolver = "3"
 
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(backend, values("simulation", "emulation", "npu", "typecheck"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(backend, values("simulation", "emulation", "npu", "typecheck"))', 'cfg(furiosa_opt)'] }
 
 [workspace.dependencies]
 abi_stable = "0.11"
 anstream = "0.6"
-anstyle = "1.0"
 arrayvec = { version = "0.7.6", features = ["serde"] }
 bindgen = "0.71"
 cfg-if = "1"

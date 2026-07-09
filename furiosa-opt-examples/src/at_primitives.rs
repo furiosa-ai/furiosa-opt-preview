@@ -37,7 +37,7 @@ pub mod dma_commit {
             .commit_trim::<m![B]>()
             .commit_at(0);
 
-        fetch_and_commit_tensor.to_hbm(&mut ctx.tdma, 0x3000)
+        fetch_and_commit_tensor.to_hbm(&mut ctx.tdma)
     }
 }
 
@@ -55,7 +55,7 @@ pub mod vrf {
         vrf_data1: &HbmTensor<i32, Chip, m![B]>,
         vrf_data2: &HbmTensor<i32, Chip, m![B]>,
     ) -> HbmTensor<i32, Chip, m![A, B]> {
-        let input_intermediate: HbmTensor<i32, Chip, m![B, A]> = input.to_hbm(&mut ctx.tdma, 0x0);
+        let input_intermediate: HbmTensor<i32, Chip, m![B, A]> = input.to_hbm(&mut ctx.tdma);
         let input_dm = input_intermediate.to_dm::<Cluster, m![A / 2], m![B, A % 2]>(&mut ctx.tdma);
         let vrf_dm1 = vrf_data1.view().to_dm_at::<Cluster, m![A / 2], m![B]>(&mut ctx.tdma, 0);
         let vrf_dm2 = vrf_data2.to_dm::<Cluster, m![A / 2], m![B]>(&mut ctx.tdma);
@@ -91,7 +91,7 @@ pub mod vrf {
             .commit_trim::<m![A % 2]>()
             .commit();
 
-        result.to_hbm(&mut ctx.tdma, 0x5000)
+        result.to_hbm(&mut ctx.tdma)
     }
 }
 
@@ -134,7 +134,7 @@ pub mod pcopy {
     pub fn dm_pcopy_at(ctx: &mut Context, hbm: &HbmTensor<i32, m![1], m![A, B]>) -> HbmTensor<i32, m![1], m![A, B]> {
         let src: DmTensor<i32, m![1], m![1], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
         let dst: DmTensor<i32, m![1], m![1], m![A], m![B]> = src.to_dm_pcopy_at(&mut ctx.sub, 0x10_0000);
-        dst.to_hbm(&mut ctx.tdma, 0x20_0000)
+        dst.to_hbm(&mut ctx.tdma)
     }
 }
 
@@ -153,7 +153,7 @@ pub mod relayout {
         let dm: DmTensor<i32, m![1], m![1 # 2], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
         let relaid: DmTensor<i32, m![1], m![1 # 2], m![1 # 2, A / 2], m![A % 2, B]> =
             dm.to_dm_at(&mut ctx.tdma, 0x10_0000);
-        relaid.to_hbm(&mut ctx.tdma, 0x20_0000)
+        relaid.to_hbm(&mut ctx.tdma)
     }
 }
 
@@ -172,6 +172,6 @@ pub mod gather {
         index: &HbmTensor<i32, Chip, m![C]>,
     ) -> HbmTensor<bf16, Chip, m![C, D]> {
         let values_dm: DmTensor<bf16, Chip, Cluster, m![D], m![C]> = table.dma_gather_at(index, 0x0);
-        values_dm.to_hbm(&mut ctx.tdma, 0x1000)
+        values_dm.to_hbm(&mut ctx.tdma)
     }
 }

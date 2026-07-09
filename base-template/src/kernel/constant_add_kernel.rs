@@ -30,5 +30,5 @@ pub fn constant_add_kernel(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]
         .commit::<m![A % 8]>();
 
     // DM → HBM
-    result.to_hbm(&mut ctx.tdma, 1 << 28)
+    result.to_hbm(&mut ctx.tdma)
 }

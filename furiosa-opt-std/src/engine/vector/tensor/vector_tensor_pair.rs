@@ -53,11 +53,11 @@ use crate::engine::vector::stage::markers::{
     Way::{self, Way4, Way8},
 };
 use crate::engine::vector::stage::state::VeState;
+use crate::engine::vector::stash_slot::Fresh;
 use crate::engine::vector::tensor::verify::{verify_vector_narrow_split, verify_vector_widen_concat};
 use crate::prelude::RngdAlu;
 use crate::prelude::semantics::HasConversionOp;
 use crate::tensor::*;
-use crate::tensor_state::NoTensor;
 
 use super::vector_tensor::{
     VeTensorData, VectorClipTensor, VectorFpTensor, VectorFxpTensor, VectorLogicTensor, apply_binary_op,
@@ -70,7 +70,7 @@ use super::vector_tensor::{
 
 /// Type alias for group tensor data with Group state.
 type GroupTensorData<S, D, Chip, Cluster, Slice, Time, Packet, const W: Way = { Way8 }> =
-    VeTensorData<S, D, Chip, Cluster, Slice, Time, Packet, D, NoTensor, { VeOrder::IntraFirst }, stage::Group, W>;
+    VeTensorData<S, D, Chip, Cluster, Slice, Time, Packet, D, Fresh, { VeOrder::IntraFirst }, stage::Group, W>;
 
 // ============================================================================
 // VectorTensorPair - Manages both groups together
@@ -1067,7 +1067,7 @@ impl<
         Time,
         Packet,
         i32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way8 },
@@ -1094,7 +1094,7 @@ impl<
         Time,
         Packet,
         i32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way8 },
@@ -1136,7 +1136,7 @@ impl<
         Time,
         Packet,
         f32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way8 },
@@ -1163,7 +1163,7 @@ impl<
         Time,
         Packet,
         f32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way8 },
@@ -1197,7 +1197,7 @@ impl<'l, const T: Tu, S: stage::Stage + CanTransitionTo<stage::Fxp>, Chip: M, Cl
         Time,
         Packet,
         i32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way8 },
@@ -1224,7 +1224,7 @@ impl<'l, const T: Tu, S: stage::Stage + CanTransitionTo<stage::Fxp>, Chip: M, Cl
         Time,
         Packet,
         i32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way8 },
@@ -1258,7 +1258,7 @@ impl<'l, const T: Tu, S: stage::Stage + CanTransitionTo<stage::Fp>, Chip: M, Clu
         Time,
         Packet,
         f32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way4 },
@@ -1285,7 +1285,7 @@ impl<'l, const T: Tu, S: stage::Stage + CanTransitionTo<stage::Fp>, Chip: M, Clu
         Time,
         Packet,
         f32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way4 },
@@ -1319,7 +1319,7 @@ impl<'l, const T: Tu, S: stage::Stage + CanTransitionTo<stage::Clip>, Chip: M, C
         Time,
         Packet,
         i32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way8 },
@@ -1346,7 +1346,7 @@ impl<'l, const T: Tu, S: stage::Stage + CanTransitionTo<stage::Clip>, Chip: M, C
         Time,
         Packet,
         i32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way8 },
@@ -1380,7 +1380,7 @@ impl<'l, const T: Tu, S: stage::Stage + CanTransitionTo<stage::Clip>, Chip: M, C
         Time,
         Packet,
         f32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way8 },
@@ -1407,7 +1407,7 @@ impl<'l, const T: Tu, S: stage::Stage + CanTransitionTo<stage::Clip>, Chip: M, C
         Time,
         Packet,
         f32,
-        NoTensor,
+        Fresh,
         { VeOrder::IntraFirst },
         stage::Zipped,
         { Way8 },

@@ -64,7 +64,7 @@ pub fn matmul_cluster_reduce(
     let reduced = reduce_over_cluster(ctx, &mul_result);
 
     // Write back to HBM
-    reduced.to_hbm(&mut ctx.tdma, 0x3000)
+    reduced.to_hbm(&mut ctx.tdma)
 }
 
 /// Reduce over cluster axis using ReduceScatter pattern.

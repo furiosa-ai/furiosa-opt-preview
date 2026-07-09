@@ -1,13 +1,13 @@
 use furiosa_mapping::{M, Pair};
 
 use super::Buffer;
-use super::ffi::{lib, rt};
+use super::ffi::{furiosa_npu_buffer_from, furiosa_npu_buffer_offset, rt};
 use crate::scalar::Scalar;
 use crate::tensor::memory::{HbmTensor, HbmTensorView, HbmTensorViewMut};
 
 fn to_buffer<D: Scalar, Chip: M, Element: M>(addr: u64) -> Buffer {
     let len = Pair::<Chip, Element>::SIZE * std::mem::size_of::<D>();
-    Buffer::from_raw(unsafe { lib().furiosa_npu_buffer_from(rt(), addr, len) })
+    Buffer::from_raw(unsafe { furiosa_npu_buffer_from(rt(), addr, len) })
 }
 
 impl<D: Scalar, Chip: M, Element: M> From<&HbmTensor<D, Chip, Element>> for Buffer {
@@ -30,7 +30,7 @@ impl<D: Scalar, Chip: M, Element: M> From<&HbmTensorViewMut<'_, D, Chip, Element
 
 impl<D: Scalar, Chip: M, Element: M> From<Buffer> for HbmTensor<D, Chip, Element> {
     fn from(buf: Buffer) -> Self {
-        let addr = unsafe { lib().furiosa_npu_buffer_offset(buf.as_ptr()) };
+        let addr = unsafe { furiosa_npu_buffer_offset(buf.as_ptr()) };
         unsafe { Self::from_addr(addr) }.owns(buf)
     }
 }

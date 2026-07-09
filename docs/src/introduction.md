@@ -57,11 +57,10 @@ cd base-template
 
 ```text
 base-template/
-├── Cargo.toml
+├── Cargo.toml                               # `[package.metadata.furiosa-opt]` marks it a kernel package
 ├── README.md
 ├── rust-toolchain.toml
 └── src/
-    ├── furiosa-opt.tag                       # marker the rustc plugin scans for; must sit at src/
     ├── lib.rs                                # `pub mod kernel;`
     ├── kernel/                               # every #[device] function lives here
     │   ├── mod.rs                            # `pub mod {constant_add,...}_kernel;`
@@ -79,7 +78,7 @@ base-template/
 
 Keep these layout rules intact:
 
-- `src/furiosa-opt.tag` is a marker file. It must stay directly under `src/`.
+- A package opts into kernel compilation by declaring `[package.metadata.furiosa-opt]` in its `Cargo.toml`.
 - Host programs should live as direct `src/*.rs` files and are registered with explicit `[[bin]] path = "src/<name>.rs"` entries in `Cargo.toml`.
 - Do not move host programs into `src/bin/`, `examples/`, or `tests/`; the rustc plugin scans cargo targets rooted at `src/` and skips those other locations.
 

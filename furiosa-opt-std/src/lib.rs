@@ -15,13 +15,11 @@ mod array_vec;
 mod cast;
 mod constraints;
 mod context;
-pub mod diag;
 mod engine;
 mod float;
 mod scalar;
 mod storage;
 mod tensor;
-mod tensor_state;
 
 pub mod backend;
 pub mod runtime;
@@ -36,11 +34,11 @@ pub use tensor::pseudo;
 /// Prelude module that re-exports commonly used items.
 pub mod prelude {
     pub use super::cast::{Cast, ContractionCast, FetchCast};
+    pub use super::engine::vector::stash_slot::*;
     pub use super::engine::vector::{alu::*, branch::*, layer::*, op::*, operand::*, scalar::*, stage, tensor::*};
     pub use super::engine::*;
     pub use super::tensor::memory::*;
     pub use super::tensor::tu::*;
-    pub use super::tensor_state::*;
     pub use super::{array_vec::*, backend::*, context::*, runtime::*, scalar::*, storage::*, tensor::*};
     pub use furiosa_mapping::*;
     pub use furiosa_opt_macro::{DeviceSend, device};

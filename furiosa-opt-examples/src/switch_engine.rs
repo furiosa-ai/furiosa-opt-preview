@@ -25,5 +25,5 @@ pub fn custom_broadcast(
         .commit_trim::<m![V]>()
         .commit();
 
-    result.to_hbm::<m![A, Y, B, V]>(&mut ctx.tdma, 0x4000)
+    result.to_hbm::<m![A, Y, B, V]>(&mut ctx.tdma)
 }

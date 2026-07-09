@@ -84,5 +84,5 @@ pub(crate) fn o_proj(
         .commit();
 
     // Store projected output to HBM.
-    result.to_hbm(&mut ctx.tdma, 0x10e36000)
+    result.to_hbm(&mut ctx.tdma)
 }

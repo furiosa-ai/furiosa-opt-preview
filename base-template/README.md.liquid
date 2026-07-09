@@ -7,7 +7,6 @@ Each kernel ships as a host binary plus a `#[device]` function compiled with `ca
 
 ```
 src/
-├── furiosa-opt.tag         # marker the rustc plugin scans for; must sit at src/
 ├── lib.rs                  # `pub mod kernel;`
 ├── kernel/                 # every #[device] function lives here
 │   ├── mod.rs              # `pub mod {constant_add,...}_kernel;`

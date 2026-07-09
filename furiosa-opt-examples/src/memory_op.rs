@@ -20,7 +20,7 @@ pub fn dm_relayout(
 ) -> HbmTensor<i32, m![1], m![A / 2, A % 2, B]> {
     let dm: DmTensor<i32, m![1], m![1 # 2], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
     let relaid: DmTensor<i32, m![1], m![1 # 2], m![1 # 2, A / 2], m![A % 2, B]> = dm.to_dm(&mut ctx.tdma);
-    relaid.to_hbm(&mut ctx.tdma, 0x20_0000)
+    relaid.to_hbm(&mut ctx.tdma)
 }
 
 /// `DmTensor::to_dm_pcopy`: copy a DM tensor into another DM tensor via parallel
@@ -29,7 +29,7 @@ pub fn dm_relayout(
 pub fn dm_pcopy(ctx: &mut Context, hbm: &HbmTensor<i32, m![1], m![A, B]>) -> HbmTensor<i32, m![1], m![A, B]> {
     let src: DmTensor<i32, m![1], m![1], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
     let dst: DmTensor<i32, m![1], m![1], m![A], m![B]> = src.to_dm_pcopy(&mut ctx.sub);
-    dst.to_hbm(&mut ctx.tdma, 0x20_0000)
+    dst.to_hbm(&mut ctx.tdma)
 }
 
 /// `DmTensorView::to_dm_view_pcopy`: copy from a DM view into a DM `view_mut` via
@@ -39,7 +39,7 @@ pub fn dm_view_pcopy(ctx: &mut Context, hbm: &HbmTensor<i32, m![1], m![A, B]>) -
     let src: DmTensor<i32, m![1], m![1], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
     let mut dst: DmTensor<i32, m![1], m![1], m![A], m![B]> = unsafe { DmTensor::from_addr(0x10_0000) };
     src.view().to_dm_view_pcopy(&mut ctx.sub, dst.view_mut());
-    dst.to_hbm(&mut ctx.tdma, 0x20_0000)
+    dst.to_hbm(&mut ctx.tdma)
 }
 
 /// `HbmTensorView::hbm_chip_shuffle`: redistribute data across chips on the HBM
@@ -84,5 +84,5 @@ pub fn commit_view_bottom_pad(
                 .tile::<m![Q % 56], 8, m![T % 32, Q % 56 = 8 #{!} 56]>(0),
         );
 
-    result.to_hbm(&mut ctx.tdma, 0x300000)
+    result.to_hbm(&mut ctx.tdma)
 }

@@ -3,7 +3,7 @@ use furiosa_opt_examples::vector_engine::{
     A, B, ve_elementwise_full_pipeline, ve_elementwise_fxp_chain, ve_elementwise_fxp_const, ve_elementwise_logic,
     ve_elementwise_multi_vrf, ve_elementwise_stash_f32, ve_elementwise_stash_i32, ve_elementwise_ternary,
     ve_elementwise_ternary_stash, ve_elementwise_vrf, ve_stash_fp_fp, ve_stash_fp_fxp, ve_stash_fxp_fp,
-    ve_stash_fxp_fxp,
+    ve_stash_fxp_fxp, ve_vrf_read_twice_ok_f32,
 };
 use furiosa_opt_examples::vrf_add::vrf_add;
 use furiosa_opt_std::prelude::*;
@@ -127,6 +127,25 @@ async fn test_ve_elementwise_stash_f32() {
 
     // Verify: output = max(input * 2.0, input)
     let expected = input.into_inner().map(|x| f32::max(x * 2.0, x));
+
+    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
+}
+
+#[tokio::test]
+async fn test_ve_vrf_read_twice_ok_f32() {
+    let mut ctx = Context::acquire();
+
+    let mut rng = SmallRng::seed_from_u64(42);
+    let input = HostTensor::<f32, m![A]>::rand(&mut rng);
+
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
+
+    let out_hbm = launch(ve_vrf_read_twice_ok_f32, (&mut *ctx, &input_hbm)).await;
+
+    let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
+
+    // Two VRF reads of `z`: Mul0 (z·z) then Mul1 ((z·z)·z) => z³.
+    let expected = input.into_inner().map(|x| x * x * x);
 
     assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
 }

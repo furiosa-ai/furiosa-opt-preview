@@ -57,7 +57,7 @@ macro_rules! scalar_fixture {
                     .commit_trim::<m![B]>()
                     .commit();
 
-                result.to_hbm(&mut ctx.tdma, 0x3000)
+                result.to_hbm(&mut ctx.tdma)
             }
         }
     };

@@ -6,6 +6,7 @@
 
 pub mod at_primitives;
 pub mod attention;
+pub mod bias_partition_broadcast;
 pub mod binary_add;
 pub mod cluster_chip_shuffle_slice;
 pub mod contract_outer_assertions;

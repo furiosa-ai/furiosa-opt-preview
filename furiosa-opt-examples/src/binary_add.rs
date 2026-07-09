@@ -62,5 +62,5 @@ pub fn binary_add_2048(
     binary_add_kernel(ctx, lhs.view(), rhs.view(), result.view_mut());
 
     // Write result back to HBM
-    result.to_hbm(&mut ctx.tdma, 0x3000)
+    result.to_hbm(&mut ctx.tdma)
 }

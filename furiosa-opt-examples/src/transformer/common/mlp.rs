@@ -248,7 +248,7 @@ pub(crate) fn mlp(
         .commit_trim::<m![S % 8]>()
         .commit();
 
-    let gated_hbm: HbmTensor<bf16, Chip, m![M, S]> = gated.to_hbm(&mut ctx.tdma, 0x256d000);
+    let gated_hbm: HbmTensor<bf16, Chip, m![M, S]> = gated.to_hbm(&mut ctx.tdma);
 
     let gated_retiled: DmTensor<bf16, Chip, Cluster, m![Y, M / 76], m![M % 76, S]> = gated_hbm.to_dm(&mut ctx.tdma);
 
@@ -318,5 +318,5 @@ pub(crate) fn mlp(
         .commit();
 
     // Write final MLP output tensor to HBM.
-    down_result.to_hbm(&mut ctx.tdma, 0x10e50000)
+    down_result.to_hbm(&mut ctx.tdma)
 }

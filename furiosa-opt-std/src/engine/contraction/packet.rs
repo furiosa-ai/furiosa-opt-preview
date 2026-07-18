@@ -9,8 +9,8 @@ use furiosa_opt_macro::primitive;
 use crate::backend::Backend;
 use crate::cast::ContractionCast;
 use crate::context::*;
+use crate::engine::contraction::ContractPacketTensor;
 use crate::engine::contraction::outer::ContractOuterTensor;
-use crate::engine::contraction::{ContractPacketTensor, TEMPORAL_ACCUMULATOR_COLS};
 use crate::scalar::*;
 
 // ANCHOR: contract_packet_def
@@ -41,46 +41,12 @@ impl<
 }
 // ANCHOR_END: contract_packet_def
 
-/// Validates the Packet Reducer.
-///
-/// Checks:
-/// 1. `Packet` should be 32 or 64 bytes (mirroring the Outer stage's `OutPacket`). The size is taken
-///    in `Storage` (pre-widen) bytes: the DPE reads storage-width input flits, not accumulator-width.
-/// 2. `OutPacket::SIZE` should be a power of two and at most
-///    `TEMPORAL_ACCUMULATOR_COLS` and be obtainable from `Packet` by splitting
-///    at a power-of-two sized boundary.
+/// Validates the Packet Reducer via [`furiosa_opt_lower::config_contract_packet`] (size / power-of-two /
+/// contraction rules documented there). The packet size is taken in `Storage` (pre-widen) bytes: the
+/// DPE reads storage-width input flits, not accumulator-width.
 pub(crate) fn verify_contract_packet<Storage: Scalar, Packet: M, OutPacket: M>() {
-    let packet_size = Storage::size_in_bytes_from_length(Packet::SIZE);
-    assert!(
-        [32, 64].contains(&packet_size),
-        "Packet must be 32 or 64 bytes, got {packet_size} bytes"
-    );
-
-    assert!(
-        OutPacket::SIZE <= TEMPORAL_ACCUMULATOR_COLS,
-        "OutPacket::SIZE must be at most {TEMPORAL_ACCUMULATOR_COLS}, got {}",
-        OutPacket::SIZE
-    );
-
-    assert!(
-        OutPacket::SIZE.is_power_of_two(),
-        "OutPacket::SIZE must be a power of two, got {}",
-        OutPacket::SIZE
-    );
-
-    // `remove_padding` only peels the outer spine, so it needs a NORMALIZED layout: normalize first to
-    // surface trailing padding to the top level, then strip it (a split can leave the pad buried inside a
-    // strided composite like `(A # 16, C) / 4`, which a pre-normalize `remove_padding` would miss).
-    let packet = Packet::to_value();
-    let out_packet = OutPacket::to_value().normalize().remove_padding();
-
-    assert!(
-        (0..=Packet::SIZE.trailing_zeros()).rev().any(|depth| {
-            let split = 1 << depth;
-            packet.clone().split_at(split).0.normalize().remove_padding() == out_packet
-        }),
-        "OutPacket {out_packet} is not a valid contraction of Packet {packet}",
-    );
+    furiosa_opt_lower::config_contract_packet(&Packet::to_value(), &OutPacket::to_value(), Storage::BITS)
+        .unwrap_or_else(|message| panic!("{message}"));
 }
 
 #[cfg(test)]

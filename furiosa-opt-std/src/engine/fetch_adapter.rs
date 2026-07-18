@@ -21,10 +21,10 @@ use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
-use crate::cast::FetchCast;
+use crate::cast::{FetchCast, FetchZeroPointSub};
 use crate::constraints;
 use crate::context::*;
-use crate::engine::{CanApplyFetchCast, CanApplyFetchMask, CanApplyFetchTableLookup};
+use crate::engine::{CanApplyFetchCast, CanApplyFetchMask, CanApplyFetchTableLookup, CanApplyFetchZeroPointSub};
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
@@ -217,6 +217,82 @@ impl<'l, const T: Tu, P: CanApplyFetchCast, D: Scalar, Chip: M, Cluster: M, Slic
     }
 }
 // ANCHOR_END: fetch_cast_impl
+
+/// After the Fetch Adapter's zero-point-subtraction stage.
+#[derive(Debug)]
+pub struct PositionFetchZeroPointSub;
+
+impl Position for PositionFetchZeroPointSub {}
+
+/// Tensor streamed after `fetch_zero_point_sub`. Its element type is a
+/// zero-point-subtracted staging type ([`i5`]/[`i9`]); the type system routes
+/// it only into `contract_outer`.
+pub type FetchZeroPointSubTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
+    TuTensor<'l, { T }, PositionFetchZeroPointSub, D, Chip, Cluster, Slice, Time, Packet, B>;
+
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    FetchZeroPointSubTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    fn check_constraints() {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_slice_size::<Slice>();
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+        Self::check_constraints();
+
+        Self {
+            ctx,
+            inner,
+            _position: PhantomData,
+        }
+    }
+}
+
+// ANCHOR: fetch_zero_point_sub_impl
+impl<
+    'l,
+    const T: Tu,
+    P: CanApplyFetchZeroPointSub,
+    D: Scalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    B: Backend,
+> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    /// Runs the Fetch Adapter's zero-point-subtraction stage.
+    ///
+    /// Subtracts `zero_point` and widens the stream from `D` to its contraction-engine staging
+    /// type `OutD` (`i4 -> i5`, `i8 -> i9`), the only way to produce an i5/i9
+    /// stream. The result may only feed `contract_outer`; it is not
+    /// [`MaterializableScalar`], so committing or re-routing it is a compile
+    /// error. The mapping shape is preserved.
+    ///
+    /// Panics if `zero_point` is outside the source type's range
+    /// ([`FetchZeroPointSub::ZERO_POINT_RANGE`]); a zero point in range keeps
+    /// every widened residual within `OutD`, so this one check (independent of
+    /// the stream data) is enough.
+    #[primitive(TuTensor::fetch_zero_point_sub)]
+    pub fn fetch_zero_point_sub<OutD: Scalar>(
+        self,
+        zero_point: i32,
+    ) -> FetchZeroPointSubTensor<'l, T, OutD, Chip, Cluster, Slice, Time, Packet, B>
+    where
+        D: FetchZeroPointSub<OutD>,
+    {
+        let zero_point_range = <D as FetchZeroPointSub<OutD>>::ZERO_POINT_RANGE;
+        assert!(
+            zero_point_range.contains(&zero_point),
+            "zero_point {zero_point} is outside the source type's quantized range {zero_point_range:?}",
+        );
+        FetchZeroPointSubTensor::new(self.ctx, self.inner.map(|v| v.zero_point_sub(zero_point)))
+    }
+}
+// ANCHOR_END: fetch_zero_point_sub_impl
 
 #[allow(clippy::extra_unused_type_parameters)]
 fn verify_fetch_mask<Time: M, Packet: M, OutTime: M, OutPacket: M>() {

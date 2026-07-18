@@ -1,6 +1,6 @@
 use furiosa_opt_std::prelude::*;
 
-axes![A = 512, B = 32, D = 64];
+axes![A = 512, B = 32, D = 64, L = 768];
 
 // A size-1 ("unit") named axis, e.g. the decode-attention single-query-token axis.
 axes![One = 1];
@@ -28,12 +28,8 @@ pub fn tile_simple(ctx: &mut Context, input: HbmTensorView<'_, i8, m![1], m![A, 
 /// concrete column constant. (An HBM-tiled loop is *not* unrolled — it lowers as a kept VISA `Loop`
 /// whose offset must be a bare scalar variable — so a computed offset must tile an SRAM view.)
 ///
-/// Documents the SDK "expected an axis view offset" fix: a computed tile/view offset
-/// (`ScalarExpr::BinaryOp`) used to be rejected at `mir_ast_to_visa`; it now materializes and folds
-/// past that wall. The authoritative, oracle-backed coverage of the fold is the `npu-visa-translate`
-/// unit tests. The matching `test_tile_computed_offset` end-to-end check is `#[ignore]`d: see that
-/// test for why (toolchain refresh + a downstream unrolled mutable-view write-back limitation that
-/// is orthogonal to the offset fix).
+/// Exercises computed tile offsets through the vISA-to-LIR unroller. The matching end-to-end test
+/// remains ignored because of a downstream mutable-view write-back limitation documented there.
 #[device(chip = 1)]
 pub fn tile_computed_offset(
     ctx: &mut Context,
@@ -190,4 +186,33 @@ pub fn tile_unit_axis(
     let output_slice = output.view_mut().tile::<m![One], 1, m![1, B, D]>(0);
     input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
     output
+}
+
+#[device(chip = 1)]
+pub fn tile_with_larger_than_one_1(
+    ctx: &mut Context,
+    up_weight: &HbmTensor<bf16, Chip, m![L, A]>,
+) -> HbmTensor<bf16, Chip, m![L, A]> {
+    let mut output = unsafe { HbmTensor::<bf16, Chip, m![L, A]>::from_addr(0x3000) };
+
+    let input_slice = up_weight.view().tile::<m![L], 256, m![L = 256 # 768, A]>(0);
+    let output_slice = output.view_mut().tile::<m![L], 256, m![L = 256 #{!} 768, A]>(2);
+    input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
+
+    let input_slice = up_weight.view().tile::<m![L], 256, m![L = 256 # 768, A]>(1);
+    let output_slice = output.view_mut().tile::<m![L], 256, m![L = 256 #{!} 768, A]>(1);
+    input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
+
+    let input_slice = up_weight.view().tile::<m![L], 256, m![L = 256 # 768, A]>(2);
+    let output_slice = output.view_mut().tile::<m![L], 256, m![L = 256 #{!} 768, A]>(0);
+    input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
+
+    output
+}
+
+#[device(chip = 1)]
+pub fn tile_with_larger_than_one_2(ctx: &mut Context, up_weight: &HbmTensor<bf16, Chip, m![L, A]>) {
+    let up_weight = up_weight
+        .view()
+        .tile::<m![L / 256], 2, m![L / 256 = 2 #{!} 3, L %  256, A]>(1);
 }

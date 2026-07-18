@@ -48,8 +48,19 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
 }
 
 // ANCHOR: transpose_impl
-impl<'l, const T: Tu, P: CanApplyTranspose, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+// `D: MaterializableScalar` (see its doc) excludes i5/i9 stagings from transpose.
+impl<
+    'l,
+    const T: Tu,
+    P: CanApplyTranspose,
+    D: MaterializableScalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    B: Backend,
+> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Performs the transpose operation.
     #[primitive(TuTensor::transpose)]

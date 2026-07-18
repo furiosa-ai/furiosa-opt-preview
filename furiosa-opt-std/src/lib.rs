@@ -33,7 +33,7 @@ pub use tensor::pseudo;
 
 /// Prelude module that re-exports commonly used items.
 pub mod prelude {
-    pub use super::cast::{Cast, ContractionCast, FetchCast};
+    pub use super::cast::{Cast, ContractionCast, ContractionWeight, FetchCast, FetchZeroPointSub};
     pub use super::engine::vector::stash_slot::*;
     pub use super::engine::vector::{alu::*, branch::*, layer::*, op::*, operand::*, scalar::*, stage, tensor::*};
     pub use super::engine::*;

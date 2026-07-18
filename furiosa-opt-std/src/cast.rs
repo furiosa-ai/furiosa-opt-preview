@@ -1,4 +1,6 @@
-use crate::scalar::{bf16, f8e4m3, i4};
+use std::ops::RangeInclusive;
+
+use crate::scalar::{bf16, f8e4m3, f8e5m2, i4, i5, i9};
 
 use super::scalar::Scalar;
 
@@ -14,7 +16,43 @@ impl<D> FetchCast<D> for D where D: Scalar {}
 impl FetchCast<i32> for i8 {}
 impl FetchCast<f32> for bf16 {}
 impl FetchCast<f32> for f8e4m3 {}
+impl FetchCast<f32> for f8e5m2 {}
 impl FetchCast<i32> for i4 {}
+
+/// Valid zero-point-subtraction widenings for `fetch_zero_point_sub`.
+///
+/// Subtracting the zero point widens an integer to its contraction-engine staging type, which
+/// holds the `(value - zero_point)` range: `i4 -> i5` and `i8 -> i9` (see [`i5`]/[`i9`]
+/// for why the extra bit is needed). Only these pairs have an impl, so an invalid
+/// widening (e.g. `i8 -> i5`) is a compile error. This is the only way to
+/// produce an [`i5`]/[`i9`]; `fetch_cast` cannot.
+pub trait FetchZeroPointSub<Out: Scalar>: Scalar {
+    /// Valid zero-point range: the source integer type's own range (`i4`:
+    /// `[-8, 7]`, `i8`: `[-128, 127]`). A zero point inside it keeps every
+    /// `value - zero_point` residual within `Out`, so the caller checks
+    /// `zero_point` once (data-independent) instead of each widened element.
+    const ZERO_POINT_RANGE: RangeInclusive<i32>;
+
+    /// Subtracts `zero_point` (already range-checked against
+    /// [`ZERO_POINT_RANGE`](Self::ZERO_POINT_RANGE)) and widens `self` to `Out`.
+    fn zero_point_sub(self, zero_point: i32) -> Out;
+}
+
+impl FetchZeroPointSub<i5> for i4 {
+    const ZERO_POINT_RANGE: RangeInclusive<i32> = -8..=7;
+
+    fn zero_point_sub(self, zero_point: i32) -> i5 {
+        i5::from_i32(i32::from(self) - zero_point)
+    }
+}
+
+impl FetchZeroPointSub<i9> for i8 {
+    const ZERO_POINT_RANGE: RangeInclusive<i32> = -128..=127;
+
+    fn zero_point_sub(self, zero_point: i32) -> i9 {
+        i9::from_i32(i32::from(self) - zero_point)
+    }
+}
 
 /// Trait for casting between scalar types.
 pub trait Cast<D: Scalar> {
@@ -74,6 +112,18 @@ impl Cast<f8e4m3> for f32 {
     }
 }
 
+impl Cast<f32> for f8e5m2 {
+    fn cast(self) -> f32 {
+        self.to_f32()
+    }
+}
+
+impl Cast<f8e5m2> for f32 {
+    fn cast(self) -> f8e5m2 {
+        f8e5m2::from_f32(self)
+    }
+}
+
 impl Cast<i32> for i4 {
     #[inline]
     fn cast(self) -> i32 {
@@ -116,9 +166,40 @@ impl Cast<u8> for i32 {
     }
 }
 
+// i5/i9 are contraction stream stagings produced only by `fetch_zero_point_sub`. They widen to the
+// i32 accumulator like the other integers; the narrow direction exists only to satisfy
+// `ContractionCast`'s round-trip bound and is never taken (a contraction result is never stored as i5/i9).
+impl Cast<i32> for i5 {
+    #[inline]
+    fn cast(self) -> i32 {
+        self.to_i32()
+    }
+}
+
+impl Cast<i5> for i32 {
+    #[inline]
+    fn cast(self) -> i5 {
+        i5::from_i32(self)
+    }
+}
+
+impl Cast<i32> for i9 {
+    #[inline]
+    fn cast(self) -> i32 {
+        self.to_i32()
+    }
+}
+
+impl Cast<i9> for i32 {
+    #[inline]
+    fn cast(self) -> i9 {
+        i9::from_i32(self)
+    }
+}
+
 /// The contraction output type and the single source of truth for the widen/narrow rule. The Outer
 /// stage's Multiplier widens each operand to [`Self::Output`] before multiplying
-/// (`i4`/`i8` -> `i32`, `f8`/`bf16` -> `f32`); the host folds (`MathStorage`/`BufStorage::contraction`)
+/// (`i4`/`i8` -> `i32`, `f8e4m3`/`f8e5m2`/`bf16` -> `f32`); the host folds (`MathStorage`/`BufStorage::contraction`)
 /// reuse the same types and [`Cast`] conversions, widening on load and narrowing after the fold.
 ///
 /// The `Cast` supertrait and `Output: Cast<Self>` bound make both directions reachable from a single
@@ -130,9 +211,34 @@ pub trait ContractionCast: Scalar + Cast<<Self as ContractionCast>::Output> {
     type Output: Scalar + Cast<Self>;
 }
 
-// The contraction operand types: integers accumulate in `i32`, narrowing floats in `f32`. `f8` is
-// deliberately absent — it is never a contraction operand (the engine omits it too), so a contraction
-// over `f8` storage fails to compile instead of widening through an unused `f8 <-> f32` cast.
+/// Weight (TRF) element types that can be contracted against a given stream
+/// (activation) element type `Stream`.
+///
+/// This relaxes `contract_outer`'s operand-type constraint from "the weight
+/// equals the stream type" to "the weight forms a valid contraction-engine operand pair with
+/// the stream". Floats pair only with the same type. The integer family pairs
+/// within a precision ({i4, i5} with {i4, i5}, and {i8, i9} with {i8, i9}), so
+/// either operand may be the raw form (i4/i8) or its zero-point-subtracted
+/// staging (i5/i9). Cross-precision (e.g. i4 against i8) and cross-kind (e.g.
+/// bf16 against i8) pairs have no impl and are a compile error.
+pub trait ContractionWeight<Stream: Scalar>: Scalar {}
+
+// Integer family {i4, i5}: either operand may be raw (i4) or zero-point-subtracted (i5).
+impl ContractionWeight<i4> for i4 {}
+impl ContractionWeight<i5> for i4 {}
+impl ContractionWeight<i4> for i5 {}
+impl ContractionWeight<i5> for i5 {}
+// Integer family {i8, i9}: either operand may be raw (i8) or zero-point-subtracted (i9).
+impl ContractionWeight<i8> for i8 {}
+impl ContractionWeight<i9> for i8 {}
+impl ContractionWeight<i8> for i9 {}
+impl ContractionWeight<i9> for i9 {}
+// Floats pair only with the same type.
+impl ContractionWeight<bf16> for bf16 {}
+impl ContractionWeight<f8e4m3> for f8e4m3 {}
+impl ContractionWeight<f8e5m2> for f8e5m2 {}
+
+// The contraction operand types: integers accumulate in `i32`, narrowing floats in `f32`.
 
 impl ContractionCast for i8 {
     type Output = i32;
@@ -146,6 +252,10 @@ impl ContractionCast for f8e4m3 {
     type Output = f32;
 }
 
+impl ContractionCast for f8e5m2 {
+    type Output = f32;
+}
+
 impl ContractionCast for i4 {
     type Output = i32;
 }
@@ -155,6 +265,14 @@ impl ContractionCast for i16 {
 }
 
 impl ContractionCast for u8 {
+    type Output = i32;
+}
+
+impl ContractionCast for i5 {
+    type Output = i32;
+}
+
+impl ContractionCast for i9 {
     type Output = i32;
 }
 

@@ -2,7 +2,9 @@
 //!
 //! Each engine's `Tensor::new` validates its inputs against these. The values
 //! and checks live here, in one place, so the rules are stated once and every
-//! engine refers to the same definitions instead of repeating literals.
+//! engine refers to the same definitions instead of repeating literals. Hardware parameters shared
+//! with the published verifiers are re-exported from [`furiosa_opt_lower`] so a value is defined once
+//! across both crates.
 //!
 //! Each check is a plain `fn` whose body is a single `const { ... }` block, so the compile-time
 //! enforcement lives at the leaf and call sites stay plain calls (`assert_cluster_size::<Cluster>()`).
@@ -16,21 +18,15 @@ use furiosa_mapping::M;
 
 use crate::scalar::Scalar;
 
+/// Bits in a byte / flit byte size, single-sourced from the published verifier crate.
+pub(crate) use furiosa_opt_lower::{BITS_PER_BYTE, FLIT_BYTES};
+
 /// Supported `Cluster` dimension sizes.
 pub(crate) const CLUSTER_SIZES: [usize; 2] = [1, 2];
-
-/// Bits in a byte.
-pub(crate) const BITS_PER_BYTE: usize = 8;
 
 /// Byte granularity a packet must align to in the [`Fetch`](crate::engine) and
 /// [`Switch`](crate::engine) engines, which pass packets through unchanged.
 pub(crate) const PACKET_ALIGN_BYTES: usize = 8;
-
-/// Size of a single flit in bytes.
-///
-/// Data flows through the switching network in flit-sized units. The collect
-/// engine and the compute engines normalize packets to exactly one flit.
-pub(crate) const FLIT_BYTES: usize = 32;
 
 /// Supported `Slice` dimension sizes, in bytes.
 pub(crate) const SLICE_SIZES: [usize; 3] = [64, 128, 256];

@@ -2,16 +2,11 @@
 //! producing the contraction pipeline's final [`ContractTensor`].
 
 use furiosa_mapping::*;
-use furiosa_opt_lower::{DivideTerm, config_divide_exact};
 use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
 use crate::context::*;
-use crate::engine::align_up;
-use crate::engine::contraction::{
-    CONTRACT_LANE_OUT_PACKET_ELEMENTS, ContractTensor, ContractTimeTensor, TEMPORAL_ACCUMULATOR_COLS,
-    padding_per_stride,
-};
+use crate::engine::contraction::{ContractTensor, ContractTimeTensor};
 use crate::scalar::*;
 
 /// Contraction mode for the Lane Folder.
@@ -62,14 +57,8 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M
 /// Validates the Lane Folder.
 ///
 /// Checks:
-/// 1. `Packet::SIZE` must be at most 32 (`i32`/`f32`).
-/// 2. `OutPacket::SIZE` must be 8 (`i32`/`f32`).
-/// 3. Output factor composition matches retained (non-reduced) axes:
-///    - Interleaved: `OutTime = [Time, Packet (may be sliced)]`, `OutPacket = [Lane # 8]`.
-///    - Sequential: `OutTime = [Time, Lane, packet_outer]`, `OutPacket = [packet_inner # 8]`.
-/// 4. Accumulator fits hardware limit (1024 elements):
-///    - Interleaved: `inner_time * ReducedPacket <= 128` (since `align_up(Lane, 8) = 8`).
-///    - Sequential: `inner_time * Lane * packet_outer <= 32` (since `align_up(ReducedPacket, 32) = 32`).
+/// Validates the Lane Folder via [`furiosa_opt_lower::config_contract_lane`] (packet / time /
+/// accumulator rules documented there).
 pub(crate) fn verify_contract_lane(
     lane: Mapping,
     time: Mapping,
@@ -79,165 +68,12 @@ pub(crate) fn verify_contract_lane(
     pre_reduce_time: Mapping,
     kind: LaneMode,
 ) {
-    assert!(
-        packet.size() <= TEMPORAL_ACCUMULATOR_COLS,
-        "contract_lane: Packet::SIZE must be at most {TEMPORAL_ACCUMULATOR_COLS}, got {}",
-        packet.size()
-    );
-    assert_eq!(
-        out_packet.size(),
-        CONTRACT_LANE_OUT_PACKET_ELEMENTS,
-        "contract_lane: OutPacket::SIZE must be {CONTRACT_LANE_OUT_PACKET_ELEMENTS}, got {}",
-        out_packet.size()
-    );
-
-    let lane_size = lane.size();
-    let packet = packet.remove_padding();
-
-    // Determine `outer_time` and `packet_outer_size` based on contraction kind.
-    // `packet_outer_size` is 1 for Interleaved (no packet split into OutTime),
-    // and the size of the outer packet portion for Sequential.
-    let (outer_time, packet_outer_size) = match kind {
-        LaneMode::Interleaved => {
-            // `OutPacket = [Lane # 8]`
-            let expected_out_packet = lane.replace_padding(CONTRACT_LANE_OUT_PACKET_ELEMENTS).normalize();
-            let out_packet = out_packet.normalize();
-            assert_eq!(
-                out_packet, expected_out_packet,
-                "contract_lane ({kind}): OutPacket mismatch. Expected: {expected_out_packet}, got: {out_packet}"
-            );
-
-            // `OutTime = [Time, Packet (may be sliced)]`
-            // Search for the `Packet / Time` boundary.
-            let outer_time = (1..=out_time.size().min(packet.size()).min(TEMPORAL_ACCUMULATOR_COLS))
-                .filter(|&split| {
-                    out_time.size().is_multiple_of(split)
-                        // If `packet` is not the identity mapping, require it
-                        // to be present in `OutTime`.
-                        && (split > 1 || packet.size() == 1)
-                        // `Time::SIZE` <= pre-reduce `Time::SIZE`.
-                        && out_time.size() / split <= time.size()
-                })
-                .find_map(|split| {
-                    let (outer_time, sliced_packet) = out_time.split_at(split);
-
-                    // Slicing may only remove padding.
-                    if sliced_packet.normalize() != packet.clone().normalize() {
-                        return None;
-                    }
-
-                    Some(outer_time)
-                })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "contract_lane ({kind}): OutTime mismatch. \
-                         Could not decompose OutTime {out_time} into [Time, Packet (truncated)] \
-                         where Time is {time} and Packet is a truncation of {packet}"
-                    )
-                });
-            (outer_time, 1)
-        }
-        LaneMode::Sequential => {
-            // `OutTime   = [Time, Lane, packet_outer]`
-            // `OutPacket = [packet_inner # CONTRACT_LANE_OUT_PACKET_ELEMENTS]`
-            //
-            // `packet` is padded to the next multiple of CONTRACT_LANE_OUT_PACKET_ELEMENTS,
-            // then split at CONTRACT_LANE_OUT_PACKET_ELEMENTS:
-            // - `packet_inner` (CONTRACT_LANE_OUT_PACKET_ELEMENTS elements): becomes `OutPacket`
-            // - `packet_outer`                                             : absorbed into `OutTime`
-            let padded = packet
-                .clone()
-                .replace_padding(align_up(packet.size(), CONTRACT_LANE_OUT_PACKET_ELEMENTS));
-            let (packet_outer, packet_inner) = padded.split_at(CONTRACT_LANE_OUT_PACKET_ELEMENTS);
-            let packet_outer_size = packet_outer.size();
-
-            // `OutPacket = [packet_inner # CONTRACT_LANE_OUT_PACKET_ELEMENTS]`.
-            assert_eq!(
-                packet_inner.clone().normalize(),
-                out_packet.normalize(),
-                "contract_lane ({kind}): OutPacket mismatch. Expected: {packet_inner}, got: {out_packet}"
-            );
-
-            // `OutTime` ends with `[Lane, packet_outer]`
-            let lane_packet = lane.pair(packet_outer);
-            let (outer_time, inner_time) = out_time.split_at(lane_packet.size());
-            assert_eq!(
-                inner_time.normalize(),
-                lane_packet.clone().normalize(),
-                "contract_lane ({kind}): OutTime mismatch. Expected {lane_packet}, got {inner_time}"
-            );
-
-            (outer_time, packet_outer_size)
-        }
+    let mode = match kind {
+        LaneMode::Interleaved => furiosa_opt_lower::LaneMode::Interleaved,
+        LaneMode::Sequential => furiosa_opt_lower::LaneMode::Sequential,
     };
-
-    // `contract_lane` performs no reduction, so the post-`split_at` outer portion of
-    // `OutTime` must equal `Time` exactly (order and padding both already enforced by
-    // `contract_time`).
-    assert_eq!(
-        outer_time.normalize(),
-        time.clone().normalize(),
-        "contract_lane ({kind}): OutTime mismatch. Outer portion of OutTime must equal Time: \
-         expected {time}, got {outer_time}"
-    );
-
-    // Recover the cross-stage `inner_time` (axes inner to the outermost reduce performed
-    // by `contract_time`) by dividing `pre_reduce_time` (captured at the `contract_time`
-    // call site) by the post-reduce `time`.
-    let division_terms = config_divide_exact(&pre_reduce_time, &time).unwrap_or_else(|_| {
-        panic!("contract_lane ({kind}): inconsistent pre/post reduce Time: {pre_reduce_time}, {time}")
-    });
-
-    // The padded extent of each `pre_reduce_time` axis at its cumulative stride.
-    // `m![A # 8, B # 4]` with `axes![A = 4, B = 2]` -> { 1: 8, 8: 4 }
-    let time_padding_per_stride = padding_per_stride(&pre_reduce_time);
-
-    // Calculate axis size inner to outermost reduce.
-    let padding_end = |d: &DivideTerm| {
-        d.dividend_stride
-            * time_padding_per_stride
-                .get(&d.dividend_stride)
-                .copied()
-                .unwrap_or(d.resize)
-    };
-    let inner_time = if division_terms.is_empty() {
-        // Case 1: All axes reduced.
-        1
-    } else if padding_end(&division_terms[0]) < pre_reduce_time.size() {
-        // Case 2: The outermost axis was reduced.
-        time.size()
-    } else {
-        // Case 3: The outermost retained factor reaches the top of `pre_reduce_time`.
-        // Walk outer-to-inner looking for the first gap between adjacent division terms.
-        division_terms
-            .windows(2)
-            .find(|w| padding_end(&w[1]) != w[0].dividend_stride)
-            .map_or(1, |w| w[0].divisor_stride)
-    };
-
-    // Check buffer limits
-    match kind {
-        LaneMode::Interleaved => {
-            let buffer = inner_time * packet.size();
-            assert!(
-                buffer <= 1024 / CONTRACT_LANE_OUT_PACKET_ELEMENTS,
-                "contract_lane ({}): axes inner to reduce must be <= {} in size, got {}",
-                kind,
-                1024 / CONTRACT_LANE_OUT_PACKET_ELEMENTS,
-                buffer
-            );
-        }
-        LaneMode::Sequential => {
-            let buffer = inner_time * lane_size * packet_outer_size;
-            assert!(
-                buffer <= 1024 / TEMPORAL_ACCUMULATOR_COLS,
-                "contract_lane ({}): axes inner to reduce must be <= {} in size, got {}",
-                kind,
-                1024 / TEMPORAL_ACCUMULATOR_COLS,
-                buffer
-            );
-        }
-    }
+    furiosa_opt_lower::config_contract_lane(&lane, &time, &packet, &out_time, &out_packet, &pre_reduce_time, mode)
+        .unwrap_or_else(|message| panic!("{message}"));
 }
 
 #[cfg(test)]

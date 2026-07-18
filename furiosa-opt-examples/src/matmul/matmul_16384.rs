@@ -66,7 +66,7 @@ fn contraction_over_b_2048(
         .begin(lhs.view())
         .fetch::<m![C % 64, A % 2048, B / 32 % 2], m![B % 32]>()
         .collect::<m![C % 64, A % 2048, B / 32 % 2], m![B % 32]>()
-        .contract_outer::<m![C % 64, A % 2048], m![B % 64], _, _>(&rhs)
+        .contract_outer::<m![C % 64, A % 2048], m![B % 64], _, _, _>(&rhs)
         .contract_packet::<m![1]>()
         .contract_time::<m![C % 64, A % 2048]>()
         .contract_lane::<m![C % 64, A % 2048], m![C / 64 % 8]>(LaneMode::Interleaved)

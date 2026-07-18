@@ -550,15 +550,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "f8"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "684e29066021f63d5fe3b93ef9fd05b86fb1d562f5e4650cd1daeb96de88eddf"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -624,6 +615,7 @@ dependencies = [
  "abi_stable",
  "furiosa-mapping",
  "furiosa-opt-lower-types",
+ "thiserror",
 ]
 
 [[package]]
@@ -653,7 +645,6 @@ dependencies = [
  "arrayvec",
  "bindgen",
  "cfg-if",
- "f8",
  "furiosa-mapping",
  "furiosa-opt-lower",
  "furiosa-opt-macro",

@@ -106,7 +106,7 @@ pub(super) fn lm_head(
             .begin(weight_it.view())
             .fetch::<m![C / 4 % 32, H / 56 % 4, H / 8 % 7, C / 2 % 2], m![C % 2, H % 8]>()
             .collect::<m![C / 4 % 32, H / 56 % 4, H / 8 % 7, C / 2 % 2], m![C % 2, H % 8]>()
-            .contract_outer::<m![C / 4 % 32, H / 56 % 4, H / 8 % 7, S / 8 % 2, S / 32 % 4, C / 2 % 2], m![C % 2, H % 8], _, _>(
+            .contract_outer::<m![C / 4 % 32, H / 56 % 4, H / 8 % 7, S / 8 % 2, S / 32 % 4, C / 2 % 2], m![C % 2, H % 8], _, _, _>(
                 &input_trf_first,
             )
             .contract_packet::<m![1]>()
@@ -125,7 +125,7 @@ pub(super) fn lm_head(
             .begin(weight_it.view())
             .fetch::<m![C / 4 % 32, H / 56 % 4, H / 8 % 7, C / 2 % 2], m![C % 2, H % 8]>()
             .collect::<m![C / 4 % 32, H / 56 % 4, H / 8 % 7, C / 2 % 2], m![C % 2, H % 8]>()
-            .contract_outer::<m![C / 4 % 32, H / 56 % 4, H / 8 % 7, S / 8 % 2, S / 32 % 4, C / 2 % 2], m![C % 2, H % 8], _, _>(
+            .contract_outer::<m![C / 4 % 32, H / 56 % 4, H / 8 % 7, S / 8 % 2, S / 32 % 4, C / 2 % 2], m![C % 2, H % 8], _, _, _>(
                 &input_trf_second,
             )
             .contract_packet::<m![1]>()

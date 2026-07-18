@@ -33,7 +33,7 @@ pub fn dot_product_kernel(
         .fetch::<Time, m![A]>()
         .collect::<m![A / 16], m![A % 16]>()
         // Pair consecutive 32-byte flits into 64-byte packets, halving time steps (A/16 → A/32)
-        .contract_outer::<m![A / 32], m![A % 32], _, _>(&rhs)
+        .contract_outer::<m![A / 32], m![A % 32], _, _, _>(&rhs)
         .contract_packet::<m![1]>()
         .contract_time::<m![1]>()
         .contract_lane::<m![1], m![1 # 8]>(LaneMode::Interleaved)

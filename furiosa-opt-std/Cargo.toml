@@ -10,7 +10,6 @@ description = "Standard library for Furiosa NPU TCP Virtual ISA programming."
 abi_stable = { workspace = true }
 arrayvec = { workspace = true }
 cfg-if = { workspace = true }
-f8 = { workspace = true }
 furiosa-mapping = { path = "../furiosa-mapping", version = "0.4" }
 furiosa-opt-lower = { path = "../furiosa-opt-lower", version = "0.4" }
 furiosa-opt-macro = { path = "../furiosa-opt-macro", version = "0.4" }

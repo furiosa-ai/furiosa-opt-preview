@@ -72,7 +72,7 @@ pub(crate) fn o_proj(
         .begin(weight_it.view())
         .fetch::<m![H / 7 % 4, H % 7], m![H / 16 % 7, H % 16]>()
         .collect::<m![H / 7 % 4, H % 7, H / 16 % 7], m![H % 16]>()
-        .contract_outer::<m![H / 7 % 4, H % 7, H / 16 % 7], m![H % 16], _, _>(&input_trf)
+        .contract_outer::<m![H / 7 % 4, H % 7, H / 16 % 7], m![H % 16], _, _, _>(&input_trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![H % 7, S / 8 % 8]>()
         .contract_lane::<m![H % 7, S / 8 % 8], m![S % 8]>(LaneMode::Interleaved)

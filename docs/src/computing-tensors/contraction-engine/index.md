@@ -110,7 +110,7 @@ fn bmatmul_k_in_time<'l, const T: Tu>(
          // Outer: Lane = m![N] (inferred from trf), OutTime = m![V / 16, K], OutPacket = m![1 # 32].
          // input: 1 K-element broadcast across all N lanes.
          // trf:   1 K-element per lane, advancing one K-step per cycle.
-         .contract_outer::<m![V / 16, K], m![1 # 16], _, _>(trf)
+         .contract_outer::<m![V / 16, K], m![1 # 16], _, _, _>(trf)
          // Packet Reducer: OutPacket = m![1]. Nothing to reduce.
          .contract_packet::<m![1]>()
          // Time Reducer: OutTime = m![V / 16]. K iterates over Time and accumulates; V outer survives.
@@ -159,7 +159,7 @@ fn bmatmul_m_in_time<'l, const T: Tu>(
          // Lane = m![N] (inferred from trf), OutTime = m![M], OutPacket = m![K].
          // input: K elements broadcast across all N lanes.
          // trf:   K elements per lane, broadcast across all M cycles.
-         .contract_outer::<m![M], m![K], _, _>(trf)
+         .contract_outer::<m![M], m![K], _, _, _>(trf)
          // Packet Reducer: OutPacket = m![1]. Sum K spatially via the reduction tree.
          .contract_packet::<m![1]>()
          // Time Reducer: OutTime = m![M]. Nothing to reduce.
@@ -202,7 +202,7 @@ fn bmatmul_v_in_time<'l, const T: Tu>(
          // Outer: Lane = m![N] (inferred from trf), OutTime = m![V], OutPacket = m![K].
          // input: K elements broadcast across all N lanes.
          // trf:   K elements per lane, broadcast across all V cycles.
-         .contract_outer::<m![V], m![K], _, _>(trf)
+         .contract_outer::<m![V], m![K], _, _, _>(trf)
          // Packet Reducer: OutPacket = m![1]. Sum K spatially via the reduction tree.
          .contract_packet::<m![1]>()
          // Time Reducer: OutTime = m![V]. Nothing to reduce.

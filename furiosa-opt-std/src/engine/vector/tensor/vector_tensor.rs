@@ -21,7 +21,6 @@
 use std::marker::PhantomData;
 
 use furiosa_mapping::*;
-use furiosa_opt_lower::{config_divide_exact, config_divide_relaxed};
 use furiosa_opt_macro::primitive;
 
 use super::VeTensorShape;
@@ -1491,38 +1490,8 @@ where
 
 /// Verifies that all reduced axes (quotient of input / output shape) match the expected ident.
 fn verify_reduce_label(time: Mapping, packet: Mapping, out_time: Mapping, out_packet: Mapping, reduce_label: &Ident) {
-    let input = time.pair(packet.clone());
-    let output = out_time.pair(out_packet.clone());
-
-    // Output shape must divide the input shape exactly; matched (retained) axes must not be reduced.
-    let division_terms = config_divide_exact(&input, &output)
-        .expect("[Intra-slice reduce] divide failed: output shape must divide input shape");
-
-    // The reduced axes are what the output did not consume of the input (the relaxed quotient).
-    let quotient = config_divide_relaxed(&input, &output).dividend_residue;
-    assert!(
-        quotient.idents().iter().all(|ident| ident == reduce_label),
-        "IntraSliceReduce: all reduced axes must match the specified reduce_label {}, got quotient {} with idents {:?}",
-        reduce_label,
-        quotient,
-        quotient.idents()
-    );
-
-    assert!(
-        division_terms
-            .iter()
-            .all(|d| d.idents.iter().all(|ident| ident != reduce_label)),
-        "IntraSliceReduce: all the reduce axes should be fully reduced (not present in the division terms), got reduce_label {} appearing in division {:?}",
-        reduce_label,
-        division_terms,
-    );
-
-    let packet = packet.normalize();
-    let out_packet = out_packet.normalize();
-    assert!(
-        packet == out_packet || out_packet == <m![1 # 4]>::to_value().normalize(),
-        "IntraSliceReduce: Packet should be either preserved or reduced to 4 (for partial reduction), got Packet {packet} → OutPacket {out_packet}",
-    );
+    furiosa_opt_lower::config_reduce_label(&time, &packet, &out_time, &out_packet, reduce_label)
+        .unwrap_or_else(|message| panic!("{message}"));
 }
 
 /// Reduces tag tensor by keeping the last value (hardware semantics: all reduced

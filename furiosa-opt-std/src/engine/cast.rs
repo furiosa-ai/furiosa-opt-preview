@@ -12,8 +12,8 @@ use crate::backend::Backend;
 use crate::cast::Cast;
 use crate::constraints;
 use crate::context::*;
+use crate::engine::CanApplyCast;
 use crate::engine::vector::scalar::VeScalar;
-use crate::engine::{CanApplyCast, FLIT_BYTES};
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
@@ -70,37 +70,9 @@ impl<'l, const T: Tu, P: CanApplyCast, D: VeScalar, Chip: M, Cluster: M, Slice: 
 }
 // ANCHOR_END: cast_impl
 
-/// Validates cast engine constraints.
-///
-/// Checks:
-/// 1. Input packet must be exactly one flit (32 bytes).
-/// 2. Output packet must be exactly one flit (32 bytes).
-/// 3. The data terms must match (only padding differs).
+/// Validates the Cast engine via [`furiosa_opt_lower::config_cast`] (one-flit in / recast one-flit out
+/// rules documented there).
 fn verify_cast<D: Scalar, OutD: Scalar, InPacket: M, OutPacket: M>() {
-    // Input packet must be exactly one flit.
-    assert_eq!(
-        D::size_in_bytes_from_length(InPacket::SIZE),
-        FLIT_BYTES,
-        "Cast input packet must be exactly {FLIT_BYTES} bytes (one flit): \
-         {} elements = {} bytes",
-        InPacket::SIZE,
-        D::size_in_bytes_from_length(InPacket::SIZE),
-    );
-
-    let out_flit_elements = OutD::length_from_bytes(FLIT_BYTES);
-
-    // Cast elements and pad to 32 bytes.
-    let expected_packet = InPacket::to_value().replace_padding(out_flit_elements).normalize();
-
-    // Output packet must be exactly one flit.
-    let out_packet = OutPacket::to_value().normalize();
-    assert_eq!(
-        OutD::size_in_bytes_from_length(OutPacket::SIZE),
-        FLIT_BYTES,
-        "Cast output packet must be exactly {FLIT_BYTES} bytes (one flit)."
-    );
-    assert_eq!(
-        expected_packet, out_packet,
-        "Cast packet mismatch. Expected: {expected_packet}, got: {out_packet}",
-    );
+    furiosa_opt_lower::config_cast(&InPacket::to_value(), &OutPacket::to_value(), D::BITS, OutD::BITS)
+        .unwrap_or_else(|message| panic!("{message}"));
 }

@@ -41,9 +41,34 @@ pub trait ScalarBytes: Scalar {
     fn from_le_bytes(bytes: &[u8]) -> Self;
 }
 
+/// A [`Scalar`] that may live in host/HBM/DM memory or be materialized by the
+/// commit, to-TRF, or transpose paths.
+///
+/// Every real tensor dtype implements this. The zero-point-subtracted
+/// contraction-engine stagings [`i5`]/[`i9`] deliberately do **not**: as a
+/// stream they exist only between `fetch_zero_point_sub` and `contract_outer`,
+/// so the host/HBM/DM carriers and the commit / to-TRF / transpose entry points
+/// bound `MaterializableScalar` to make storing or re-routing an i5/i9 stream a
+/// compile error. The to-VRF / Vector / Cast paths exclude them separately via
+/// `VeScalar`. (An i5/i9 may still be a contraction weight resident in the TRF.)
+///
+/// A real dtype satisfies the bound:
+/// ```
+/// use furiosa_opt_std::prelude::*;
+/// fn materialize<D: MaterializableScalar>() {}
+/// materialize::<i8>();
+/// ```
+/// A staging type does not, so materializing it fails to compile:
+/// ```compile_fail
+/// use furiosa_opt_std::prelude::*;
+/// fn materialize<D: MaterializableScalar>() {}
+/// materialize::<i9>();
+/// ```
+pub trait MaterializableScalar: Scalar {}
+
 /// Implements [`Scalar`] (`BITS = size_of * 8`) and [`ScalarBytes`] (delegating to the type's inherent
-/// `from_le_bytes([u8; BITS/8])`) for each byte-aligned type. `f8`/`bf16`/`f8e4m3` are defined later in
-/// the module and supply their own inherent `from_le_bytes`. Sub-byte `i4` is hand-written below.
+/// `from_le_bytes([u8; BITS/8])`) for each byte-aligned type. `bf16`/`f8e4m3`/`f8e5m2` are defined later
+/// in the module and supply their own inherent `from_le_bytes`. Sub-byte `i4` is hand-written below.
 macro_rules! impl_scalar {
     ($($t:ty);* $(;)?) => {
         $(
@@ -66,6 +91,7 @@ macro_rules! impl_scalar {
                     <$t>::from_le_bytes(arr)
                 }
             }
+            impl MaterializableScalar for $t {}
         )*
     };
 }
@@ -76,8 +102,8 @@ impl_scalar! {
     u8;
     i16;
     i32;
-    f8;
     f8e4m3;
+    f8e5m2;
     bf16;
     f32;
 }
@@ -153,90 +179,6 @@ impl<D: Zero> Zero for Opt<D> {
 impl<D: One> One for Opt<D> {
     fn one() -> Self {
         Opt::Init(D::one())
-    }
-}
-
-/// 8-bit floating point type.
-#[expect(non_camel_case_types)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct f8(::f8::f8);
-
-impl Zero for f8 {
-    fn zero() -> Self {
-        f8(::f8::f8::from(0.0))
-    }
-
-    fn is_zero(&self) -> bool {
-        self.0.float().is_zero()
-    }
-}
-
-impl One for f8 {
-    fn one() -> Self {
-        f8(::f8::f8::from(1.0))
-    }
-}
-
-impl Add<Self> for f8 {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self {
-        f8((self.0.float() + rhs.0.float()).into())
-    }
-}
-
-impl Sub<Self> for f8 {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self {
-        f8((self.0.float() - rhs.0.float()).into())
-    }
-}
-
-impl Mul<Self> for f8 {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self {
-        f8((self.0.float() * rhs.0.float()).into())
-    }
-}
-
-impl Div<Self> for f8 {
-    type Output = Self;
-
-    fn div(self, rhs: Self) -> Self {
-        f8((self.0.float() / rhs.0.float()).into())
-    }
-}
-
-impl Rem<Self> for f8 {
-    type Output = Self;
-
-    fn rem(self, rhs: Self) -> Self {
-        f8((self.0.float() % rhs.0.float()).into())
-    }
-}
-
-impl Num for f8 {
-    type FromStrRadixErr = <f32 as Num>::FromStrRadixErr;
-
-    fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
-        Ok(f8(::f8::f8::from(f32::from_str_radix(str, radix)?)))
-    }
-}
-
-impl rand::distr::Distribution<f8> for StandardUniform {
-    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> f8 {
-        let val: f32 = rng.random_range(-1.0..1.0);
-        f8(::f8::f8::from(val))
-    }
-}
-
-impl f8 {
-    /// Decodes one element from its little-endian byte; the inherent peer the `impl_scalar!`-generated
-    /// [`ScalarBytes`] delegates to (matching `std`'s `from_le_bytes([u8; N])` shape).
-    pub(crate) fn from_le_bytes(bytes: [u8; 1]) -> Self {
-        f8(::f8::f8::from(bytes[0]))
     }
 }
 
@@ -442,6 +384,107 @@ impl From<f8e4m3> for f32 {
     }
 }
 
+/// 8-bit floating point type with 5-bit exponent (E5M2).
+#[primitive(f8e5m2)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct f8e5m2(u8);
+
+impl Zero for f8e5m2 {
+    fn zero() -> Self {
+        f8e5m2(crate::float::F8E5_ZERO)
+    }
+
+    fn is_zero(&self) -> bool {
+        crate::float::f8_e5_is_zero(self.0)
+    }
+}
+
+impl One for f8e5m2 {
+    fn one() -> Self {
+        f8e5m2(crate::float::F8E5_ONE)
+    }
+}
+
+impl Add<Self> for f8e5m2 {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Self::from_f32(self.to_f32() + rhs.to_f32())
+    }
+}
+
+impl Sub<Self> for f8e5m2 {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self {
+        Self::from_f32(self.to_f32() - rhs.to_f32())
+    }
+}
+
+impl Mul<Self> for f8e5m2 {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self {
+        Self::from_f32(self.to_f32() * rhs.to_f32())
+    }
+}
+
+impl Div<Self> for f8e5m2 {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self {
+        Self::from_f32(self.to_f32() / rhs.to_f32())
+    }
+}
+
+impl Rem<Self> for f8e5m2 {
+    type Output = Self;
+
+    fn rem(self, rhs: Self) -> Self {
+        Self::from_f32(self.to_f32() % rhs.to_f32())
+    }
+}
+
+impl Num for f8e5m2 {
+    type FromStrRadixErr = <f32 as Num>::FromStrRadixErr;
+
+    fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
+        Ok(Self::from_f32(f32::from_str_radix(str, radix)?))
+    }
+}
+
+impl rand::distr::Distribution<f8e5m2> for StandardUniform {
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> f8e5m2 {
+        let val: f32 = rng.random_range(-1.0..1.0);
+        f8e5m2::from_f32(val)
+    }
+}
+
+impl f8e5m2 {
+    /// Decodes one element from its little-endian byte; the inherent peer the `impl_scalar!`-generated
+    /// [`ScalarBytes`] delegates to (matching `std`'s `from_le_bytes([u8; N])` shape).
+    pub(crate) fn from_le_bytes(bytes: [u8; 1]) -> Self {
+        f8e5m2(bytes[0])
+    }
+
+    /// Creates `f8e5m2` from `f32`.
+    pub fn from_f32(val: f32) -> Self {
+        f8e5m2(crate::float::f8_e5_from_f32(val))
+    }
+
+    /// Converts to `f32`.
+    pub fn to_f32(self) -> f32 {
+        crate::float::f8_e5_to_f32(self.0)
+    }
+}
+
+impl From<f8e5m2> for f32 {
+    fn from(val: f8e5m2) -> Self {
+        val.to_f32()
+    }
+}
+
 /// 4-bit signed integer type.
 ///
 /// Stored as `i8` with sign-extension: valid range is `[-8, 7]`.
@@ -541,3 +584,217 @@ impl From<i4> for i32 {
         val.to_i32()
     }
 }
+
+/// 5-bit signed integer: the zero-point-subtracted staging of [`i4`].
+///
+/// Produced by `fetch_zero_point_sub`, consumed only by `contract_outer` (it is
+/// not [`MaterializableScalar`], so it cannot be committed or routed to another
+/// engine). `i4 - i4` needs the extra bit: `[-8,7] - [-8,7] = [-15,15]` fits in
+/// `i5`'s `[-16,15]`. Stored as `i8` with sign-extension.
+#[primitive(i5)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct i5(i8);
+
+impl Zero for i5 {
+    fn zero() -> Self {
+        i5(0)
+    }
+
+    fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl One for i5 {
+    fn one() -> Self {
+        i5(1)
+    }
+}
+
+// Arithmetic computes in i32 and narrows back, because the 5-bit result stored
+// in `i8` would overflow mid-op (`(-16) * (-16) = 256` exceeds `i8::MAX`).
+impl Add<Self> for i5 {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Self::from_i32(self.to_i32() + rhs.to_i32())
+    }
+}
+
+impl Sub<Self> for i5 {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self {
+        Self::from_i32(self.to_i32() - rhs.to_i32())
+    }
+}
+
+impl Mul<Self> for i5 {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self {
+        Self::from_i32(self.to_i32() * rhs.to_i32())
+    }
+}
+
+impl Div<Self> for i5 {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self {
+        Self::from_i32(self.to_i32() / rhs.to_i32())
+    }
+}
+
+impl Rem<Self> for i5 {
+    type Output = Self;
+
+    fn rem(self, rhs: Self) -> Self {
+        Self::from_i32(self.to_i32() % rhs.to_i32())
+    }
+}
+
+impl Num for i5 {
+    type FromStrRadixErr = <i8 as Num>::FromStrRadixErr;
+
+    fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
+        Ok(Self::from_lsb(i8::from_str_radix(str, radix)?))
+    }
+}
+
+impl Scalar for i5 {
+    // Packs as i4 in storage; the extra bit lives in the contraction engine, not memory.
+    const BITS: usize = 4;
+}
+
+impl i5 {
+    // Sign-extend the low 5 bits of an i8 (8 - 5 = 3).
+    fn from_lsb(n: i8) -> Self {
+        i5((n << 3) >> 3)
+    }
+
+    /// Creates `i5` from `i32`.
+    pub fn from_i32(val: i32) -> Self {
+        Self::from_lsb(val as i8)
+    }
+
+    /// Converts to `i32`.
+    pub fn to_i32(self) -> i32 {
+        i32::from(self.0)
+    }
+}
+
+impl From<i5> for i32 {
+    fn from(val: i5) -> Self {
+        val.to_i32()
+    }
+}
+
+/// 9-bit signed integer: the zero-point-subtracted staging of [`i8`].
+///
+/// Produced by `fetch_zero_point_sub`, consumed only by `contract_outer` (it is
+/// not [`MaterializableScalar`], so it cannot be committed or routed to another
+/// engine). `i8 - i8` needs the extra bit: `[-128,127] - [-128,127] =
+/// [-255,255]` fits in `i9`'s `[-256,255]`. Stored as `i16` with sign-extension.
+#[primitive(i9)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct i9(i16);
+
+impl Zero for i9 {
+    fn zero() -> Self {
+        i9(0)
+    }
+
+    fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl One for i9 {
+    fn one() -> Self {
+        i9(1)
+    }
+}
+
+// Arithmetic computes in i32 and narrows back, because the 9-bit result stored
+// in `i16` would overflow mid-op (`255 * 255 = 65025` exceeds `i16::MAX`).
+impl Add<Self> for i9 {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Self::from_i32(self.to_i32() + rhs.to_i32())
+    }
+}
+
+impl Sub<Self> for i9 {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self {
+        Self::from_i32(self.to_i32() - rhs.to_i32())
+    }
+}
+
+impl Mul<Self> for i9 {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self {
+        Self::from_i32(self.to_i32() * rhs.to_i32())
+    }
+}
+
+impl Div<Self> for i9 {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self {
+        Self::from_i32(self.to_i32() / rhs.to_i32())
+    }
+}
+
+impl Rem<Self> for i9 {
+    type Output = Self;
+
+    fn rem(self, rhs: Self) -> Self {
+        Self::from_i32(self.to_i32() % rhs.to_i32())
+    }
+}
+
+impl Num for i9 {
+    type FromStrRadixErr = <i16 as Num>::FromStrRadixErr;
+
+    fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
+        Ok(Self::from_lsb(i16::from_str_radix(str, radix)?))
+    }
+}
+
+impl Scalar for i9 {
+    // Packs as i8 in storage; the extra bit lives in the contraction engine, not memory.
+    const BITS: usize = 8;
+}
+
+impl i9 {
+    // Sign-extend the low 9 bits of an i16 (16 - 9 = 7).
+    fn from_lsb(n: i16) -> Self {
+        i9((n << 7) >> 7)
+    }
+
+    /// Creates `i9` from `i32`.
+    pub fn from_i32(val: i32) -> Self {
+        Self::from_lsb(val as i16)
+    }
+
+    /// Converts to `i32`.
+    pub fn to_i32(self) -> i32 {
+        i32::from(self.0)
+    }
+}
+
+impl From<i9> for i32 {
+    fn from(val: i9) -> Self {
+        val.to_i32()
+    }
+}
+
+// `i4` is hand-written (not driven by `impl_scalar!`), so it needs the marker here;
+// the macro grants it to the byte-aligned dtypes, and the i5/i9 stagings intentionally lack it.
+impl MaterializableScalar for i4 {}

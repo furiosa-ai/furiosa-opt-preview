@@ -27,7 +27,7 @@ fn matmul<'l, const T: Tu>(
     //
     // Spatial reduction: tree depth 5 reduces 32 bf16 elements along B → f32
     // Output (Interleaved): Time = [A], Packet = [C]
-    input.contract_outer::<m![A], m![B], _, _>(&trf)
+    input.contract_outer::<m![A], m![B], _, _, _>(&trf)
          .contract_packet::<m![1]>()
          .contract_time::<m![A]>()
          .contract_lane::<m![A], m![C]>(LaneMode::Interleaved)

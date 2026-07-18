@@ -26,7 +26,7 @@ pub fn matmul_wo_broadcast(
         .begin(lhs.view())
         .fetch::<m![A / 4], m![A % 4, B]>()
         .collect::<m![A / 4], m![A % 4, B]>()
-        .contract_outer::<m![A / 8 % 2], m![A % 8, B], _, _>(&rhs)
+        .contract_outer::<m![A / 8 % 2], m![A % 8, B], _, _, _>(&rhs)
         .contract_packet::<m![1]>()
         .contract_time::<m![1]>()
         .contract_lane::<m![1], m![1 # 8]>(LaneMode::Interleaved)

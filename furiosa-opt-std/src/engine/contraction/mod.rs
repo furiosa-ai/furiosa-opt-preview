@@ -29,11 +29,8 @@ use crate::scalar::*;
 use crate::tensor::Tensor;
 use crate::tensor::tu::{Position, TuTensor};
 
-/// Number of columns in the temporal accumulator buffer.
-pub(crate) const TEMPORAL_ACCUMULATOR_COLS: usize = 32;
-
-/// Number of elements in the `contract_lane` output packet (`i32`/`f32`).
-pub(crate) const CONTRACT_LANE_OUT_PACKET_ELEMENTS: usize = 8;
+/// Number of columns in the temporal accumulator buffer, single-sourced from the published verifier crate.
+pub(crate) use furiosa_opt_lower::TEMPORAL_ACCUMULATOR_COLS;
 
 /// Asserts a reduce packet's element count is a power of two and at most
 /// [`TEMPORAL_ACCUMULATOR_COLS`] (`packet_reduce` / `time_reduce` output).
@@ -134,36 +131,6 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M
             inner,
             pre_reduce_time,
         }
-    }
-}
-
-/// The padded extent of each axis of `m` keyed by its cumulative (dividend) stride, inner-to-outer.
-///
-/// The FMapping-free peer of the old factor walk (`stride -> padding_size/stride | resize`): on the
-/// normalized `Mapping`, each axis already carries its padded extent as `size()` (a `Padding` node's
-/// size is its padded total), and the running stride is the product of the inner axes' extents. The
-/// contraction verifies key into this by a division term's `dividend_stride`.
-pub(crate) fn padding_per_stride(m: &Mapping) -> std::collections::HashMap<usize, usize> {
-    let mut extents = Vec::new();
-    collect_axis_extents(&m.normalize(), &mut extents);
-    let mut map = std::collections::HashMap::new();
-    let mut stride = 1;
-    for extent in extents {
-        map.insert(stride, extent);
-        stride *= extent;
-    }
-    map
-}
-
-/// Pushes each axis's padded extent (`size()`), innermost (right) first, down the normalized `Pair`
-/// spine — the order the factor list used.
-fn collect_axis_extents(m: &Mapping, out: &mut Vec<usize>) {
-    match m {
-        Mapping::Pair { left, right } => {
-            collect_axis_extents(right, out);
-            collect_axis_extents(left, out);
-        }
-        other => out.push(other.size()),
     }
 }
 

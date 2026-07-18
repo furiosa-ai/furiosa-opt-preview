@@ -28,8 +28,6 @@ use crate::scalar::*;
 use crate::tensor::Tensor;
 use crate::tensor::tu::{Position, TuTensor};
 
-pub(super) use furiosa_opt_lower::COMMIT_VALID_PACKET_SIZES;
-
 /// Element-wise activation fused into the Commit Adapter's type-casting
 /// stage. ReLU is not a standalone hardware stage: it exists only fused
 /// with a narrowing cast (e.g. `f32` → `bf16` + ReLU).
@@ -134,8 +132,19 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
 }
 
 // ANCHOR: commit_trim_impl
-impl<'l, const T: Tu, P: CanApplyCommitTrim, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+// `D: MaterializableScalar` here (trim is the commit path's mandatory first stage) keeps i5/i9 uncommittable.
+impl<
+    'l,
+    const T: Tu,
+    P: CanApplyCommitTrim,
+    D: MaterializableScalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    B: Backend,
+> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Runs the Commit Adapter's trimming stage.
     ///
@@ -208,25 +217,11 @@ impl<
 }
 // ANCHOR_END: commit_valid_count_pack_impl
 
-/// Verifies the Commit Adapter's trimming-stage constraints.
-///
-/// 1. Output packet must be 8, 16, 24, or 32 bytes (where 32 means no
-///    trim).
-/// 2. `OutPacket` must be a `# m` → `# n` style resize of the input
-///    `Packet` (`n` ≤ `m`).
+/// Validates the Commit Adapter's trimming stage via [`furiosa_opt_lower::config_commit_trim`]
+/// (width / resize rules documented there).
 pub(crate) fn verify_commit_trim<D: Scalar, Packet: M, OutPacket: M>() {
-    let out_packet_bytes = D::size_in_bytes_from_length(OutPacket::SIZE);
-    assert!(
-        COMMIT_VALID_PACKET_SIZES.contains(&out_packet_bytes),
-        "commit_trim output packet must be one of {COMMIT_VALID_PACKET_SIZES:?} bytes, got {out_packet_bytes}",
-    );
-
-    let out_packet = OutPacket::to_value();
-    let expected_packet = Packet::to_value();
-    assert!(
-        out_packet.is_resize_of(&expected_packet),
-        "commit_trim packet mismatch. Expected {expected_packet} or a trimming of it, got {out_packet}",
-    );
+    furiosa_opt_lower::config_commit_trim(&Packet::to_value(), &OutPacket::to_value(), D::BITS)
+        .unwrap_or_else(|message| panic!("{message}"));
 }
 
 #[allow(clippy::extra_unused_type_parameters)]

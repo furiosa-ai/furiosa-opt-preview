@@ -30,7 +30,7 @@ Install three pieces:
 
    The same channel is pinned in [`rust-toolchain.toml`](https://github.com/furiosa-ai/furiosa-opt/blob/main/rust-toolchain.toml); cargo activates it automatically when you cd into a project that includes that file.
 
-2. **`cargo-furiosa-opt`**: the cargo subcommand that injects the right `--cfg backend="..."` and pre-compiles kernels for NPU.
+2. **[`cargo-furiosa-opt`](./appendix/cargo-furiosa-opt.md)**: the cargo subcommand that injects the right `--cfg backend="..."` and pre-compiles kernels for NPU.
 
    ```bash
    cargo +nightly-2026-05-01 install cargo-binstall
@@ -131,6 +131,7 @@ A vISA program is a Rust program that uses the `furiosa-opt-std` API. `cargo fur
 |-------------|----------|---------------------------------------------|--------------------------------------------------------------------------------------|
 | `typecheck` |          | Kernel body runs with phantom (empty) tensors | Catching mapping/shape errors fast (value computation skipped)                       |
 | `simulation`  | yes      | Full host-side interpretation               | Default for development; verifies numerical correctness                              |
+| `emulation` |          | Host-side simulation of the NPU device path | Checking the NPU buffer/storage path without hardware                                |
 | `npu`       |          | Compiled EDF on hardware (or NVP simulator) | End-to-end including the hardware path                                               |
 
 ```bash
@@ -152,6 +153,8 @@ cargo furiosa-opt --backend npu run --release
 cargo furiosa-opt build              # cargo build with simulation backend
 cargo furiosa-opt --backend npu test # cargo test on real NPU
 ```
+
+See the [`cargo furiosa-opt` appendix](./appendix/cargo-furiosa-opt.md) for the complete command reference.
 
 
 ### Language Server

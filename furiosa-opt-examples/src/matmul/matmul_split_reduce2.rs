@@ -69,7 +69,7 @@ pub fn matmul_with_split_reduce2(
                 SwitchConfig::TransposedBroadcast1 { slice1: 8, slice0: 8 },
             )
             .collect::<m![N / 32, K % 128 % 2, K % 128 / 2 % 8, N % 32 / 16], m![N % 32 % 16]>()
-            .contract_outer::<m![N / 32, K % 128 % 2, K % 128 / 2 % 8], m![N % 32], _, _>(&t94)
+            .contract_outer::<m![N / 32, K % 128 % 2, K % 128 / 2 % 8], m![N % 32], _, _, _>(&t94)
             .contract_packet::<m![N % 32]>()
             .contract_time::<m![N / 32]>()
             .contract_lane::<m![N / 32, M % 8, N % 32 / 8], m![N % 32 % 8]>(LaneMode::Sequential)
@@ -149,7 +149,7 @@ pub fn matmul_with_split_reduce2(
                 SwitchConfig::TransposedBroadcast1 { slice1: 8, slice0: 8 },
             )
             .collect::<m![N / 32, K % 128 % 2, K % 128 / 2 % 8, N % 32 / 16], m![N % 32 % 16]>()
-            .contract_outer::<m![N / 32, K % 128 % 2, K % 128 / 2 % 8], m![N % 32], _, _>(&t115)
+            .contract_outer::<m![N / 32, K % 128 % 2, K % 128 / 2 % 8], m![N % 32], _, _, _>(&t115)
             .contract_packet::<m![N % 32]>()
             .contract_time::<m![N / 32]>()
             .contract_lane::<m![N / 32, M % 8, N % 32 / 8], m![N % 32 % 8]>(LaneMode::Sequential)

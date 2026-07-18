@@ -76,7 +76,7 @@ impl FxpBinaryOp {
 
 impl FpUnaryOp {
     /// Returns the raw unary operation function.
-    pub(crate) fn op_fn(&self) -> fn(f32) -> f32 {
+    pub fn op_fn(&self) -> fn(f32) -> f32 {
         match self {
             Self::Exp => |x| x.exp(),
             Self::NegExp => |x| (-x).exp(),
@@ -93,7 +93,7 @@ impl FpUnaryOp {
 
 impl FpBinaryOp {
     /// Returns the raw binary operation function.
-    pub(crate) fn op_fn(&self) -> fn(f32, f32) -> f32 {
+    pub fn op_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
             Self::AddF => |a, b| a + b,
             Self::SubF => |a, b| a - b,
@@ -105,7 +105,7 @@ impl FpBinaryOp {
 
 impl FpTernaryOp {
     /// Returns the raw ternary operation function.
-    pub(crate) fn op_fn(&self) -> fn(f32, f32, f32) -> f32 {
+    pub fn op_fn(&self) -> fn(f32, f32, f32) -> f32 {
         match self {
             Self::FmaF => |a, b, c| a.mul_add(b, c),
         }
@@ -118,7 +118,7 @@ impl FpTernaryOp {
 
 impl ClipBinaryOpI32 {
     /// Returns the raw binary operation function.
-    pub(crate) fn op_fn(&self) -> fn(i32, i32) -> i32 {
+    pub fn op_fn(&self) -> fn(i32, i32) -> i32 {
         match self {
             Self::AddFxp => |a, b| a.wrapping_add(b),
             Self::AddFxpSat => |a, b| a.saturating_add(b),
@@ -132,7 +132,7 @@ impl ClipBinaryOpI32 {
 
 impl ClipBinaryOpF32 {
     /// Returns the raw binary operation function.
-    pub(crate) fn op_fn(&self) -> fn(f32, f32) -> f32 {
+    pub fn op_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
             Self::Add => |a, b| a + b,
             Self::Min => |a, b| a.min(b),
@@ -278,7 +278,7 @@ impl InterSliceReduceOpF32 {
 
 impl FpDivBinaryOp {
     /// Returns the raw binary operation function.
-    pub(crate) fn op_fn(&self) -> fn(f32, f32) -> f32 {
+    pub fn op_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
             Self::DivF => |a, b| a / b,
         }

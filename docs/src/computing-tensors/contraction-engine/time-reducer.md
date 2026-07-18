@@ -31,7 +31,7 @@ fn reduce_b<'l, const T: Tu>(
 ) -> ContractTensor<'l, T, f32, m![1], m![1 # 2], m![A / 8], m![A % 8], m![1 # 8]> {
     input
          // Outer: Lane = m![1], OutTime = m![B / 16, A % 8], OutPacket = m![B % 16].
-         .contract_outer::<m![B / 16, A % 8], m![B % 16], _, _>(trf)
+         .contract_outer::<m![B / 16, A % 8], m![B % 16], _, _, _>(trf)
          // Packet Reducer: OutPacket = m![1]. Collapses B % 16 spatially.
          .contract_packet::<m![1]>()
          // Time Reducer: OutTime = m![A % 8]. Accumulator receives

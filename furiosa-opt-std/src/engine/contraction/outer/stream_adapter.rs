@@ -8,7 +8,6 @@
 use furiosa_mapping::*;
 
 use crate::backend::Backend;
-use crate::engine::FLIT_BYTES;
 use crate::scalar::Scalar;
 use crate::tensor::Tensor;
 
@@ -40,50 +39,13 @@ pub(super) fn contract_outer<
 /// - `OutTime = [outer, broadcast]`, where `outer` is the rest of `Time` and the
 ///   broadcast (tiling) axes occupy the innermost positions.
 pub(super) fn verify_stream_adapter<D: Scalar, Lane: M, Time: M, Packet: M, OutTime: M, OutPacket: M>() {
-    assert!(
-        [1, 2, 4, 8].contains(&Lane::SIZE),
-        "Lane::SIZE must be 1, 2, 4, or 8, got {}",
-        Lane::SIZE
-    );
-
-    let out_packet_bytes = D::size_in_bytes_from_length(OutPacket::SIZE);
-    assert!(
-        out_packet_bytes.is_multiple_of(FLIT_BYTES) && [1, 2].contains(&(out_packet_bytes / FLIT_BYTES)),
-        "OutPacket must be 1 or 2 flits ({FLIT_BYTES} bytes each), got {out_packet_bytes} bytes"
-    );
-
-    // Packing collects `pack_size` flits, pulling the innermost `pack_size` cells
-    // of `Time` into the packet.
-    let pack_size = out_packet_bytes / FLIT_BYTES;
-    let (time_outer, time_packed) = Time::to_value().split_at(pack_size);
-
-    // OutPacket = [packed cells of Time, inner flit]. The inner flit is the input
-    // Packet; the packed cells must match Time's innermost cells exactly, padding
-    // included.
-    let flit_elements = D::length_from_bytes(FLIT_BYTES);
-    let (out_packet_packed, out_packet_flit) = OutPacket::to_value().split_at(flit_elements);
-    assert_eq!(
-        out_packet_flit.normalize(),
-        Packet::to_value().normalize(),
-        "`contract_outer`: inner flit of OutPacket must equal the input Packet",
-    );
-    assert_eq!(
-        out_packet_packed.normalize(),
-        time_packed.normalize(),
-        "`contract_outer`: OutPacket's packed cells must equal the innermost {pack_size} cells of Time",
-    );
-
-    // OutTime = [outer Time, broadcast]. The broadcast (tiling) axes are innermost,
-    // so stripping them off the bottom must leave exactly the outer Time.
-    assert!(
-        OutTime::SIZE.is_multiple_of(time_outer.size()),
-        "`contract_outer`: Time does not divide OutTime"
-    );
-    let tiling_size = OutTime::SIZE / time_outer.size();
-    let (out_time_outer, _broadcast) = OutTime::to_value().split_at(tiling_size);
-    assert_eq!(
-        out_time_outer.normalize(),
-        time_outer.normalize(),
-        "`contract_outer`: OutTime must be the outer Time with broadcast (tiling) axes innermost",
-    );
+    furiosa_opt_lower::config_stream_adapter(
+        &Lane::to_value(),
+        &Time::to_value(),
+        &Packet::to_value(),
+        &OutTime::to_value(),
+        &OutPacket::to_value(),
+        D::BITS,
+    )
+    .unwrap_or_else(|message| panic!("{message}"));
 }

@@ -37,7 +37,7 @@ pub fn gemm_kernel(
         .begin(a.view())
         .fetch::<m![I % 32, J / 8 % 4], m![K]>()
         .collect::<m![I % 32, J / 8 % 4, K / 16], m![K % 16]>()
-        .contract_outer::<m![I % 32, J / 8 % 4, K / 32], m![K % 32], _, _>(&b_trf)
+        .contract_outer::<m![I % 32, J / 8 % 4, K / 32], m![K % 32], _, _, _>(&b_trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![I % 32, J / 8 % 4]>()
         .contract_lane::<m![I % 32, J / 8 % 4], m![J % 8]>(LaneMode::Interleaved)

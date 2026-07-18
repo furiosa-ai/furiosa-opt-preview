@@ -28,7 +28,7 @@ pub fn matmul_4096(
         .begin(lhs.view())
         .fetch::<m![A % 1024], m![B % 32]>()
         .collect::<m![A % 1024], m![B % 32]>()
-        .contract_outer::<m![A / 2 % 512], m![A % 2, B % 32], _, _>(&rhs)
+        .contract_outer::<m![A / 2 % 512], m![A % 2, B % 32], _, _, _>(&rhs)
         .contract_packet::<m![A % 2]>()
         .contract_time::<m![A / 2 % 512]>()
         .contract_lane::<m![A / 2 % 512], m![A % 2 # 8]>(LaneMode::Sequential)

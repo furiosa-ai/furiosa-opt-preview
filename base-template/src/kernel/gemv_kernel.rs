@@ -35,7 +35,7 @@ pub fn gemv_kernel(
         .begin(matrix.view())
         .fetch::<m![J / 16], m![J % 16]>()
         .collect::<m![J / 16], m![J % 16]>()
-        .contract_outer::<Time, Packet, _, _>(&vector_trf)
+        .contract_outer::<Time, Packet, _, _, _>(&vector_trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![1]>()
         .contract_lane::<m![1], m![1 # 8]>(LaneMode::Interleaved)

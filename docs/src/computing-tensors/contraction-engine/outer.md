@@ -90,7 +90,7 @@ fn stream_adapter_example<'l, const T: Tu>(
     // Lane Broadcast: same packet to all N = 8 lanes.
     // Time Broadcast: B = 5 (TRF-only) added at innermost OutTime.
     //   OutTime = [M, B = 5], OutPacket = [L = 2, K = 16].
-    input.contract_outer::<m![M, B], m![L, K], _, _>(trf)
+    input.contract_outer::<m![M, B], m![L, K], _, _, _>(trf)
 }
 # 
 # let mut ctx = Context::acquire();
@@ -160,7 +160,7 @@ fn trf_sequencer_full_read<'l, const T: Tu>(
     // PacketBroadcast = 1
     // OutTime         = M      (sequencing over [K / 32] (= 1), broadcast M)
     // OutPacket       = K      (= [1, K % 32])
-    input.contract_outer::<m![M], m![K], _, _>(trf)
+    input.contract_outer::<m![M], m![K], _, _, _>(trf)
 }
 # 
 # let mut ctx = Context::acquire();
@@ -187,7 +187,7 @@ fn trf_sequencer_partial_read<'l, const T: Tu>(
     // PacketBroadcast = L
     // OutTime         = [O, M]    (sequencing over [O, K] / 16 (= O), broadcast M)
     // OutPacket       = [L, K]    (= [L, [O, K] % 16])
-    input.contract_outer::<m![O, M], m![L, K], _, _>(trf)
+    input.contract_outer::<m![O, M], m![L, K], _, _, _>(trf)
 }
 # 
 # let mut ctx = Context::acquire();

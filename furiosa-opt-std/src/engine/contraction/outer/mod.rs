@@ -7,7 +7,7 @@
 //! - `trf_sequencer`: transposes the TRF into the joint computation mapping.
 //! - Multiplier: elementwise multiplies the two aligned operands. Inputs widen
 //!   to the contraction output type (`i4`/`i8` -> `i32`, `f8`/`bf16` -> `f32`)
-//!   before multiplication, matching the DPE accumulator type.
+//!   before multiplication, matching the contraction-engine accumulator type.
 //!
 //! The resulting [`ContractOuterTensor`] carries a *single* multiplied tensor in
 //! the common computation mapping `[Chip, Cluster, Slice, Lane, Time, Packet]`,
@@ -29,7 +29,7 @@ use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
-use crate::cast::{Cast, ContractionCast};
+use crate::cast::{Cast, ContractionCast, ContractionWeight};
 use crate::constraints;
 use crate::context::*;
 use crate::engine::CanApplyContractOuter;
@@ -122,19 +122,24 @@ impl<
     /// computation shape, then the Multiplier widens to the contraction output type and multiplies
     /// them elementwise. The result is a single multiplied tensor ready for the Packet Reducer.
     #[primitive(TuTensor::contract_outer)]
-    pub fn contract_outer<OutTime: M, OutPacket: M, Lane: M, TrfElement: M>(
+    pub fn contract_outer<OutTime: M, OutPacket: M, Lane: M, TrfElement: M, TrfD>(
         self,
-        trf_tensor: &TrfTensor<D, Chip, Cluster, Slice, Lane, TrfElement, B>,
+        trf_tensor: &TrfTensor<TrfD, Chip, Cluster, Slice, Lane, TrfElement, B>,
     ) -> ContractOuterTensor<'l, T, <D as ContractionCast>::Output, D, Chip, Cluster, Slice, Lane, OutTime, OutPacket, B>
     where
         D: Cast<<D as ContractionCast>::Output>,
+        // The weight (TRF) type must form a valid contraction-engine operand pair with the
+        // stream type `D`: same type, or a mixed integer precision within a
+        // family (i4/i5 x i4/i5, i8/i9 x i8/i9). Both operands widen to the
+        // stream's accumulator for the multiply.
+        TrfD: Scalar + ContractionWeight<D> + Cast<<D as ContractionCast>::Output>,
     {
         // Broadcast both operands into the joint computation mapping. Each side
         // verifies its own mapping inside its `contract_outer`.
         let lhs = stream_adapter::contract_outer::<D, Chip, Cluster, Slice, Lane, Time, Packet, OutTime, OutPacket, B>(
             self.inner,
         );
-        let trf = trf_sequencer::contract_outer::<D, Chip, Cluster, Slice, Lane, TrfElement, OutTime, OutPacket, B>(
+        let trf = trf_sequencer::contract_outer::<TrfD, Chip, Cluster, Slice, Lane, TrfElement, OutTime, OutPacket, B>(
             trf_tensor,
         );
 

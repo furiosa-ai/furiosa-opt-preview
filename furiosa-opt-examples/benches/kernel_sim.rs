@@ -1,5 +1,5 @@
 //! Whole-kernel simulation wall-clock harness (NOT criterion): runs a representative decode-path
-//! kernel end to end on the active backend (default `simulation` → `MathStorage`), timed, so it can
+//! kernel end to end on the active backend (default `emulation` → `BufStorage`), timed, so it can
 //! be driven under `perf record` / `top -H` to profile the compute critical path.
 //!
 //! ```sh
@@ -162,7 +162,7 @@ fn main() {
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
 
     // The kernels are `#[device(chip = 1)]` with the `#[device]` default `pe = 8`, so this harness
-    // runs the 1chip/8PE topology. The simulation backend derives storage layout from the tensor
+    // runs the 1chip/8PE topology. The emulation backend derives storage layout from the tensor
     // `m!` shapes alone and never reads a global NPU config, so no config pin is needed here.
 
     let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();

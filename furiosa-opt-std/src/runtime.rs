@@ -8,13 +8,10 @@ use cfg_if::cfg_if;
 // Only the cfg-selected backend below is named in the active build; the others are referenced
 // solely by inactive `cfg_if` branches.
 #[allow(unused_imports)]
-use crate::backend::{Emulation, Npu, Simulation, Typecheck};
+use crate::backend::{Emulation, Npu, Typecheck};
 
 cfg_if! {
-    if #[cfg(backend = "simulation")] {
-        /// Backend alias used for the host-side mapping interpreter (`backend = "simulation"`).
-        pub type CurrentBackend = Simulation;
-    } else if #[cfg(backend = "emulation")] {
+    if #[cfg(backend = "emulation")] {
         /// Backend alias used for the host-side buffer emulator (`backend = "emulation"`).
         pub type CurrentBackend = Emulation;
     } else if #[cfg(backend = "npu")] {
@@ -24,10 +21,10 @@ cfg_if! {
         /// Backend alias used when compiling in typecheck mode.
         pub type CurrentBackend = Typecheck;
     } else {
-        // `backend` cfg is always one of "simulation" / "emulation" / "npu" / "typecheck":
-        // `check-cfg` rejects other values, and `build.rs` injects `backend="simulation"` when
+        // `backend` cfg is always one of "emulation" / "npu" / "typecheck":
+        // `check-cfg` rejects other values, and `build.rs` injects `backend="emulation"` when
         // no caller passed a value.
-        compile_error!("wrong backend cfg: expected one of \"simulation\", \"emulation\", \"npu\", or \"typecheck\"");
+        compile_error!("wrong backend cfg: expected one of \"emulation\", \"npu\", or \"typecheck\"");
     }
 }
 

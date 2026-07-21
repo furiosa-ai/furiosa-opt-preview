@@ -16,7 +16,7 @@ async fn test_fetch_commit_at() {
 
     let mut ctx = Context::acquire();
 
-    let input = HostTensor::<i8, m![A, B]>::from_buf((0..32768).map(|x| x as i8).collect::<Vec<_>>())
+    let input = HostTensor::<i8, m![A, B]>::from_vec((0..32768).map(|x| x as i8).collect::<Vec<_>>())
         .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
         .await;
 
@@ -31,7 +31,7 @@ async fn test_fetch_commit_at() {
         }
     }
 
-    assert_eq!(output.to_host::<m![B, A]>(&mut ctx.pdma).await.into_buf(), expected);
+    assert_eq!(output.to_host::<m![B, A]>(&mut ctx.pdma).await.into_vec(), expected);
 }
 
 // Covers `HbmTensorView::to_dm_at` and `to_vrf_at`. Launching forces codegen; the value
@@ -60,7 +60,7 @@ async fn test_to_trf_at() {
 
     let mut ctx = Context::acquire();
 
-    let input = HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>())
+    let input = HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>())
         .to_hbm::<Chip, m![A, B]>(&mut ctx.pdma)
         .await;
 
@@ -78,14 +78,14 @@ async fn test_dm_relayout_at() {
     let mut ctx = Context::acquire();
 
     let vals: Vec<i32> = (0..<m![A, B]>::SIZE as i32).collect();
-    let input = HostTensor::<i32, m![A, B]>::from_buf(vals.clone())
+    let input = HostTensor::<i32, m![A, B]>::from_vec(vals.clone())
         .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
         .await;
 
     let output = launch(dm_relayout_at, (&mut *ctx, &input)).await;
 
     assert_eq!(
-        output.to_host::<m![A / 2, A % 2, B]>(&mut ctx.pdma).await.into_buf(),
+        output.to_host::<m![A / 2, A % 2, B]>(&mut ctx.pdma).await.into_vec(),
         vals
     );
 }
@@ -98,11 +98,11 @@ async fn test_dm_pcopy_at() {
     let mut ctx = Context::acquire();
 
     let vals: Vec<i32> = (0..<m![A, B]>::SIZE as i32).collect();
-    let input = HostTensor::<i32, m![A, B]>::from_buf(vals.clone())
+    let input = HostTensor::<i32, m![A, B]>::from_vec(vals.clone())
         .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
         .await;
 
     let output = launch(dm_pcopy_at, (&mut *ctx, &input)).await;
 
-    assert_eq!(output.to_host::<m![A, B]>(&mut ctx.pdma).await.into_buf(), vals);
+    assert_eq!(output.to_host::<m![A, B]>(&mut ctx.pdma).await.into_vec(), vals);
 }

@@ -13,7 +13,7 @@ use furiosa_opt_macro::primitive;
 use crate::backend::Backend;
 use crate::prelude::DmTensor;
 
-use super::scalar::Scalar;
+use super::scalar::{MaterializableScalar, Scalar};
 use super::tensor::Tensor;
 use super::tensor::memory::DmTensorView;
 use super::tensor::tu::BeginTensor;
@@ -125,7 +125,7 @@ impl Acquired {
 impl<const T: Tu> TuContext<{ T }> {
     /// Begin a tensor unit operation in this context.
     #[primitive(TuContext::begin)]
-    pub fn begin<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M>(
+    pub fn begin<'l, D: MaterializableScalar, Chip: M, Cluster: M, Slice: M, Element: M>(
         &'l mut self,
         tensor: DmTensorView<'l, D, Chip, Cluster, Slice, Element>,
     ) -> BeginTensor<'l, { T }, D, Chip, Cluster, Slice, Identity, Element> {

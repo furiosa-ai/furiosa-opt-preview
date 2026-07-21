@@ -1,7 +1,8 @@
 use furiosa_mapping::Mapping as MappingValue;
 use furiosa_mapping::*;
 
-use crate::scalar::Scalar;
+use crate::cast::ContractionCast;
+use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::BufStorage;
 use crate::tensor::memory::{HbmTensor, HostTensor};
 
@@ -21,25 +22,44 @@ pub struct Npu;
 impl Backend for Npu {
     type Storage<D: Scalar> = BufStorage<D>;
 
-    fn from_buf<D: Scalar>(mapping: &MappingValue, data: impl IntoIterator<Item = D>) -> Self::Storage<D> {
-        BufStorage::from_buf(mapping, data)
+    fn from_vec<D: Scalar>(_mapping: &MappingValue, data: impl IntoIterator<Item = D>) -> Self::Storage<D> {
+        BufStorage::from_vec(data)
+    }
+
+    fn from_buf<D: Scalar>(_mapping: &MappingValue, buf: Vec<u8>) -> Self::Storage<D> {
+        BufStorage::from_buf(buf)
     }
 
     fn uninit<D: Scalar>(mapping: &MappingValue) -> Self::Storage<D> {
         // BUF has no Opt::Uninit; the blank canvas is just zeros (overwritten by the relayout that
         // allocates it; padding cells are don't-care).
-        BufStorage::from_buf(mapping, std::iter::repeat_n(D::zero(), mapping.size()))
+        BufStorage::from_vec(std::iter::repeat_n(D::zero(), mapping.size()))
     }
 
-    fn into_buf<D: Scalar>(storage: Self::Storage<D>, mapping: &MappingValue) -> Vec<D> {
+    fn into_vec<D: MaterializableScalar>(storage: Self::Storage<D>, mapping: &MappingValue) -> Vec<D> {
+        storage.into_vec(mapping)
+    }
+
+    fn into_buf<D: Scalar>(storage: Self::Storage<D>, mapping: &MappingValue) -> Vec<u8> {
         storage.into_buf(mapping)
     }
 
-    fn map<D: Scalar, D2: Scalar>(src: &Self::Storage<D>, f: impl Fn(D) -> D2 + Sync) -> Self::Storage<D2> {
+    fn map<D: MaterializableScalar, D2: Scalar>(
+        src: &Self::Storage<D>,
+        f: impl Fn(D) -> D2 + Sync,
+    ) -> Self::Storage<D2> {
         src.map(f)
     }
 
-    fn zip_with<D: Scalar, D2: Scalar, D3: Scalar>(
+    fn map_bounded<D: Scalar, D2: Scalar>(
+        src: &Self::Storage<D>,
+        len: usize,
+        f: impl Fn(D) -> D2 + Sync,
+    ) -> Self::Storage<D2> {
+        src.map_bounded(len, f)
+    }
+
+    fn zip_with<D: MaterializableScalar, D2: MaterializableScalar, D3: Scalar>(
         a: &Self::Storage<D>,
         b: &Self::Storage<D2>,
         f: impl Fn(D, D2) -> D3 + Sync,
@@ -47,7 +67,7 @@ impl Backend for Npu {
         a.zip_with(b, f)
     }
 
-    fn zip3_with<D: Scalar, D2: Scalar, D3: Scalar, D4: Scalar>(
+    fn zip3_with<D: MaterializableScalar, D2: MaterializableScalar, D3: MaterializableScalar, D4: Scalar>(
         a: &Self::Storage<D>,
         b: &Self::Storage<D2>,
         c: &Self::Storage<D3>,
@@ -68,13 +88,26 @@ impl Backend for Npu {
         dst.transpose::<Src, Dst>(src, src_offset, dst_offset, src_map, dst_map, allow_broadcast);
     }
 
-    fn reduce<D: Scalar, Src: M, Dst: M>(
+    fn reduce<D: MaterializableScalar, Src: M, Dst: M>(
         src: &Self::Storage<D>,
         reduce_fn: impl Fn(D, D) -> D + Sync,
         identity: D,
         allow_broadcast: bool,
     ) -> Self::Storage<D> {
         src.reduce::<Src, Dst, _>(reduce_fn, identity, allow_broadcast)
+    }
+
+    fn contraction<D: ContractionCast + MaterializableScalar>(
+        lhs: &Self::Storage<D>,
+        rhs: &Self::Storage<D>,
+        lhs_map: &MappingValue,
+        rhs_map: &MappingValue,
+        pre_reduce: &MappingValue,
+        out: &MappingValue,
+    ) -> Self::Storage<D> {
+        // Same host-side fold as `Emulation` (shared `BufStorage`); real hardware never reaches this
+        // body (see the struct doc), but the trait requires an implementation.
+        BufStorage::contraction(lhs, rhs, lhs_map, rhs_map, pre_reduce, out)
     }
 
     fn scatter<D: Scalar, Src: M, Key: M, Dst: M, Idx: M>(
@@ -86,7 +119,7 @@ impl Backend for Npu {
         src.scatter::<Src, Key, Dst, Idx>(dst, index, scaled);
     }
 
-    fn gather<D: Scalar, Src: M, Dst: M, Idx: M>(
+    fn gather<D: MaterializableScalar, Src: M, Dst: M, Idx: M>(
         src: &Self::Storage<D>,
         dst: &mut Self::Storage<D>,
         index: &Self::Storage<i32>,
@@ -99,7 +132,7 @@ impl Backend for Npu {
         src.reshape::<Src, Dst>()
     }
 
-    fn transmute<D: Scalar, Src: M, Dst: M>(
+    fn transmute<D: MaterializableScalar, Src: M, Dst: M>(
         storage: Self::Storage<D>,
         src_map: &MappingValue,
         dst_map: &MappingValue,
@@ -107,13 +140,13 @@ impl Backend for Npu {
         storage.transmute(src_map, dst_map)
     }
 
-    async fn to_hbm<D: Scalar, Element: M, Chip: M, Element2: M>(
+    async fn to_hbm<D: MaterializableScalar, Element: M, Chip: M, Element2: M>(
         host: &HostTensor<D, Element, Self>,
     ) -> HbmTensor<D, Chip, Element2, Self> {
         Kernel::write(host).await
     }
 
-    async fn from_hbm<D: Scalar, Chip: M, Element: M, Element2: M>(
+    async fn from_hbm<D: MaterializableScalar, Chip: M, Element: M, Element2: M>(
         hbm: &HbmTensor<D, Chip, Element, Self>,
     ) -> HostTensor<D, Element2, Self> {
         Kernel::read(hbm).await

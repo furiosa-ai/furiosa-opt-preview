@@ -9,7 +9,7 @@ publish = false
 # `cargo furiosa-opt` sets `--cfg backend="..."`. Declare the known values so the
 # bare `cargo build` / `cargo check` paths don't emit unexpected-cfg warnings.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(backend, values("simulation", "emulation", "npu", "typecheck"))', 'cfg(furiosa_opt)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(backend, values("emulation", "npu", "typecheck"))', 'cfg(furiosa_opt)'] }
 
 [lib]
 path = "src/lib.rs"

@@ -694,16 +694,15 @@ fn reduce_wrong_interleave<'l, const T: Tu>(
 ### `R` in `Slice` and `Time`, Over-padded
 
 `TimeMajor` mode requires `PADDED_SIZE - R::SIZE ≤ slice_span`. At most `slice_span` `R` positions are over-padded.
-Padding beyond this point causes slices below `slice_thres` (which `fn valid()` always reports valid) to silently include padding in the reduction.
 
 In the example below, `R = 14`, `Slice = m![X, R # 20 % 4]` (`slice_span = 4`), and `Time = m![A, R # 20 / 4]` with `A = 3` (so `time_span = 5` from `R # 20 / 4`, while `Time::SIZE = A × time_span = 15`).
 The constraint is on `time_span`, not `Time::SIZE`: non-`R` axes in `Time` like `A` cycle without changing `R`'s index, so they do not affect the constraint.
 The correct padding is `R # 16` (since `16 - 14 = 2 ≤ slice_span = 4`), giving `time_span = 4`.
 Using `R # 20` over-pads `R`, making `time_span = 5` and adding an extra `Time` iteration that contains no real data.
-For slices below `slice_thres` (slice contribution = 0), the sequencer-reconstructed `idx` reaches `4 × 4 = 16` when `R # 20 / 4 = 4`, giving `R` index 16 ≥ `R::SIZE`: padding, should be invalid.
-But `fn valid()` sees `s & self.slice_mask = 0 < slice_thres = 2` and returns `true` regardless of `idx`.
+For slices below `slice_thres` (slice contribution = 0), the sequencer-reconstructed `idx` reaches `4 × 4 = 16` when `R # 20 / 4 = 4`, giving `R` index 16 ≥ `R::SIZE`: padding that shouldn't be reachable.
+`Emulation` catches exactly this: reducing over the over-padded layout panics (`out x residue must factor the operand`) rather than running with a stale, unreachable `R` index.
 
-```rust
+```rust,should_panic
 # #![feature(adt_const_params)]
 # extern crate furiosa_opt_std;
 # use furiosa_opt_std::prelude::*;

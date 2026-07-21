@@ -41,7 +41,7 @@ async fn test_vrf_add() {
         .into_inner()
         .zip_with(&rhs.into_inner().transpose(true), |x, y| x + y);
 
-    assert_eq!(expected.into_buf(), result.into_buf());
+    assert_eq!(expected.into_vec(), result.into_vec());
 }
 
 // =============================================================================
@@ -64,7 +64,7 @@ async fn test_ve_elementwise_fxp_const() {
     // Verify: output = input + 100
     let expected = input.into_inner().map(|x| x.wrapping_add(100));
 
-    assert_eq!(expected.into_buf(), result.into_buf());
+    assert_eq!(expected.into_vec(), result.into_vec());
 }
 
 /// This test verifies that ALU conflicts are properly detected.
@@ -109,7 +109,7 @@ async fn test_ve_elementwise_full_pipeline() {
         v.clamp(0, 1000)
     });
 
-    assert_eq!(expected.into_buf(), result.into_buf());
+    assert_eq!(expected.into_vec(), result.into_vec());
 }
 
 #[tokio::test]
@@ -128,7 +128,7 @@ async fn test_ve_elementwise_stash_f32() {
     // Verify: output = max(input * 2.0, input)
     let expected = input.into_inner().map(|x| f32::max(x * 2.0, x));
 
-    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
+    assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
 }
 
 #[tokio::test]
@@ -147,7 +147,7 @@ async fn test_ve_vrf_read_twice_ok_f32() {
     // Two VRF reads of `z`: Mul0 (z·z) then Mul1 ((z·z)·z) => z³.
     let expected = input.into_inner().map(|x| x * x * x);
 
-    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
+    assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
 }
 
 #[tokio::test]
@@ -166,7 +166,7 @@ async fn test_ve_elementwise_stash_i32() {
     // Verify: output = max(input * 2, input)
     let expected = input.into_inner().map(|x| i32::max(x.wrapping_mul(2), x));
 
-    assert_eq!(expected.into_buf(), result.into_buf());
+    assert_eq!(expected.into_vec(), result.into_vec());
 }
 
 #[tokio::test]
@@ -185,7 +185,7 @@ async fn test_ve_stash_fxp_fxp() {
     // Verify: output = max(input * 2, input)
     let expected = input.into_inner().map(|x| i32::max(x.wrapping_mul(2), x));
 
-    assert_eq!(expected.into_buf(), result.into_buf());
+    assert_eq!(expected.into_vec(), result.into_vec());
 }
 
 /// This test verifies that cross-type stash reads (i32 -> f32) are properly rejected.
@@ -228,7 +228,7 @@ async fn test_ve_stash_fp_fp() {
     // output = max(input * 2.0 * 3.0, input * 2.0) = max(input * 6.0, input * 2.0)
     let expected = input.into_inner().map(|x| f32::max(x * 6.0, x * 2.0));
 
-    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
+    assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
 }
 
 /// This test verifies that cross-type stash reads (f32 -> i32) are properly rejected.
@@ -270,7 +270,7 @@ async fn test_ve_elementwise_logic() {
     // Verify: output = (input & 0xFF) | 0x100
     let expected = input.into_inner().map(|x| (x & 0xFF) | 0x100);
 
-    assert_eq!(expected.into_buf(), result.into_buf());
+    assert_eq!(expected.into_vec(), result.into_vec());
 }
 
 #[tokio::test]
@@ -294,7 +294,7 @@ async fn test_ve_elementwise_vrf() {
         .into_inner()
         .zip_with(&rhs.into_inner().transpose(true), |x, y| x + y);
 
-    assert_eq!(expected.into_buf(), result.into_buf());
+    assert_eq!(expected.into_vec(), result.into_vec());
 }
 
 #[tokio::test]
@@ -324,7 +324,7 @@ async fn test_ve_elementwise_multi_vrf() {
         .zip_with(&vrf2_t, |x, y| x.wrapping_mul(y))
         .zip_with(&vrf1_t, |x, y| x.wrapping_add(y));
 
-    assert_eq!(expected.into_buf(), result.into_buf());
+    assert_eq!(expected.into_vec(), result.into_vec());
 }
 
 // =============================================================================
@@ -347,7 +347,7 @@ async fn test_ve_elementwise_ternary() {
     // Verify: FmaF = input * 2.0 + 3.0
     let expected = input.into_inner().map(|x| x.mul_add(2.0, 3.0));
 
-    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
+    assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
 }
 
 #[tokio::test]
@@ -366,5 +366,5 @@ async fn test_ve_elementwise_ternary_stash() {
     // Verify: FmaF with stash = input * input + 1.0 = input^2 + 1.0
     let expected = input.into_inner().map(|x| x.mul_add(x, 1.0));
 
-    assert_f32_vec_eq(&expected.into_buf(), &result.into_buf());
+    assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
 }

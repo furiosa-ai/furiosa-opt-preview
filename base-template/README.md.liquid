@@ -33,7 +33,7 @@ cargo +nightly-2026-05-01 binstall cargo-furiosa-opt
 ### Run a worked example
 
 ```bash
-# Host-side simulation (default; no NPU hardware required).
+# Host-side emulation (default; no NPU hardware required).
 cargo furiosa-opt run --release --bin gemm
 
 # Mapping/shape verification only — kernel body runs against phantom (empty) tensors.

@@ -1,35 +1,15 @@
-//! Stream Adapter: stream-side validation and transpose for [`super::contract_outer`].
+//! Stream Adapter: stream-side validation for the [`super`] `contract_outer` deferred fold.
 //!
-//! - [`verify_stream_adapter`]: checks that the input `Time`/`Packet` can be
-//!   expanded into the joint computation mapping (inner-flit packet match,
-//!   Time-divides-OutTime, broadcast axes confined to innermost positions).
-//! - [`contract_outer`]: transposes the stream tensor into the joint shape.
+//! [`verify_stream_adapter`] checks that the input `Time`/`Packet` can be expanded into the joint
+//! computation mapping (inner-flit packet match, Time-divides-OutTime, broadcast axes confined to
+//! innermost positions): the validity contract the deferred stash must still honor even though it no
+//! longer materializes the expansion.
 
 use furiosa_mapping::*;
 
-use crate::backend::Backend;
 use crate::scalar::Scalar;
-use crate::tensor::Tensor;
 
-pub(super) fn contract_outer<
-    D: Scalar,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    Lane: M,
-    Time: M,
-    Packet: M,
-    OutTime: M,
-    OutPacket: M,
-    B: Backend,
->(
-    inner: Tensor<D, m![{ Chip }, { Cluster }, { Slice }, { Time }, { Packet }], B>,
-) -> Tensor<D, m![{ Chip }, { Cluster }, { Slice }, { Lane }, { OutTime }, { OutPacket }], B> {
-    verify_stream_adapter::<D, Lane, Time, Packet, OutTime, OutPacket>();
-    inner.transpose(true)
-}
-
-/// Validates the stream-side mapping transformation for [`super::contract_outer`].
+/// Validates the stream-side mapping transformation for the [`super`] `contract_outer`.
 ///
 /// `OutPacket` collects `PackSize` flits (`∈ {1, 2}`), and packing absorbs the
 /// innermost `PackSize` cells of `Time` into the packet. The joint mapping is then:

@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Removed
+- Removed the `simulation` backend and `MathStorage` (its `ArrayD<Opt<D>>` mapping-expression interpreter). `emulation` is now the default host-side backend for a plain `cargo build`/`cargo test`.
+
 ## [v0.4.0]
 
 ### Changed

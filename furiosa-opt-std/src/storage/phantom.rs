@@ -83,9 +83,9 @@ impl<D: Scalar> PhantomStorage<D> {
         _identity: D,
         allow_broadcast: bool,
     ) -> Self {
-        // Structural parity check with the value backends (`MathStorage::reduce`): reject an
+        // Structural parity check with the value backends (`BufStorage::reduce`): reject an
         // unintended broadcast, then run the same containment carves so a non-contained / over-padded
-        // reduce is rejected at type-check time exactly as it is during simulation. The carves panic on
+        // reduce is rejected at type-check time exactly as it is at runtime. The carves panic on
         // a mismatch; their offsets are unused here since Typecheck moves no values.
         let src = Src::to_value();
         let dst = Dst::to_value();
@@ -97,6 +97,13 @@ impl<D: Scalar> PhantomStorage<D> {
         let inter = dst.carve(&broadcast);
         let _reduce_residue = src.carve(&inter);
         Self::new::<Dst>()
+    }
+
+    /// Backs [`crate::backend::Backend::contraction`]. Typecheck carries no values, so it neither
+    /// widens nor folds; `out` is a runtime value here (the deferred engine-level fold only has it as
+    /// one), so it is taken directly rather than rebuilt from a static mapping type.
+    pub(crate) fn contraction(&self, _rhs: &Self, out: &MappingValue) -> Self {
+        Self::new_from_axes(out.axes())
     }
 
     /// Backs [`crate::backend::Backend::scatter`].
@@ -132,13 +139,13 @@ impl<D: Scalar> PhantomStorage<D> {
     }
 
     /// Typecheck has no values, the input buffer is dropped regardless of its length. (Length is
-    /// still validated by [`crate::tensor::Tensor::from_buf`] in the wrapper, unlike the `Opt` path.)
-    pub(crate) fn from_buf(mapping: &MappingValue, _data: impl IntoIterator<Item = D>) -> Self {
+    /// still validated by [`crate::tensor::Tensor::from_vec`] in the wrapper, unlike the `Opt` path.)
+    pub(crate) fn from_vec(mapping: &MappingValue, _data: impl IntoIterator<Item = D>) -> Self {
         Self::new_from_axes(mapping.axes())
     }
 
     /// Typecheck carries no values.
-    pub(crate) fn into_buf(self, _mapping: &MappingValue) -> Vec<D> {
+    pub(crate) fn into_vec(self, _mapping: &MappingValue) -> Vec<D> {
         Vec::new()
     }
 

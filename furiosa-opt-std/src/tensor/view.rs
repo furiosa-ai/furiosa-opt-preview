@@ -115,6 +115,35 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
         }
     }
 
+    /// Reshapes the view to a different mapping `E2` over the same borrow, consuming `self`. A reshape
+    /// is a MOVE: a rewrap of the same mapping-agnostic storage borrow (no data copied, no second
+    /// handle), only the type-level mapping at `_marker` changes. Unlike [`Self::tile`] it neither
+    /// shifts `offset` nor validates a division; `offset` and `base_map` ride through unchanged.
+    /// Sound on every backend, whose storage is mapping-agnostic (bare buffer / codegen relabel).
+    ///
+    /// # Safety
+    ///
+    /// `E::SIZE == E2::SIZE` is asserted below; the genuine precondition is that `E` and `E2` lay the
+    /// elements out in the SAME physical (wire) order, so the relabel moves no data. Axis regrouping
+    /// (merge/split) preserves wire order and is valid; a permutation is not (use [`Self::transpose`]).
+    /// `base_map` is left at the base tensor's live-axis mapping, so on a tiled (non-empty `offset`)
+    /// view the relabel must preserve which axes are live for a later partial-view relayout to
+    /// resolve.
+    ///
+    /// Kept a *runtime* `assert_eq!`, not a `const` block: every
+    /// `{Dm,Hbm}TensorView(Mut)::reshape` delegates its `Element`-inclusive combined mapping here (see
+    /// [`Tensor::reshape`]'s matching note -- a `const` block trips at monomorphization regardless of
+    /// whether the call is ever reached at runtime).
+    pub unsafe fn reshape<E2: M>(self) -> TensorViewMut<'l, D, E2, B> {
+        assert_eq!(E::SIZE, E2::SIZE);
+        TensorViewMut {
+            inner: self.inner,
+            offset: self.offset,
+            base_map: self.base_map,
+            _marker: PhantomData,
+        }
+    }
+
     /// Transposes from a tensor. Delegates to [`Backend::transpose`], passing both storages and their
     /// live-axis maps (`base_map`) so a partial-view relayout can resolve each offset's wire base.
     pub fn transpose<'lsrc, Src: M>(&mut self, src: TensorView<'lsrc, D, Src, B>, allow_broadcast: bool) {
@@ -144,6 +173,35 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
             inner: self.inner,
             offset,
             base_map: self.base_map.clone(),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Reshapes the view to a different mapping `E2` over the same borrow, consuming `self`. A reshape
+    /// is a MOVE: a rewrap of the same mapping-agnostic storage borrow (no data copied, no second
+    /// handle), only the type-level mapping at `_marker` changes. Unlike [`Self::tile`] it neither
+    /// shifts `offset` nor validates a division; `offset` and `base_map` ride through unchanged.
+    /// Sound on every backend, whose storage is mapping-agnostic (bare buffer / codegen relabel).
+    ///
+    /// # Safety
+    ///
+    /// `E::SIZE == E2::SIZE` is asserted below; the genuine precondition is that `E` and `E2` lay the
+    /// elements out in the SAME physical (wire) order, so the relabel moves no data. Axis regrouping
+    /// (merge/split) preserves wire order and is valid; a permutation is not (use `transpose`).
+    /// `base_map` is left at the base tensor's live-axis mapping, so on a tiled (non-empty `offset`)
+    /// view the relabel must preserve which axes are live for a later partial-view relayout to
+    /// resolve.
+    ///
+    /// Kept a *runtime* `assert_eq!`, not a `const` block: every
+    /// `{Dm,Hbm}TensorView(Mut)::reshape` delegates its `Element`-inclusive combined mapping here (see
+    /// [`Tensor::reshape`]'s matching note -- a `const` block trips at monomorphization regardless of
+    /// whether the call is ever reached at runtime).
+    pub unsafe fn reshape<E2: M>(self) -> TensorView<'l, D, E2, B> {
+        assert_eq!(E::SIZE, E2::SIZE);
+        TensorView {
+            inner: self.inner,
+            offset: self.offset,
+            base_map: self.base_map,
             _marker: PhantomData,
         }
     }

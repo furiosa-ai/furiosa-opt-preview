@@ -10,7 +10,7 @@ async fn test_chip_slice() {
     let mut ctx = Context::acquire();
 
     let hbm_tensor: HbmTensor<i32, m![A / 4 % 4], m![A / 16, A % 4, B]> =
-        HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
+        HostTensor::<i32, m![A, B]>::from_vec((0..256 * 4096).collect::<Vec<_>>())
             .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma)
             .await;
 
@@ -21,7 +21,7 @@ async fn test_chip_slice() {
             .to_host::<m![A, B % 512, B / 2048]>(&mut ctx.pdma)
             .await
             .into_inner(),
-        Tensor::<_, m![A, B % 512, B / 2048], CurrentBackend>::from_buf(
+        Tensor::<_, m![A, B % 512, B / 2048], CurrentBackend>::from_vec(
             (0..256 * 1024)
                 .map(|x| {
                     let index_a = x / 1024;
@@ -49,7 +49,7 @@ async fn test_cluster_slice() {
     let mut ctx = Context::acquire();
 
     let hbm_tensor: HbmTensor<i32, m![A / 4 % 4], m![A / 16, A % 4, B]> =
-        HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
+        HostTensor::<i32, m![A, B]>::from_vec((0..256 * 4096).collect::<Vec<_>>())
             .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma)
             .await;
 
@@ -60,7 +60,7 @@ async fn test_cluster_slice() {
             .to_host::<m![A, B % 512, B / 1024]>(&mut ctx.pdma)
             .await
             .into_inner(),
-        Tensor::<_, m![A, B % 512, B / 1024], CurrentBackend>::from_buf(
+        Tensor::<_, m![A, B % 512, B / 1024], CurrentBackend>::from_vec(
             (0..256 * 2048)
                 .map(|x| {
                     let index_a = x / 2048;
@@ -88,7 +88,7 @@ async fn test_chip_shuffle() {
     let mut ctx = Context::acquire();
 
     let hbm_tensor: HbmTensor<i32, m![A / 4 % 4], m![A / 16, A % 4, B]> =
-        HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
+        HostTensor::<i32, m![A, B]>::from_vec((0..256 * 4096).collect::<Vec<_>>())
             .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma)
             .await;
 
@@ -96,7 +96,7 @@ async fn test_chip_shuffle() {
 
     assert_eq!(
         output.to_host::<m![A, B]>(&mut ctx.pdma).await.into_inner(),
-        Tensor::<_, m![A, B], CurrentBackend>::from_buf(
+        Tensor::<_, m![A, B], CurrentBackend>::from_vec(
             (0i32..256 * 4096)
                 .map(|x| {
                     let index_a_16 = x / 4096 / 16;
@@ -120,7 +120,7 @@ async fn test_cluster_shuffle() {
     let mut ctx = Context::acquire();
 
     let hbm_tensor: HbmTensor<i32, m![A / 4 % 4], m![A / 16, A % 4, B]> =
-        HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
+        HostTensor::<i32, m![A, B]>::from_vec((0..256 * 4096).collect::<Vec<_>>())
             .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma)
             .await;
 
@@ -128,7 +128,7 @@ async fn test_cluster_shuffle() {
 
     assert_eq!(
         output.to_host::<m![A, B]>(&mut ctx.pdma).await.into_inner(),
-        Tensor::<_, m![A, B], CurrentBackend>::from_buf(
+        Tensor::<_, m![A, B], CurrentBackend>::from_vec(
             (0i32..256 * 4096)
                 .map(|x| {
                     let index_a_4 = (x / 4096) / 4;

@@ -123,6 +123,15 @@ pub(crate) fn assert_reshape_dimension_preserved<Chip: M, Chip2: M, Cluster: M, 
     // mismatched `Element`; enable once those are fixed.
 }
 
+/// Asserts a HBM `reshape` preserves its whole `Chip` / `Element` partition (it relabels the
+/// mapping, it moves no data). HBM has no `Cluster`/`Slice` axis, and (unlike
+/// [`assert_reshape_dimension_preserved`]'s DM case) no existing example reshapes a mismatched
+/// `Element`, so both axes are checked here.
+pub(crate) fn assert_hbm_reshape_dimension_preserved<Chip: M, Chip2: M, Element: M, Element2: M>() {
+    assert_chip_preserved::<Chip, Chip2>();
+    assert_element_preserved::<Element, Element2>();
+}
+
 /// Asserts the `Chip` size is preserved across a transfer / reshape.
 fn assert_chip_preserved<Chip: M, Chip2: M>() {
     const { assert!(Chip::SIZE == Chip2::SIZE, "Chip size must be preserved") };
@@ -136,6 +145,11 @@ fn assert_cluster_preserved<Cluster: M, Cluster2: M>() {
 /// Asserts the `Slice` size is preserved across a transfer / reshape.
 fn assert_slice_preserved<Slice: M, Slice2: M>() {
     const { assert!(Slice::SIZE == Slice2::SIZE, "Slice size must be preserved") };
+}
+
+/// Asserts the `Element` size is preserved across a transfer / reshape.
+fn assert_element_preserved<Element: M, Element2: M>() {
+    const { assert!(Element::SIZE == Element2::SIZE, "Element size must be preserved") };
 }
 
 /// Byte size of `length` elements of a `bits`-wide scalar.

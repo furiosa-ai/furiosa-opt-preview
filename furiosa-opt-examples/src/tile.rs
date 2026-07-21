@@ -18,18 +18,7 @@ pub fn tile_simple(ctx: &mut Context, input: HbmTensorView<'_, i8, m![1], m![A, 
     output
 }
 
-/// Reads a DM tensor column-by-column where each column is selected by a *computed* tile offset
-/// `b = g * GROUP + j` rather than a bare loop variable, returning an identity copy of the input.
-/// Splits the `B = 32` axis into `GROUPS = 2` groups of `GROUP = 16`; for each `(g, j)` it reads
-/// `input[.., b]` (the load-bearing computed-offset tile) into a loop-local scratch sink.
-///
-/// The tiled view is **DM (SRAM)**, so the `for g { for j { .. } }` nest is unrolled at
-/// `visa -> lir` and the computed offset's loop-variable leaves are substituted and folded to the
-/// concrete column constant. (An HBM-tiled loop is *not* unrolled — it lowers as a kept VISA `Loop`
-/// whose offset must be a bare scalar variable — so a computed offset must tile an SRAM view.)
-///
-/// Exercises computed tile offsets through the vISA-to-LIR unroller. The matching end-to-end test
-/// remains ignored because of a downstream mutable-view write-back limitation documented there.
+/// Exercises computed tile offsets.
 #[device(chip = 1)]
 pub fn tile_computed_offset(
     ctx: &mut Context,
@@ -37,23 +26,19 @@ pub fn tile_computed_offset(
 ) -> HbmTensor<i8, m![1], m![A, B]> {
     const GROUPS: usize = 2;
     const GROUP: usize = 16;
+    const WINDOW: usize = 8;
     let input = input_hbm.to_dm::<m![A / 256], m![A % 256], m![B]>(&mut ctx.tdma);
     let mut output = unsafe { DmTensor::<i8, m![1], m![A / 256], m![A % 256], m![B]>::from_addr(0x3000) };
 
-    // Define the whole output up front (identity copy), so the result equals the input.
     input.view().to_dm_view(&mut ctx.tdma, output.view_mut());
 
-    // Read each column at the *computed* offset `b = g * GROUP + j` into a loop-local scratch tile.
-    // This is the read-side computed-offset pattern (a Q-head select `qh = kv_head * GQA_GROUP + g`):
-    // the GROUPS x GROUP iterations sweep every column, so the loop nest is SRAM-tiled and unrolled
-    // and the computed offset folds. The read is the load-bearing exercise; `scratch` (allocated
-    // inside the loop body, so the write target is in scope) is a per-iteration sink.
+    let mut scratch = unsafe { DmTensor::<i8, m![1], m![A / 256], m![A % 256], m![B]>::from_addr(0x6000) };
     for g in 0..GROUPS {
-        for j in 0..GROUP {
-            let b = g * GROUP + j;
-            let mut scratch = unsafe { DmTensor::<i8, m![1], m![A / 256], m![A % 256], m![1 # 32]>::from_addr(0x6000) };
-            let input_col = input.view().tile::<m![B], 1, m![B = 1 # 32]>(b);
-            input_col.to_dm_view(&mut ctx.tdma, scratch.view_mut());
+        for j in 0..(GROUP / WINDOW) {
+            let b = g * GROUP + j * WINDOW;
+            let input_col = input.view().tile::<m![B], 8, m![B = 8 # 32]>(b);
+            let scratch_col = scratch.view_mut().tile::<m![B], 8, m![B = 8 #{!} 32]>(b);
+            input_col.to_dm_view(&mut ctx.tdma, scratch_col);
         }
     }
 
@@ -118,8 +103,8 @@ pub fn tile_view_in_loop(ctx: &mut Context, input: &HbmTensor<i8, m![1], m![A, B
 /// (2) keep the inner nest's own locals OUT of the outer loop's `local_tensors` -- else the LIR
 /// loop-body completeness check rejects them ("contained in local_tensors but not referenced by any
 /// local instructions"). It is the in-repo regression for both facets of that fix; the matching
-/// `test_tile_view_in_nested_loop` is a lowering-only check (`build_lir`, not `compare_lir!`) because
-/// the Simulation backend's tile-shape validator does not accept this two-level HBM tile.
+/// `test_tile_view_in_nested_loop` is a lowering-only check (`build_lir`, not `compare_edf!`) because
+/// the host backend's tile-shape validator does not accept this two-level HBM tile.
 #[device(chip = 1)]
 pub fn tile_view_in_nested_loop(
     ctx: &mut Context,
@@ -158,7 +143,7 @@ pub fn tile_view_in_nested_loop(
 /// The write tile is a loop-body-local tensor whose writeback resolves against the
 /// returned `output` *after* the loop closes; dropping loop-body locals from the parent
 /// regresses this to a "no tensor T{n}" panic. Together this is a single runnable value
-/// oracle (`compare_lir!`) for both the loop-tensor re-merge and the chunk-axis fix.
+/// oracle (`compare_edf!`) for both the loop-tensor re-merge and the chunk-axis fix.
 #[device(chip = 1)]
 pub fn tile_chunked_output(
     ctx: &mut Context,
@@ -215,4 +200,36 @@ pub fn tile_with_larger_than_one_2(ctx: &mut Context, up_weight: &HbmTensor<bf16
     let up_weight = up_weight
         .view()
         .tile::<m![L / 256], 2, m![L / 256 = 2 #{!} 3, L %  256, A]>(1);
+}
+
+/// Swaps the disjoint 256-wide `L`-chunks `[0, 256)` and `[256, 512)` via a tile window > 1,
+/// copying the trailing chunk `[512, 768)` through unchanged.
+///
+/// `start` for a tile window > 1 is the raw `L`-axis offset of the window, not a chunk index scaled
+/// by the window length -- confirmed by the working `tile_window_commit` example, where window `32`
+/// at `start = 32` lands on `result[32..64]`, not some multiple of `32`. Every `start` here (`0`,
+/// `256`, `512`) is already the exact axis offset of a chunk boundary, so the three windows are
+/// disjoint and cover the whole `L` axis exactly once (unlike `tile_with_larger_than_one_1`, whose
+/// `start` values `0`/`1`/`2` are small overlapping raw offsets that reproduce PROG-539 and leave
+/// most of the output tensor unwritten).
+#[device(chip = 1)]
+pub fn tile_size_gt1_chunk_swap(
+    ctx: &mut Context,
+    input: &HbmTensor<bf16, Chip, m![L, A]>,
+) -> HbmTensor<bf16, Chip, m![L, A]> {
+    let mut output = unsafe { HbmTensor::<bf16, Chip, m![L, A]>::from_addr(0x3000) };
+
+    let input_slice = input.view().tile::<m![L], 256, m![L = 256 # 768, A]>(0);
+    let output_slice = output.view_mut().tile::<m![L], 256, m![L = 256 #{!} 768, A]>(256);
+    input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
+
+    let input_slice = input.view().tile::<m![L], 256, m![L = 256 # 768, A]>(256);
+    let output_slice = output.view_mut().tile::<m![L], 256, m![L = 256 #{!} 768, A]>(0);
+    input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
+
+    let input_slice = input.view().tile::<m![L], 256, m![L = 256 # 768, A]>(512);
+    let output_slice = output.view_mut().tile::<m![L], 256, m![L = 256 #{!} 768, A]>(512);
+    input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
+
+    output
 }

@@ -18,6 +18,35 @@ pub trait Scalar: ndarray::LinalgScalar + Debug + Clone + Copy + PartialEq + Num
         crate::constraints::size_in_bytes(Self::BITS, length)
     }
 
+    /// Reads element `i` from a packed byte image. This and [`store`](Self::store) are the sole place the
+    /// byte-multiple-vs-sub-byte distinction lives: the default is byte-centric (element `i` owns its own
+    /// `Self::BITS / 8`-byte run of the little-endian image), and only [`f4e2m1`] overrides it to unpack a
+    /// nibble. Every consumer above (the packed [`BufStorage`](crate::storage::BufStorage) buffer,
+    /// [`to_buf`](Self::to_buf)) drives elements through this pair and never branches on
+    /// width itself.
+    ///
+    /// The default is the whole in-memory value: for a byte-multiple width this is a direct copy of the
+    /// little-endian bytes, byte-identical to the raw `&[Self]` image (low element = low byte).
+    fn load(bytes: &[u8], i: usize) -> Self {
+        let n = std::mem::size_of::<Self>();
+        // SAFETY: `Self: Copy` with no padding-sensitive byte-image invariant, the same little-endian view
+        // `to_buf` / `Buffer::from_slice` take of a `&[Self]`. `bytes[i*n..(i+1)*n]` is a full
+        // `Self`-sized run, read unaligned into a `Self`.
+        unsafe { std::ptr::read_unaligned(bytes[i * n..(i + 1) * n].as_ptr() as *const Self) }
+    }
+
+    /// Writes element `i` into a packed byte image, the inverse of [`load`](Self::load) and the other half
+    /// of the sole width-branching site (see [`load`](Self::load)). The default lays the whole
+    /// little-endian value into element `i`'s `Self::BITS / 8`-byte run; only [`f4e2m1`] overrides it to
+    /// pack a nibble.
+    fn store(bytes: &mut [u8], i: usize, v: Self) {
+        let n = std::mem::size_of::<Self>();
+        // SAFETY: `Self: Copy` sized `n`; `&v` is a valid `Self`-sized little-endian image, copied into
+        // element `i`'s run (the exact inverse of `load`'s read).
+        let raw = unsafe { std::slice::from_raw_parts(&v as *const Self as *const u8, n) };
+        bytes[i * n..(i + 1) * n].copy_from_slice(raw);
+    }
+
     /// Returns the number of elements that fit in `bytes` bytes.
     ///
     /// Panics if the byte count does not evenly divide into whole elements.
@@ -28,6 +57,32 @@ pub trait Scalar: ndarray::LinalgScalar + Debug + Clone + Copy + PartialEq + Num
             "bytes must correspond to a whole number of elements"
         );
         (bytes * 8) / Self::BITS
+    }
+
+    /// Serializes `vals` into the dense physical DRAM byte image: the exact bytes that would sit
+    /// in HBM / DM for this element stream, sized [`size_in_bytes_from_length`](Self::size_in_bytes_from_length).
+    ///
+    /// This is the single reconciliation point between the type's *nominal* in-memory
+    /// representation (a sub-byte scalar such as [`f4e2m1`] / [`i4`] still occupies a whole byte in
+    /// a `&[Self]` slice) and its *physical* on-device layout, where the codes are dense-packed by
+    /// bit width (`Precision::FourBits` for the 4-bit scalars). For a byte-multiple width the packed
+    /// image IS the raw little-endian `&[Self]` bytes, so this default is one `memcpy` of the whole
+    /// slice (the whole-slice form of [`store`](Self::store)); a sub-byte width ([`f4e2m1`] / [`i4`])
+    /// overrides it to emit two codes per byte (low element in the low nibble, half the length), the
+    /// one place the even-count check lives (a byte-multiple width needs none). The bit-width stays
+    /// confined to these two arms, so every downstream consumer stays generic over `D: Scalar` and
+    /// reads the size this returns (the LIR executor's `ElementType::size_in_bytes_with_length`
+    /// computes the same `n * BITS` bit count), keeping the stream packed all the way to the fetch
+    /// adapter, the sole stage that unpacks it.
+    fn to_buf(vals: &[Self]) -> Vec<u8> {
+        // Byte-multiple: the packed image is the raw little-endian `&[Self]` bytes (the identical view
+        // `load` / `store` take of one element), so serialize the whole slice in a single memcpy rather
+        // than element-by-element. The sub-byte override below handles `f4e2m1` / `i4`.
+        //
+        // SAFETY: `Self: Copy` with no padding-sensitive byte-image invariant; `&[Self]` reinterpreted as
+        // bytes is the same little-endian image `store` lays down per element, over `size_of_val(vals)` bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(vals.as_ptr() as *const u8, std::mem::size_of_val(vals)) };
+        bytes.to_vec()
     }
 }
 
@@ -561,6 +616,23 @@ impl Num for i4 {
 // since a single 4-bit element is not byte-addressable.
 impl Scalar for i4 {
     const BITS: usize = 4;
+
+    /// Two nibbles per byte, low element in the low nibble; the packed nibble is a signed 4-bit code,
+    /// sign-extended back into `i4` on load. `from_i32` routes through `from_lsb`, which sign-extends
+    /// the low 4 bits into the `[-8, 7]` range.
+    fn load(bytes: &[u8], i: usize) -> Self {
+        i4::from_i32(get_nibble(bytes, i) as i32)
+    }
+
+    /// Packs element `i`'s low nibble into its half of byte `i / 2`, leaving the sibling nibble untouched.
+    fn store(bytes: &mut [u8], i: usize, v: i4) {
+        set_nibble(bytes, i, v.to_i32() as u8);
+    }
+
+    /// Two codes per byte (see [`store`](Self::store)); the sub-byte override of the memcpy default.
+    fn to_buf(vals: &[Self]) -> Vec<u8> {
+        pack_nibbles(vals)
+    }
 }
 
 impl i4 {
@@ -798,3 +870,251 @@ impl From<i9> for i32 {
 // `i4` is hand-written (not driven by `impl_scalar!`), so it needs the marker here;
 // the macro grants it to the byte-aligned dtypes, and the i5/i9 stagings intentionally lack it.
 impl MaterializableScalar for i4 {}
+
+/// 4-bit float in `e2m1` encoding (NVFP4 / MXFP4 element type).
+///
+/// One nibble in the low 4 bits of a `u8`; the upper 4 bits are ignored. The value
+/// set is `{0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6, -0}`, the hardware e2m1 value set.
+///
+/// The hardware decodes `f4e2m1` only through the Fetch Adapter's
+/// table-lookup stage (`fetch_table_lookup`): the nibble
+/// indexes a 16-entry table to [`f8e4m3`] (paired-key table, 4b->8b only; wider
+/// floats and the per-block scale come downstream). See the book chapter
+/// `computing-tensors/fetch-adapter.md` (the "Table Lookup" section).
+#[primitive(f4e2m1)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub struct f4e2m1(u8);
+
+/// e2m1 nibble -> `f8e4m3` bit pattern. A hand-maintained mirror of the hardware
+/// F4E2 -> F8E4 conversion table, kept in sync by hand since this crate cannot depend
+/// on the table's source; the `f4e2m1 -> f8e4m3` decode test pins every entry against
+/// the independent e2m1 value spec, so drift from either source is caught.
+const F4E2M1_TO_F8E4: [u8; 16] = [
+    0x00, 0x30, 0x38, 0x3c, 0x40, 0x44, 0x48, 0x4c, 0x80, 0xb0, 0xb8, 0xbc, 0xc0, 0xc4, 0xc8, 0xcc,
+];
+
+impl f4e2m1 {
+    /// The one canonicalizing constructor: masks to the low nibble (the upper 4
+    /// bits are discarded) so the `self.0 < 16` invariant holds. Every other
+    /// constructor routes here, keeping `to_f8e4m3`'s array index in range
+    /// (mirrors `i4::from_lsb`).
+    #[inline]
+    pub const fn from_bits(bits: u8) -> Self {
+        f4e2m1(bits & 0xf)
+    }
+
+    /// The stored nibble (always `< 16`).
+    pub const fn to_bits(self) -> u8 {
+        self.0
+    }
+
+    /// Decodes the nibble to `f8e4m3` via the 16-entry hardware table. Functional
+    /// model of the Fetch Adapter's table-lookup stage for e2m1 keys.
+    pub fn to_f8e4m3(self) -> f8e4m3 {
+        f8e4m3(F4E2M1_TO_F8E4[self.0 as usize])
+    }
+
+    /// Decodes to `f32` (through the `f8e4m3` table). `0x0` yields `0.0`, `0x8` yields `-0.0`.
+    pub fn to_f32(self) -> f32 {
+        self.to_f8e4m3().to_f32()
+    }
+
+    /// Nearest-code encode over the 16-entry value set, ties to the lower code.
+    /// Only exists to satisfy the `Num`/`Zero`/`One` bounds; cold path.
+    pub fn from_f32(v: f32) -> Self {
+        let mut best = 0u8;
+        let mut best_err = f32::INFINITY;
+        for code in 0..16u8 {
+            let err = (Self::from_bits(code).to_f32() - v).abs();
+            if err < best_err {
+                best_err = err;
+                best = code;
+            }
+        }
+        Self::from_bits(best)
+    }
+}
+
+impl From<f4e2m1> for f32 {
+    fn from(val: f4e2m1) -> Self {
+        val.to_f32()
+    }
+}
+
+/// Compares by decoded value, not raw nibble, so `0x0` and `0x8` (both zero) are
+/// equal, required for the `Zero` law `a.is_zero() == (a == zero())`.
+impl PartialEq for f4e2m1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_f32() == other.to_f32()
+    }
+}
+
+impl Zero for f4e2m1 {
+    fn zero() -> Self {
+        Self::from_bits(0x0)
+    }
+
+    fn is_zero(&self) -> bool {
+        self.0 == 0x0 || self.0 == 0x8
+    }
+}
+
+impl One for f4e2m1 {
+    fn one() -> Self {
+        Self::from_bits(0x2)
+    }
+}
+
+// Arithmetic on f4e2m1 exists only to satisfy the Num/Scalar bound; the HW never
+// does e2m1 math. Cold: round-trips through f32 and re-encodes via from_f32.
+impl Add<Self> for f4e2m1 {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Self::from_f32(self.to_f32() + rhs.to_f32())
+    }
+}
+
+impl Sub<Self> for f4e2m1 {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self {
+        Self::from_f32(self.to_f32() - rhs.to_f32())
+    }
+}
+
+impl Mul<Self> for f4e2m1 {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self {
+        Self::from_f32(self.to_f32() * rhs.to_f32())
+    }
+}
+
+impl Div<Self> for f4e2m1 {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self {
+        Self::from_f32(self.to_f32() / rhs.to_f32())
+    }
+}
+
+impl Rem<Self> for f4e2m1 {
+    type Output = Self;
+
+    fn rem(self, rhs: Self) -> Self {
+        Self::from_f32(self.to_f32() % rhs.to_f32())
+    }
+}
+
+impl Num for f4e2m1 {
+    type FromStrRadixErr = <f32 as Num>::FromStrRadixErr;
+
+    fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
+        Ok(Self::from_f32(f32::from_str_radix(str, radix)?))
+    }
+}
+
+impl rand::distr::Distribution<f4e2m1> for StandardUniform {
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> f4e2m1 {
+        f4e2m1::from_bits(rng.random_range(0..16u8))
+    }
+}
+
+impl Scalar for f4e2m1 {
+    const BITS: usize = 4;
+
+    /// Two nibbles per byte, low element in the low nibble (the dense on-device 4-bit layout).
+    fn load(bytes: &[u8], i: usize) -> Self {
+        f4e2m1::from_bits(get_nibble(bytes, i))
+    }
+
+    /// Packs element `i`'s nibble into its half of byte `i / 2`, leaving the sibling nibble untouched.
+    fn store(bytes: &mut [u8], i: usize, v: f4e2m1) {
+        set_nibble(bytes, i, v.to_bits());
+    }
+
+    /// Two codes per byte (see [`store`](Self::store)); the sub-byte override of the memcpy default.
+    fn to_buf(vals: &[Self]) -> Vec<u8> {
+        pack_nibbles(vals)
+    }
+}
+
+// `f4e2m1` is hand-written (not driven by `impl_scalar!`), so it needs the marker here too, same as
+// `i4` above -- a real, host-materializable device dtype (its `load`/`store`/`to_buf` pack exactly
+// its declared `BITS`, consistently, unlike `i5`/`i9`).
+impl MaterializableScalar for f4e2m1 {}
+
+/// Reads element `i`'s nibble from a two-codes-per-byte packed image: the low nibble of byte `i / 2`
+/// for an even `i`, the high nibble for an odd one. The shared sub-byte load primitive for [`i4`] and
+/// [`f4e2m1`].
+#[inline]
+fn get_nibble(bytes: &[u8], i: usize) -> u8 {
+    if i & 1 == 0 {
+        bytes[i / 2] & 0x0f
+    } else {
+        bytes[i / 2] >> 4
+    }
+}
+
+/// Packs `nib`'s low 4 bits into element `i`'s half of byte `i / 2`, leaving the sibling nibble
+/// untouched (a read-modify-write). The shared sub-byte store primitive for [`i4`] and [`f4e2m1`].
+#[inline]
+fn set_nibble(bytes: &mut [u8], i: usize, nib: u8) {
+    let b = &mut bytes[i / 2];
+    let nib = nib & 0x0f;
+    *b = if i & 1 == 0 {
+        (*b & 0xf0) | nib
+    } else {
+        (*b & 0x0f) | (nib << 4)
+    };
+}
+
+/// The sub-byte `to_buf`, shared by [`i4`] and [`f4e2m1`]: packs a 4-bit `&[D]` two codes per byte via
+/// [`Scalar::store`]. The even-count assert lives here (the sole sub-byte serializer): an odd count has no
+/// whole-byte layout.
+fn pack_nibbles<D: Scalar>(vals: &[D]) -> Vec<u8> {
+    assert!(
+        vals.len().is_multiple_of(2),
+        "a 4-bit stream needs an even (byte-aligned) element count, got {}",
+        vals.len(),
+    );
+    let mut out = vec![0u8; vals.len() / 2];
+    for (i, &v) in vals.iter().enumerate() {
+        D::store(&mut out, i, v);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A byte-multiple width serializes to its raw little-endian in-memory bytes, unchanged (the memcpy
+    /// default).
+    #[test]
+    fn to_buf_byte_aligned_is_passthrough() {
+        assert_eq!(i8::to_buf(&[1, -1, 127]), vec![1, 0xff, 127]);
+        assert_eq!(
+            f32::to_buf(&[1.0f32, 2.0]),
+            [1.0f32.to_le_bytes(), 2.0f32.to_le_bytes()].concat()
+        );
+        // The physical size is the `D::BITS` count in bytes.
+        assert_eq!(f32::to_buf(&[0.0; 5]).len(), f32::size_in_bytes_from_length(5));
+    }
+
+    /// A 4-bit scalar packs two codes per byte, low element in the low nibble; half the length (the
+    /// sub-byte override).
+    #[test]
+    fn to_buf_4bit_is_dense() {
+        // `f4e2m1` codes 0x1, 0x2 -> one byte 0x21; 0x3, 0x4 -> 0x43.
+        let vals: Vec<f4e2m1> = [0x1, 0x2, 0x3, 0x4].iter().map(|&b| f4e2m1::from_bits(b)).collect();
+        assert_eq!(f4e2m1::to_buf(&vals), vec![0x21, 0x43]);
+        assert_eq!(f4e2m1::to_buf(&vals).len(), f4e2m1::size_in_bytes_from_length(4));
+
+        // `i4` packs the same way (low nibble of each element).
+        let i4s: Vec<i4> = [1, 2, -1].iter().map(|&n| i4::from_i32(n)).collect();
+        assert_eq!(i4::to_buf(&i4s[..2]), vec![0x21]);
+    }
+}

@@ -11,7 +11,7 @@ use rand::rngs::SmallRng;
 async fn test_dm_relayout() {
     let mut ctx = Context::acquire();
     let hbm: HbmTensor<i32, m![1], m![A, B]> =
-        HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
+        HostTensor::<i32, m![A, B]>::from_vec((0..256 * 4096).collect::<Vec<_>>())
             .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
             .await;
     launch(dm_relayout, (&mut *ctx, &hbm)).await;
@@ -21,7 +21,7 @@ async fn test_dm_relayout() {
 async fn test_dm_pcopy() {
     let mut ctx = Context::acquire();
     let hbm: HbmTensor<i32, m![1], m![A, B]> =
-        HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
+        HostTensor::<i32, m![A, B]>::from_vec((0..256 * 4096).collect::<Vec<_>>())
             .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
             .await;
     launch(dm_pcopy, (&mut *ctx, &hbm)).await;
@@ -31,7 +31,7 @@ async fn test_dm_pcopy() {
 async fn test_dm_view_pcopy() {
     let mut ctx = Context::acquire();
     let hbm: HbmTensor<i32, m![1], m![A, B]> =
-        HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
+        HostTensor::<i32, m![A, B]>::from_vec((0..256 * 4096).collect::<Vec<_>>())
             .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
             .await;
     launch(dm_view_pcopy, (&mut *ctx, &hbm)).await;
@@ -41,7 +41,7 @@ async fn test_dm_view_pcopy() {
 async fn test_hbm_chip_shuffle() {
     let mut ctx = Context::acquire();
     let hbm: HbmTensor<i32, m![A / 4 % 4], m![A / 16, A % 4, B]> =
-        HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
+        HostTensor::<i32, m![A, B]>::from_vec((0..256 * 4096).collect::<Vec<_>>())
             .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma)
             .await;
     launch(hbm_chip_shuffle, (&mut *ctx, &hbm)).await;

@@ -1,11 +1,11 @@
 fn main() {
-    // Default `backend` cfg to "simulation" when no caller (RUSTFLAGS / .cargo/config) set one.
+    // Default `backend` cfg to "emulation" when no caller (RUSTFLAGS / .cargo/config) set one.
     // Cargo populates CARGO_CFG_BACKEND for build scripts when the cfg is set externally; an empty
     // or absent value means nothing was passed in.
     println!("cargo:rerun-if-env-changed=CARGO_CFG_BACKEND");
     let backend = std::env::var("CARGO_CFG_BACKEND").unwrap_or_default();
     if backend.is_empty() {
-        println!("cargo:rustc-cfg=backend=\"simulation\"");
+        println!("cargo:rustc-cfg=backend=\"emulation\"");
     }
 
     let target = std::env::var("TARGET").unwrap();

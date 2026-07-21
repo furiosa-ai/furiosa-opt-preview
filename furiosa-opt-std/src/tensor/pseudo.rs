@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 
 use furiosa_mapping::*;
 
-use crate::scalar::Scalar;
+use crate::scalar::{MaterializableScalar, Scalar};
 use crate::tensor::Tensor;
 
 // ANCHOR: buf_tensor_def
@@ -56,25 +56,31 @@ impl<D: Scalar, Buf: M> MemTensor<D, Buf> {
 
 impl<D: Scalar, Buf: M> MemTensor<D, Buf> {
     /// Constructs a `MemTensor` from a flat buffer in `Buf`-order.
-    /// Mirrors [`Tensor::from_buf`].
-    pub fn from_buf(data: impl IntoIterator<Item = D>) -> Self {
+    /// Mirrors [`Tensor::from_vec`].
+    pub fn from_vec(data: impl IntoIterator<Item = D>) -> Self {
         Self {
-            inner: Tensor::from_buf(data),
+            inner: Tensor::from_vec(data),
         }
     }
 
     /// Returns the underlying buffer as a flat `Vec<D>` in `Buf`-order, consuming the buffer.
-    /// Mirrors [`Tensor::into_buf`].
-    pub fn into_buf(self) -> Vec<D> {
-        self.inner.into_buf()
+    /// Mirrors [`Tensor::into_vec`].
+    pub fn into_vec(self) -> Vec<D>
+    where
+        D: MaterializableScalar,
+    {
+        self.inner.into_vec()
     }
 }
 
 impl<'l, D: Scalar, Time: M, Packet: M> StreamTensor<'l, D, Time, Packet> {
     /// Returns the stream contents as a flat `Vec<D>` in `(Time, Packet)`-order, consuming the stream.
-    /// Mirrors [`Tensor::into_buf`].
-    pub fn into_buf(self) -> Vec<D> {
-        self.inner.into_buf()
+    /// Mirrors [`Tensor::into_vec`].
+    pub fn into_vec(self) -> Vec<D>
+    where
+        D: MaterializableScalar,
+    {
+        self.inner.into_vec()
     }
 }
 
@@ -87,12 +93,12 @@ mod tests {
     fn read_identity_preserves_order() {
         axes![A = 2, B = 3];
 
-        let buf = MemTensor::<i32, m![A, B]>::from_buf(vec![10, 11, 12, 20, 21, 22]);
+        let buf = MemTensor::<i32, m![A, B]>::from_vec(vec![10, 11, 12, 20, 21, 22]);
         let stream = buf.read::<m![A], m![B]>();
 
         assert_eq!(
-            stream.into_buf(),
-            Tensor::<i32, m![A, B]>::from_buf(vec![10, 11, 12, 20, 21, 22]).into_buf()
+            stream.into_vec(),
+            Tensor::<i32, m![A, B]>::from_vec(vec![10, 11, 12, 20, 21, 22]).into_vec()
         );
     }
 
@@ -102,14 +108,14 @@ mod tests {
         axes![A = 2, B = 3];
 
         // buf in [A, B]-order: A=0 row, then A=1 row.
-        let buf = MemTensor::<i32, m![A, B]>::from_buf(vec![10, 11, 12, 20, 21, 22]);
+        let buf = MemTensor::<i32, m![A, B]>::from_vec(vec![10, 11, 12, 20, 21, 22]);
 
         // stream in [B, A]-order: B=0 column, then B=1 column, then B=2 column.
         let stream = buf.read::<m![B], m![A]>();
 
         assert_eq!(
-            stream.into_buf(),
-            Tensor::<i32, m![A, B]>::from_buf(vec![10, 20, 11, 21, 12, 22]).into_buf()
+            stream.into_vec(),
+            Tensor::<i32, m![A, B]>::from_vec(vec![10, 20, 11, 21, 12, 22]).into_vec()
         );
     }
 
@@ -119,14 +125,14 @@ mod tests {
         axes![A = 2, B = 3];
 
         let original = vec![10, 11, 12, 20, 21, 22];
-        let buf = MemTensor::<i32, m![A, B]>::from_buf(original.clone());
+        let buf = MemTensor::<i32, m![A, B]>::from_vec(original.clone());
 
         let stream = buf.read::<m![B], m![A]>();
 
-        let mut sink = MemTensor::<i32, m![A, B]>::from_buf(vec![0; 6]);
+        let mut sink = MemTensor::<i32, m![A, B]>::from_vec(vec![0; 6]);
         sink.write(stream);
 
-        assert_eq!(sink.into_buf(), Tensor::<i32, m![A, B]>::from_buf(original).into_buf());
+        assert_eq!(sink.into_vec(), Tensor::<i32, m![A, B]>::from_vec(original).into_vec());
     }
 
     /// Axis split read: `m![A % 2, A / 2]` reads `A`'s low bit then high bit.
@@ -135,12 +141,12 @@ mod tests {
         axes![A = 4];
 
         // A=[0, 1, 2, 3]. A % 2 outer, A / 2 inner visits: (0,0)=0, (0,1)=2, (1,0)=1, (1,1)=3.
-        let buf = MemTensor::<i32, m![A]>::from_buf(vec![0, 1, 2, 3]);
+        let buf = MemTensor::<i32, m![A]>::from_vec(vec![0, 1, 2, 3]);
         let stream = buf.read::<m![A % 2], m![A / 2]>();
 
         assert_eq!(
-            stream.into_buf(),
-            Tensor::<i32, m![A]>::from_buf(vec![0, 2, 1, 3]).into_buf()
+            stream.into_vec(),
+            Tensor::<i32, m![A]>::from_vec(vec![0, 2, 1, 3]).into_vec()
         );
     }
 }

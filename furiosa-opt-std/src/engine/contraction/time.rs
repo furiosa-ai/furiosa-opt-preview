@@ -21,7 +21,9 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M
         self,
     ) -> ContractTimeTensor<'l, T, D, Chip, Cluster, Slice, Lane, OutTime, Packet, B> {
         verify_contract_time(Time::to_value(), OutTime::to_value());
-        ContractTimeTensor::new(self.ctx, self.inner.reduce_add(), Time::to_value())
+        // Carry the deferred operands forward unreduced: the fused contraction at `contract_lane`
+        // performs this Time reduction too. This stage only re-types the carrier to `OutTime`.
+        ContractTimeTensor::new(self.ctx, self.inner, Time::to_value())
     }
 }
 // ANCHOR_END: contract_time_def

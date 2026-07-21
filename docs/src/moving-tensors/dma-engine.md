@@ -550,14 +550,15 @@ The other shuffle methods, and DMA pairs like HBM ↔ DM and DM ↔ DM in genera
 
 Scatter and gather move tensor elements at addresses computed from an index tensor rather than at fixed strides.
 
-`DmTensor::dma_scatter` writes DM values to HBM at indices given by an index tensor.
-`HbmTensor::dma_gather` reads HBM rows into DM at indices given by an index tensor.
+`DmTensor::dma_scatter` writes DM values to HBM rows chosen by an index tensor.
+`HbmTensor::dma_gather_scaled` and `HbmTensor::dma_gather_unscaled` read HBM rows into DM at rows chosen by an index tensor.
+The two gather variants differ only in where the index lives and how its values are read, described below.
 
 ```rust
 # extern crate furiosa_opt_std;
 # extern crate tokio;
 # use furiosa_opt_std::prelude::*;
-axes![K = 512, D = 128, C = 612];
+axes![K = 512, D = 128, C = 612, G = 512, CL = 2];
 
 fn scatter_minimal(
     ctx: &mut Context,
@@ -573,10 +574,25 @@ fn scatter_minimal(
 
 fn gather_minimal(
     table: &HbmTensor<bf16, m![1], m![K, D]>,
-    index: &HbmTensor<i32, m![1], m![C]>,
-    // `C = 612` has no valid Slice divisor, so partition by the payload `D` (a valid 128-slice).
-) -> DmTensor<bf16, m![1], m![1 # 2], m![D], m![C]> {
-    table.dma_gather::<m![1 # 2], m![D], m![C], _>(index)
+    index: &HbmTensor<i32, m![1], m![G]>,
+    // The gather axis itself partitions into Slice x Element (`G / 2 = 256`, a valid slice count)
+    // with `D` folded into the Element side alongside the `G % 2` remainder; `C = 612` (used above
+    // for the scatter cache) has no divisor landing on a valid 64 | 128 | 256 slice count, so the
+    // gather count here is the separate, slice-friendly `G` instead.
+) -> DmTensor<bf16, m![1], m![1 # 2], m![G / 2], m![G % 2, D]> {
+    table.dma_gather_scaled(index)
+}
+
+fn gather_unscaled(
+    ctx: &mut Context,
+    table: &HbmTensor<bf16, m![1], m![K, D]>,
+    // Raw row positions per cluster. The gather reads the index off SPM, so the kernel first
+    // stages it on-chip with `to_dm`; a real per-cluster (`CL`) partition avoids broadcast padding.
+    index: &HbmTensor<i32, m![1], m![CL, G]>,
+) -> DmTensor<bf16, m![1], m![CL], m![G / 2], m![G % 2, D]> {
+    let index_dm: DmTensor<i32, m![1], m![CL], m![G / 2], m![G % 2]> =
+        index.to_dm(&mut ctx.tdma);
+    table.dma_gather_unscaled(&index_dm)
 }
 #
 # #[tokio::main]
@@ -588,12 +604,16 @@ fn gather_minimal(
 #     let mut output_hbm = unsafe { HbmTensor::<bf16, m![1], m![C, D]>::from_addr(0) };
 # 
 #     scatter_minimal(&mut ctx, &data, &index, &mut output_hbm);
-#     gather_minimal(&data, &(HostTensor::<i32, m![C]>::zero().to_hbm(&mut ctx.pdma).await));
+#     gather_minimal(&data, &(HostTensor::<i32, m![G]>::zero().to_hbm(&mut ctx.pdma).await));
+#     let placed_index = &(HostTensor::<i32, m![CL, G]>::zero().to_hbm(&mut ctx.pdma).await);
+#     gather_unscaled(&mut ctx, &data, placed_index);
 # }
 ```
 
-Index values are byte offsets along the gather/scatter axis: to address row `r`, pass `r` times one row's byte size (its element count times `size_of::<D>()`; e.g. `128 * 2 = 256` for a 128-wide `bf16` row).
-The raw, SPM-resident index variants (`dma_gather_unscaled` / `dma_scatter_unscaled`) are not yet implemented.
+The scaled variants (`dma_gather_scaled`, `dma_scatter`) take the index from an `HbmTensor` in DRAM and read its values as byte offsets along the gather/scatter axis: to address row `r`, pass `r` times one row's byte size (its element count times the element's byte size; e.g. `128 * 2 = 256` for a 128-wide `bf16` row).
+`dma_gather_unscaled` instead takes an on-chip `DmTensor` index, staged from DRAM with `to_dm`, and reads its values as raw row positions, for indices computed on-chip such as paged-attention block tables.
+Note a side effect: the seed reads the index off SPM, so the compiler emits an extra DM to SPM DMA to stage the index (SPM is the on-chip tier noted above, not yet a user-facing type).
+Its scatter counterpart `dma_scatter_unscaled` is not yet implemented.
 
 ## PCIe DMA
 

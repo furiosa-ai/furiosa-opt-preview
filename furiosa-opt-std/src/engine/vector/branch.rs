@@ -301,7 +301,7 @@ pub(crate) fn apply_branch_config<D: VeScalar, Mapping: M>(
 ) -> Tensor<u8, Mapping> {
     match config {
         TagMode::Zero => data.map(|_| 0u8),
-        TagMode::AxisToggle { axis } => Tensor::<u8, Mapping>::from_buf(axis_toggle_pattern::<Mapping>(axis)),
+        TagMode::AxisToggle { axis } => Tensor::<u8, Mapping>::from_vec(axis_toggle_pattern::<Mapping>(axis)),
         TagMode::ValidCount => todo!(),
         TagMode::Vrf => todo!("TagMode::Vrf: load execution IDs from VRF (GenBranch::WithLog)"),
         TagMode::Comparison(cmps) => data.map(|x| {

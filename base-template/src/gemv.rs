@@ -31,8 +31,8 @@ mod tests {
         let vector_hbm = vector.to_hbm(&mut ctx.pdma).await;
 
         // Reference: y[i] = sum_j matrix[i, j] * vector[j] in f32, rounded to bf16.
-        let mat_buf: Vec<bf16> = matrix.into_buf();
-        let vec_buf: Vec<bf16> = vector.into_buf();
+        let mat_buf: Vec<bf16> = matrix.into_vec();
+        let vec_buf: Vec<bf16> = vector.into_vec();
         let expected: Vec<bf16> = mat_buf
             .chunks(J::SIZE)
             .map(|row| {
@@ -47,7 +47,7 @@ mod tests {
 
         let out_hbm = launch(gemv_kernel, (&mut ctx, &matrix_hbm, &vector_hbm)).await;
 
-        let actual: Vec<bf16> = out_hbm.to_host::<m![I]>(&mut ctx.pdma).await.into_buf();
+        let actual: Vec<bf16> = out_hbm.to_host::<m![I]>(&mut ctx.pdma).await.into_vec();
         for (i, (&e, &a)) in expected.iter().zip(&actual).enumerate() {
             let diff = (f32::from(a) - f32::from(e)).abs();
             let tol = (0.02 * f32::from(e).abs()).max(0.5);

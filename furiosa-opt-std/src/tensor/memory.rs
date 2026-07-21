@@ -15,7 +15,7 @@ use crate::context::*;
 use crate::engine::vector::scalar::VeScalar;
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
-use crate::tensor::{BufferConvertError, *};
+use crate::tensor::*;
 
 /// Address.
 ///
@@ -137,19 +137,26 @@ impl Display for TrfAddress {
 }
 
 /// Tensor stored in host memory.
+///
+/// `D: MaterializableScalar`, not just `Scalar`: a `HostTensor` is exactly the "host... carrier" the
+/// bound's own doc names, so a non-materializable staging type (`i5`/`i9`) can never even be
+/// CONSTRUCTED as one -- rejected at the type's own definition, not left to be caught only if some
+/// particular method (`into_vec`, etc.) happens to touch the unsound whole-buffer path. `i5`/`i9`'s
+/// entire legitimate lifetime is between `fetch_zero_point_sub` and `contract_outer`, both
+/// engine-internal (`TuTensor`/bare `Tensor`), never through this public host-facing wrapper.
 #[primitive(HostTensor)]
 #[derive(Debug, Clone)]
-pub struct HostTensor<D: Scalar, Element: M, B: Backend = CurrentBackend> {
+pub struct HostTensor<D: MaterializableScalar, Element: M, B: Backend = CurrentBackend> {
     inner: Tensor<D, Element, B>,
 }
 
-impl<D: Scalar, Element: M, B: Backend> From<Tensor<D, Element, B>> for HostTensor<D, Element, B> {
+impl<D: MaterializableScalar, Element: M, B: Backend> From<Tensor<D, Element, B>> for HostTensor<D, Element, B> {
     fn from(inner: Tensor<D, Element, B>) -> Self {
         Self { inner }
     }
 }
 
-impl<D: Scalar, Element: M, B: Backend> HostTensor<D, Element, B> {
+impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> {
     /// Logical shape (mapping) of this tensor.
     pub type Mapping = Element;
 
@@ -159,8 +166,15 @@ impl<D: Scalar, Element: M, B: Backend> HostTensor<D, Element, B> {
 
     /// Creates a tensor from an initialized buffer. Panics if the buffer length does not match the
     /// mapping size.
-    pub fn from_buf(data: impl IntoIterator<Item = D>) -> Self {
-        Tensor::from_buf(data).into()
+    pub fn from_vec(data: impl IntoIterator<Item = D>) -> Self {
+        Tensor::from_vec(data).into()
+    }
+
+    /// Creates a tensor from a pre-packed device byte image ([`Self::to_buf`]'s inverse), stored as-is.
+    /// Contrast [`Self::from_vec`], which packs logical values; pre-packed fp4 weights come through here
+    /// to avoid a decode + re-pack round-trip. Panics on a byte-length mismatch.
+    pub fn from_buf(buf: Vec<u8>) -> Self {
+        Tensor::from_buf(buf).into()
     }
 
     /// Stages this host tensor into a fresh HBM region assigned by the runtime allocator.
@@ -176,18 +190,17 @@ impl<D: Scalar, Element: M, B: Backend> HostTensor<D, Element, B> {
         self.inner
     }
 
-    /// Returns the tensor data as a flat `Vec<D>`, consuming the tensor. On Simulation, panics if any
-    /// slot is `Opt::Uninit`.
-    pub fn into_buf(self) -> Vec<D> {
-        self.inner.into_buf()
+    /// Returns the tensor data as a flat `Vec<D>`, consuming the tensor.
+    pub fn into_vec(self) -> Vec<D> {
+        self.inner.into_vec()
     }
 }
 
 /// Host-side `HostTensor` constructors. Bound to `Backend`; the value-iterating methods (`zero`,
-/// `rand`) and `from_buf` / `from_safetensors` all bottom out in `Tensor::from_buf`, which
+/// `rand`) and `from_vec` / `from_safetensors` all bottom out in `Tensor::from_vec`, which
 /// `BufStorage` implements as a real `Vec<D>` fill, so those work on Npu / Emulation host-side
 /// staging too.
-impl<D: Scalar, Element: M, B: Backend> HostTensor<D, Element, B> {
+impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> {
     /// Creates a tensor filled with zeros.
     pub fn zero() -> Self
     where
@@ -233,27 +246,9 @@ impl<D: Scalar, Element: M, B: Backend> HostTensor<D, Element, B> {
         if view.data().len() != Element::SIZE * stride {
             return Err(safetensors::SafeTensorError::TensorInvalidInfo);
         }
-        Ok(Tensor::from_buf(view.data().chunks_exact(stride).map(D::from_le_bytes)).into())
-    }
-}
-
-/// `Opt`-buffer constructors and serializers, Simulation-only (`Opt<D>` is a Simulation concept).
-/// Mirrors the equivalent `Tensor` surface, delegating to the inner `Tensor<…, Simulation>`.
-impl<D: Scalar, Element: M> HostTensor<D, Element, crate::backend::Simulation> {
-    /// Creates a tensor from a logical `Opt<D>` buffer.
-    pub fn from_opt_buf(data: impl IntoIterator<Item = Opt<D>>) -> Self {
-        Tensor::from_opt_buf(data).into()
-    }
-
-    /// Creates a tensor from a logical `Opt<D>` buffer, returning an error if the input cannot
-    /// be lowered.
-    pub fn try_from_opt_buf(data: impl IntoIterator<Item = Opt<D>>) -> Result<Self, BufferConvertError> {
-        Tensor::try_from_opt_buf(data).map(Into::into)
-    }
-
-    /// Returns the tensor data as a flat logical `Opt<D>` buffer in physical layout order.
-    pub fn to_buf_opt(&self) -> Vec<Opt<D>> {
-        self.inner.to_buf_opt()
+        // The view's LE bytes ARE the packed device image for a byte-multiple `D`, so store them directly
+        // through `from_buf` rather than decoding each element and re-packing.
+        Ok(Tensor::from_buf(view.data().to_vec()).into())
     }
 }
 
@@ -322,22 +317,36 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     /// Converts to host tensor.
     ///
     /// TODO: we should optionally receive the intermediate stream's mapping expression.
-    pub async fn to_host<Element2: M>(&self, _dma: &mut DmaContext<{ Dma::Pcie }>) -> HostTensor<D, Element2, B> {
+    pub async fn to_host<Element2: M>(&self, _dma: &mut DmaContext<{ Dma::Pcie }>) -> HostTensor<D, Element2, B>
+    where
+        D: MaterializableScalar,
+    {
         B::from_hbm(self).await
     }
 
-    /// Returns the tensor data as a flat `Vec<D>` in HBM byte-layout order
-    /// (`m![Chip, Element]`, innermost axis contiguous), consuming the tensor. This is the raw byte view as it would
-    /// sit in HBM memory, suitable for feeding the LIR executor.
-    pub fn into_buf(self) -> Vec<D> {
-        self.inner.into_buf()
+    /// Returns the tensor data as a flat logical `Vec<D>` in `m![Chip, Element]` axis order, one `D`
+    /// per logical element. For a sub-byte scalar this is *not* the packed byte image (see
+    /// [`Self::to_buf`]).
+    pub fn into_vec(self) -> Vec<D>
+    where
+        D: MaterializableScalar,
+    {
+        self.inner.into_vec()
     }
 
-    /// Same HBM byte-layout buffer as [`Self::into_buf`], read through a shared borrow (clones the
-    /// underlying storage). For callers that read an input they still hold, e.g. the `compare_lir!`
-    /// harness, which feeds the same HBM input to both VISA `launch` and the LIR executor.
-    pub fn to_buf(&self) -> Vec<D> {
-        self.inner.clone().into_buf()
+    /// Returns the dense packed byte image in `m![Chip, Element]` axis order, sized
+    /// [`Scalar::size_in_bytes_from_length`]. A 4-bit scalar ([`f4e2m1`] / [`i4`]) packs two codes per
+    /// byte, so the result is half the element count; byte-aligned scalars pass through unchanged. This
+    /// is the buffer the LIR executor consumes and the `compare_edf!` harness feeds as the LIR input.
+    pub fn to_buf(&self) -> Vec<u8>
+    where
+        D: MaterializableScalar,
+    {
+        // Emulation / Npu move the already-packed bytes out; Simulation re-packs. Both agree because
+        // they share the `Scalar::store` packing primitive.
+        let packed = self.inner.clone().into_buf();
+        debug_assert_eq!(packed.len(), D::size_in_bytes_from_length(Pair::<Chip, Element>::SIZE));
+        packed
     }
 }
 
@@ -354,7 +363,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     }
 }
 
-impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> {
+impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> {
     /// Creates an immutable view of the tensor.
     #[primitive(HbmTensor::view)]
     pub fn view<'l>(&'l self) -> HbmTensorView<'l, D, Chip, Element, B> {
@@ -394,8 +403,8 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     /// axis: to gather row `r`, pass `r` times one row's byte size (its element count times
     /// `size_of::<D>()`; e.g. `128 * 2 = 256` for a 128-wide `bf16` row). Gathering with a raw,
     /// SPM-resident index is [`Self::dma_gather_unscaled`].
-    #[primitive(HbmTensor::dma_gather)]
-    pub fn dma_gather<Cluster2: M, Slice2: M, Element2: M, Element3: M>(
+    #[primitive(HbmTensor::dma_gather_scaled)]
+    pub fn dma_gather_scaled<Cluster2: M, Slice2: M, Element2: M, Element3: M>(
         &self,
         index: &HbmTensor<i32, Chip, Element3, B>,
     ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
@@ -404,9 +413,9 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
         output
     }
 
-    /// Gather DRAM rows into SRAM at `address`. See [`Self::dma_gather`].
-    #[primitive(HbmTensor::dma_gather_at)]
-    pub fn dma_gather_at<Cluster2: M, Slice2: M, Element2: M, Element3: M>(
+    /// Gather DRAM rows into SRAM at `address`. See [`Self::dma_gather_scaled`].
+    #[primitive(HbmTensor::dma_gather_scaled_at)]
+    pub fn dma_gather_scaled_at<Cluster2: M, Slice2: M, Element2: M, Element3: M>(
         &self,
         index: &HbmTensor<i32, Chip, Element3, B>,
         address: Address,
@@ -419,14 +428,18 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     /// Gather DRAM rows into SRAM at positions given by an SPM-resident (on-chip) index,
     /// interpreting index values as raw row positions.
     ///
-    /// Complements [`Self::dma_gather`]'s DRAM byte-offset index, for indices computed
-    /// on-chip. Not yet implemented.
-    // TODO: register the `DmTensor` index as the unscaled indirect-DMA SPM index tensor.
+    /// Complements [`Self::dma_gather_scaled`] for indices computed on-chip (paged-attention block
+    /// tables, unscaled embedding lookups): the index is an SPM-resident `DmTensor` rather than
+    /// an `HbmTensor` in DRAM, and its values are raw row positions rather than the byte offsets
+    /// [`Self::dma_gather_scaled`] expects.
+    #[primitive(HbmTensor::dma_gather_unscaled)]
     pub fn dma_gather_unscaled<IdxCluster: M, IdxSlice: M, IdxElement: M, Cluster2: M, Slice2: M, Element2: M>(
         &self,
-        _index: &DmTensor<i32, Chip, IdxCluster, IdxSlice, IdxElement, B>,
+        index: &DmTensor<i32, Chip, IdxCluster, IdxSlice, IdxElement, B>,
     ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
-        todo!("unscaled dma_gather (SPM-resident raw index) is not implemented yet")
+        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::new(Tensor::uninit(), None);
+        self.inner.gather::<_, _>(&mut output.inner, &index.inner, false);
+        output
     }
 }
 
@@ -463,6 +476,25 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
             Element2,
         >(DMA_SRAM_WRITE_WIDTH);
         DmTensor::new(self.inner.transpose(true), Some(address))
+    }
+
+    /// Reshapes the tensor to a different mapping at the same HBM address, consuming `self`.
+    /// The HBM analogue of [`DmTensor::reshape`]; both delegate to [`Tensor::reshape`].
+    ///
+    /// # Safety
+    ///
+    /// The per-level sizes (`Chip::SIZE == Chip2::SIZE`, `Element`) are asserted at compile time below
+    /// (see [`constraints::assert_hbm_reshape_dimension_preserved`]); the genuine precondition is
+    /// [`Tensor::reshape`]'s: the old and new mappings must lay the elements out in the SAME physical
+    /// (wire) order, so the relabel moves no data. Axis regrouping (merge/split) preserves wire order
+    /// and is valid; a permutation is not (use a transpose). Equal sizes do not guarantee this.
+    /// Consuming `self` is the safety contract made explicit: the old-shaped handle cannot survive to
+    /// alias the same HBM bytes under a conflicting mapping.
+    #[primitive(HbmTensor::reshape)]
+    pub unsafe fn reshape<Chip2: M, Element2: M>(self) -> HbmTensor<D, Chip2, Element2, B> {
+        constraints::assert_hbm_reshape_dimension_preserved::<Chip, Chip2, Element, Element2>();
+        let reshaped = unsafe { self.inner.reshape::<m![{ Chip2 }, { Element2 }]>() };
+        HbmTensor::new(reshaped, self.address)
     }
 }
 // ANCHOR_END: dma_impl
@@ -559,21 +591,53 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         }
     }
 
-    /// Returns the view data as a flat `Vec<D>` in HBM byte-layout order
-    /// (`m![Chip, Element]`, innermost axis contiguous). Reads the view into a temporary tensor
-    /// and serializes that. Borrows, so the view stays usable (e.g. read as a
-    /// LIR input, then passed to `launch`).
-    pub fn to_buf(&self) -> Vec<D> {
-        self.inner.clone().read().into_buf()
+    /// Reshapes the view at the same HBM address, consuming `self`. A reshape is a MOVE: a zero-copy
+    /// rewrap of the same borrow (see [`TensorView::reshape`]). Sound on every backend.
+    ///
+    /// # Safety
+    ///
+    /// `Chip`/`Element` sizes asserted at compile time (see
+    /// [`constraints::assert_hbm_reshape_dimension_preserved`]); precondition is same-wire-order
+    /// (regroup valid, permutation not). Consuming `self` makes the move explicit.
+    #[primitive(HbmTensorView::reshape)]
+    pub unsafe fn reshape<Chip2: M, Element2: M>(self) -> HbmTensorView<'l, D, Chip2, Element2, B> {
+        constraints::assert_hbm_reshape_dimension_preserved::<Chip, Chip2, Element, Element2>();
+        HbmTensorView {
+            inner: unsafe { self.inner.reshape::<m![{ Chip2 }, { Element2 }]>() },
+            address: self.address,
+        }
     }
 
-    /// [`Self::to_buf`] for owned callers; moves the view straight into `read` (no view clone).
-    pub fn into_buf(self) -> Vec<D> {
-        self.inner.read().into_buf()
+    /// Returns the view data as a flat `Vec<D>` in `m![Chip, Element]` axis order. Reads the view
+    /// into a temporary tensor and serializes that. Borrows, so the view stays usable (e.g. read as
+    /// a LIR input, then passed to `launch`).
+    pub fn to_vec(&self) -> Vec<D>
+    where
+        D: MaterializableScalar,
+    {
+        self.inner.clone().read().into_vec()
+    }
+
+    /// [`Self::to_vec`] for owned callers; moves the view straight into `read` (no view clone).
+    pub fn into_vec(self) -> Vec<D>
+    where
+        D: MaterializableScalar,
+    {
+        self.inner.read().into_vec()
+    }
+
+    /// Dense packed byte image of the view; see [`HbmTensor::to_buf`].
+    pub fn to_buf(&self) -> Vec<u8>
+    where
+        D: MaterializableScalar,
+    {
+        // The `read` tensor's buffer already IS the packed device image on Emulation / Npu, so
+        // `into_buf` moves it out directly; Simulation re-packs. Both share `Scalar::store`.
+        self.inner.clone().read().into_buf()
     }
 }
 
-impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, Element, B> {
+impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, Element, B> {
     /// Converts to data memory tensor.
     #[primitive(HbmTensorView::to_dm)]
     pub fn to_dm<Cluster: M, Slice: M, Element2: M>(
@@ -675,6 +739,24 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
             address: self.address,
         }
     }
+
+    /// Reshapes the mutable view at the same HBM address, consuming `self`. A reshape is a MOVE: a
+    /// zero-copy rewrap of the same `&mut` borrow (see [`TensorViewMut::reshape`]). Sound on every
+    /// backend.
+    ///
+    /// # Safety
+    ///
+    /// `Chip`/`Element` sizes asserted at compile time (see
+    /// [`constraints::assert_hbm_reshape_dimension_preserved`]); precondition is same-wire-order
+    /// (regroup valid, permutation not). Consuming `self` makes the move explicit.
+    #[primitive(HbmTensorViewMut::reshape)]
+    pub unsafe fn reshape<Chip2: M, Element2: M>(self) -> HbmTensorViewMut<'l, D, Chip2, Element2, B> {
+        constraints::assert_hbm_reshape_dimension_preserved::<Chip, Chip2, Element, Element2>();
+        HbmTensorViewMut {
+            inner: unsafe { self.inner.reshape::<m![{ Chip2 }, { Element2 }]>() },
+            address: self.address,
+        }
+    }
 }
 
 /// Tensor stored in data memory.
@@ -771,7 +853,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     /// (data - Chip).divide(K) = [N, V]
     /// ```
     ///
-    /// Index values are byte offsets along the scatter axis (the dual of [`HbmTensor::dma_gather`]):
+    /// Index values are byte offsets along the scatter axis (the dual of [`HbmTensor::dma_gather_scaled`]):
     /// to write row `r`, pass `r` times one row's byte size (its element count times
     /// `size_of::<D>()`; e.g. `128 * 2 = 256` for a 128-wide `bf16` row). Scattering with a raw,
     /// SPM-resident index is [`Self::dma_scatter_unscaled`].
@@ -876,7 +958,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
         DmTensor::new(self.inner.transpose(true), Some(address))
     }
 
-    /// Reshapes the tensor to a different mapping at the same address. Delegates to
+    /// Reshapes the tensor to a different mapping at the same address, consuming `self`. Delegates to
     /// [`Tensor::reshape`].
     ///
     /// # Safety
@@ -885,9 +967,11 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     /// below; the genuine precondition is [`Tensor::reshape`]'s: the old and new DM mappings must lay
     /// the elements out in the SAME physical (wire) order, so the relabel moves no data. Axis
     /// regrouping is valid; a permutation is not (use a transpose). Equal sizes do not guarantee this.
+    /// Consuming `self` makes the move explicit: reshape is a MOVE (neither alias nor copy), so no
+    /// old-shaped handle survives to alias the same bytes under a conflicting mapping.
     #[primitive(DmTensor::reshape)]
     pub unsafe fn reshape<Chip2: M, Cluster2: M, Slice2: M, Element2: M>(
-        &self,
+        self,
     ) -> DmTensor<D, Chip2, Cluster2, Slice2, Element2, B> {
         constraints::assert_reshape_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
         let reshaped = unsafe {
@@ -1015,6 +1099,28 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         DmTensorView { inner }
     }
 
+    /// Reshapes the view over the same borrow, consuming `self`. A reshape is a MOVE: a zero-copy
+    /// rewrap of the same borrow (see [`TensorView::reshape`]). Sound on every backend.
+    ///
+    /// # Safety
+    ///
+    /// `Chip`/`Cluster`/`Slice` asserted at compile time, matching [`DmTensor::reshape`] (see
+    /// [`constraints::assert_reshape_dimension_preserved`] -- `Element` isn't checked there either,
+    /// per its own TODO: some current examples reshape with a mismatched `Element`). Precondition is
+    /// same-wire-order (regroup within `Element` valid; a permutation is not, use a transpose).
+    #[primitive(DmTensorView::reshape)]
+    pub unsafe fn reshape<Chip2: M, Cluster2: M, Slice2: M, Element2: M>(
+        self,
+    ) -> DmTensorView<'l, D, Chip2, Cluster2, Slice2, Element2, B> {
+        constraints::assert_reshape_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
+        DmTensorView {
+            inner: unsafe {
+                self.inner
+                    .reshape::<m![{ Chip2 }, { Cluster2 }, { Slice2 }, { Element2 }]>()
+            },
+        }
+    }
+
     /// Redistributes data across clusters by DMA (DM ↔ DM): `shuffle_pattern[target] = source`
     /// copies the source cluster to the target cluster — e.g. `[1, 0]` swaps clusters 0 and 1.
     #[primitive(DmTensorView::dm_cluster_shuffle)]
@@ -1097,6 +1203,28 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     ) -> DmTensorViewMut<'l, D, Chip, Cluster, Slice, Element2, B> {
         let inner = self.inner.tile::<Index, _, LEN>(start);
         DmTensorViewMut { inner }
+    }
+
+    /// Reshapes the mutable view over the same `&mut` borrow, consuming `self`. A reshape is a MOVE: a
+    /// zero-copy rewrap of the same borrow (see [`TensorViewMut::reshape`]). Sound on every backend.
+    ///
+    /// # Safety
+    ///
+    /// `Chip`/`Cluster`/`Slice` asserted at compile time, matching [`DmTensor::reshape`] (see
+    /// [`constraints::assert_reshape_dimension_preserved`] -- `Element` isn't checked there either,
+    /// per its own TODO: some current examples reshape with a mismatched `Element`). Precondition is
+    /// same-wire-order (regroup within `Element` valid; a permutation is not, use a transpose).
+    #[primitive(DmTensorViewMut::reshape)]
+    pub unsafe fn reshape<Chip2: M, Cluster2: M, Slice2: M, Element2: M>(
+        self,
+    ) -> DmTensorViewMut<'l, D, Chip2, Cluster2, Slice2, Element2, B> {
+        constraints::assert_reshape_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
+        DmTensorViewMut {
+            inner: unsafe {
+                self.inner
+                    .reshape::<m![{ Chip2 }, { Cluster2 }, { Slice2 }, { Element2 }]>()
+            },
+        }
     }
 }
 
@@ -1242,7 +1370,55 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Lane: M, Packet: M, B: B
 mod tests {
     use super::*;
 
+    use crate::backend::{Emulation, Typecheck};
     use crate::scalar::Scalar;
+
+    /// Builds the shared `dma_gather_unscaled` fixture for backend `B`: an HBM table `[W=8, V=2]`
+    /// (row `r` = `[10r, 10r + 1]`) and an SPM-resident (`DmTensor`) block-table index of `K=64`
+    /// raw row positions. The index is a fixed non-monotonic permutation of `0..W` tiled across
+    /// the `K` rows, so the gathered value cannot be reproduced from the destination position
+    /// alone (this pins that the index is actually read) nor by assuming ascending indices.
+    /// Returns the gathered output and the hand-derived oracle. `K=64` is the smallest legal
+    /// `Slice` (see `SLICE_SIZES`).
+    fn run_dma_gather_unscaled<B: Backend>() -> (Vec<i32>, Vec<i32>) {
+        axes![W = 8, V = 2, K = 64];
+        // Non-monotonic, hits row 0 and the max row W-1, and is decoupled from the position `k`.
+        const PERM: [i32; 8] = [3, 7, 1, 5, 0, 6, 2, 4];
+        let row = |k: usize| PERM[k % W::SIZE];
+
+        let table_buf: Vec<i32> = (0..W::SIZE as i32).flat_map(|r| [10 * r, 10 * r + 1]).collect();
+        let idx_buf: Vec<i32> = (0..K::SIZE).map(row).collect();
+        let expected: Vec<i32> = (0..K::SIZE).flat_map(|k| [10 * row(k), 10 * row(k) + 1]).collect();
+
+        let table = HbmTensor::<i32, m![1], m![W, V], B>::new(Tensor::from_vec(table_buf), 0);
+        // The index lives in DM (SPM): `Slice = K`, the residue axis the gather iterates.
+        let index = DmTensor::<i32, m![1], m![1], m![K], m![1], B>::new(Tensor::from_vec(idx_buf), None);
+
+        let output: DmTensor<i32, m![1], m![1], m![K], m![V], B> = table.dma_gather_unscaled(&index);
+        (output.inner.into_vec(), expected)
+    }
+
+    /// `dma_gather_unscaled` on `Emulation`: the physical `BufStorage` gather (driven by the
+    /// sequencer) matches the hand oracle. Peer of the byte-offset `dma_gather_scaled` and of the
+    /// `Tensor`-level `emulation_write_gather_roundtrip_unscaled`.
+    #[test]
+    fn emulation_dma_gather_unscaled_roundtrip() {
+        let (got, expected) = run_dma_gather_unscaled::<Emulation>();
+        assert_eq!(got, expected);
+    }
+
+    /// Typecheck backend: `dma_gather_unscaled` propagates the same shape assertions
+    /// (`gather_params` mapping algebra) as the scaled gather without iterating any buffer. The
+    /// output tensor under Typecheck has no values; this only pins that the call does not panic for
+    /// a well-formed block-table shape (visa->LIR lowering is pinned by the `compare_edf!` test).
+    #[test]
+    fn typecheck_dma_gather_unscaled_runs_assertion_only() {
+        axes![W = 8, V = 2, K = 64];
+
+        let table = HbmTensor::<i32, m![1], m![W, V], Typecheck>::new(Tensor::uninit(), 0);
+        let index = DmTensor::<i32, m![1], m![1], m![K], m![1], Typecheck>::new(Tensor::uninit(), None);
+        let _output: DmTensor<i32, m![1], m![1], m![K], m![V], Typecheck> = table.dma_gather_unscaled(&index);
+    }
 
     #[test]
     fn unittest_extents_reachable_end_with_dst_padding_absorb() {
@@ -1311,5 +1487,34 @@ mod tests {
         assert_dma_layout::<i32, m![Cl, Sl, A], m![A], m![Cl, Sl, A # 4 / 2, A # 4 % 2], m![A # 4 / 2, A # 4 % 2]>(
             DMA_SRAM_WRITE_WIDTH,
         );
+    }
+
+    #[test]
+    #[ignore = "reachable_end (dma_tails) rejects this valid layout: src_element is the flat, \
+                non-decomposed `m![A, B]` (32768 elements) while dst_element is one 128-element period \
+                of a modulo-decomposed tile. dma_tails's bisect calls `.resize(s)` on both sides to hunt \
+                the largest live+period-compatible prefix, but `resize`'s plain truncation of a flat \
+                Pair never regains the periodic (modulo) structure that `canonical_period` needs to see \
+                dst as period-compatible with src; the predicate is monotonically false for every \
+                s in 9..=128 (confirmed by direct probe, not a bisect off-by-one), so matched caps at 8 \
+                elements = 4 bytes, which is not min_align(8)-aligned and the assert fires. A caller-side \
+                pre-slice of src via `split_at` (reverted from this function; see PR #18933 review \
+                3608361265) worked around it by handing dma_tails an already-modulo-shaped src, but that \
+                is a band-aid in the wrong layer (furiosa-opt-std) papering over a real gap in \
+                npu-mapping-impl's dma_tails/into_segment/canonical_period: it does not yet recognize a \
+                flat source many times larger than one dst period as periodically compatible with that \
+                period. Needs a fix in dma_tails itself, tracked separately; re-enable once that lands."]
+    fn unittest_assert_dma_layout_packed_subbyte_sliced_load() {
+        use crate::scalar::f4e2m1;
+        // A packed sub-byte load whose innermost axis is a fraction of `min_align` bytes (`B = 8`
+        // `f4e2m1` = 4 bytes), feeding a sliced, modulo-decomposed DM tile.
+        axes![A = 4096, B = 8];
+        assert_dma_layout::<
+            f4e2m1,
+            m![1, A, B],
+            m![A, B],
+            m![1, 1 # 2, A / 16, A / 8 % 2, A % 8, B],
+            m![A / 8 % 2, A % 8, B],
+        >(DMA_SRAM_WRITE_WIDTH);
     }
 }

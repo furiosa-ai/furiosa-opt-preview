@@ -1,24 +1,15 @@
-//! Outer stage -- broadcasts both operands and multiplies them elementwise.
+//! Outer stage: the entry to the ONE deferred contraction algorithm.
 //!
-//! The Outer stage runs three sub-stages in series:
+//! `contract_outer` validates both operand sides ([`stream_adapter::verify_stream_adapter`],
+//! [`trf_sequencer::verify_trf_sequencer`]) and stashes the two un-broadcast operands (widened to the
+//! contraction output type) plus their layouts in a [`super::LazyContraction`], WITHOUT materializing the
+//! `[.., Lane, ..]`-shaped outer product. The Packet/Time reducers thread it through unchanged, and
+//! [`super::lane`] finalizes it with one fused [`crate::backend::Backend::contraction`].
 //!
-//! - `stream_adapter`: validates the stream (`CollectTensor`) side and
-//!   transposes it into the joint computation mapping.
-//! - `trf_sequencer`: transposes the TRF into the joint computation mapping.
-//! - Multiplier: elementwise multiplies the two aligned operands. Inputs widen
-//!   to the contraction output type (`i4`/`i8` -> `i32`, `f8`/`bf16` -> `f32`)
-//!   before multiplication, matching the contraction-engine accumulator type.
-//!
-//! The resulting [`ContractOuterTensor`] carries a *single* multiplied tensor in
-//! the common computation mapping `[Chip, Cluster, Slice, Lane, Time, Packet]`,
-//! ready for the [`super::packet`] reduce-add.
-//!
-//! The widen happens *entering* Outer: `contract_outer` takes storage-typed operands `D` and yields a
-//! [`ContractOuterTensor`] whose element type is already the widened accumulator
-//! [`ContractionCast::Output`]. That widened type is then the tensor's *own* type parameter, so every
-//! downstream stage (Packet Reducer, Time Reducer, Lane Folder) carries the accumulator width verbatim,
-//! with no per-stage `ContractionCast` re-derivation. The narrow back to a storage dtype is not a stage
-//! here at all — it happens naturally at the next [`crate::engine::cast::CastTensor`] the consumer applies.
+//! The widen happens *entering* Outer: `contract_outer` takes storage-typed operands `D` and stashes
+//! them cast to the widened accumulator [`ContractionCast::Output`]. That widened type is the carrier's
+//! *own* type parameter, so every downstream stage carries the accumulator width verbatim; the narrow
+//! back to a storage dtype happens at the next [`crate::engine::cast::CastTensor`] the consumer applies.
 
 pub(super) mod stream_adapter;
 pub(super) mod trf_sequencer;
@@ -33,16 +24,17 @@ use crate::cast::{Cast, ContractionCast, ContractionWeight};
 use crate::constraints;
 use crate::context::*;
 use crate::engine::CanApplyContractOuter;
+use crate::engine::contraction::LazyContraction;
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
-use crate::tensor::Tensor;
 use crate::tensor::memory::TrfTensor;
 use crate::tensor::tu::TuTensor;
 
-/// Output of the Outer stage: the multiplied product (Stream Adapter * TRF Sequencer), ready for the Packet Reducer.
+/// Output of the Outer stage: the deferred contraction carrier (the two un-broadcast operands, widened
+/// to the accumulator type), threaded through the reducers and fused at the Lane Folder.
 ///
 /// Two dtype params, related by the `Storage: ContractionCast<Output = D>` bound that pins them:
-/// - `D` is the *widened accumulator* the product is carried in (`i4`/`i8` -> `i32`, `f8`/`bf16` -> `f32`).
+/// - `D` is the *widened accumulator* the operands are carried in (`i4`/`i8` -> `i32`, `f8`/`bf16` -> `f32`).
 /// - `Storage` is the pre-widen operand dtype. It is retained only so the Packet Reducer's physical-flit
 ///   check ([`super::packet::verify_contract_packet`]) can size the DPE *input* packet in storage bytes,
 ///   which the widened `D` no longer encodes (`Storage` is not recoverable from `D` — the widen is
@@ -64,9 +56,14 @@ pub struct ContractOuterTensor<
     B: Backend = CurrentBackend,
 > {
     pub(crate) ctx: &'l mut TuContext<{ T }>,
-    pub(crate) inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Pair<Lane, Pair<Time, Packet>>>>>, B>,
-    /// Records the pre-widen storage dtype for the flit check only; never materialized. See struct doc.
+    /// The deferred dense-GEMM carrier: the two compact operands (already widened to the contraction
+    /// output type) plus the mappings [`super::lane::contract_lane`] fuses them with. `D` is already
+    /// the widened accumulator (`Storage: ContractionCast<Output = D>`), so the carrier is keyed on `D`.
+    pub(crate) inner: LazyContraction<D, B>,
+    /// The pre-widen storage dtype, retained for the Packet Reducer's flit check (see struct doc).
     pub(crate) _storage: PhantomData<Storage>,
+    /// Axis typestate the stage transitions carry; `inner` is mapping-free ([`LazyContraction`]).
+    pub(crate) _axes: PhantomData<(Chip, Cluster, Slice, Lane, Time, Packet)>,
 }
 
 impl<
@@ -91,15 +88,13 @@ impl<
     }
 
     #[doc(hidden)]
-    pub(crate) fn new(
-        ctx: &'l mut TuContext<{ T }>,
-        inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Pair<Lane, Pair<Time, Packet>>>>>, B>,
-    ) -> Self {
+    pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: LazyContraction<D, B>) -> Self {
         Self::check_constraints();
         Self {
             ctx,
             inner,
             _storage: PhantomData,
+            _axes: PhantomData,
         }
     }
 }
@@ -118,9 +113,9 @@ impl<
     B: Backend,
 > TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
-    /// Runs the Outer stage: Stream Adapter + TRF Sequencer broadcast both operands to a matching
-    /// computation shape, then the Multiplier widens to the contraction output type and multiplies
-    /// them elementwise. The result is a single multiplied tensor ready for the Packet Reducer.
+    /// Runs the Outer stage: stashes the two un-broadcast operands (widened to the accumulator type)
+    /// and the layouts [`super::lane::contract_lane`] needs to fuse them into a [`LazyContraction`]. No
+    /// materializing alternative, no per-backend branch -- every backend fuses the same way.
     #[primitive(TuTensor::contract_outer)]
     pub fn contract_outer<OutTime: M, OutPacket: M, Lane: M, TrfElement: M, TrfD>(
         self,
@@ -134,25 +129,43 @@ impl<
         // stream's accumulator for the multiply.
         TrfD: Scalar + ContractionWeight<D> + Cast<<D as ContractionCast>::Output>,
     {
-        // Broadcast both operands into the joint computation mapping. Each side
-        // verifies its own mapping inside its `contract_outer`.
-        let lhs = stream_adapter::contract_outer::<D, Chip, Cluster, Slice, Lane, Time, Packet, OutTime, OutPacket, B>(
-            self.inner,
-        );
-        let trf = trf_sequencer::contract_outer::<TrfD, Chip, Cluster, Slice, Lane, TrfElement, OutTime, OutPacket, B>(
-            trf_tensor,
-        );
+        type Out<D> = <D as ContractionCast>::Output;
 
-        // Multiplier: widen each operand to D::Output and multiply in ONE fused zip pass (vs two
-        // `map` widen passes + a `zip_with` multiply: three full-product buffers collapsed to one).
-        // Parity-identical -- same per-cell `cast` then `*` -- it just skips materializing the two
-        // intermediate widened operands.
-        let inner = lhs.zip_with(&trf, |a, b| {
-            let (a, b): (<D as ContractionCast>::Output, <D as ContractionCast>::Output) = (a.cast(), b.cast());
-            a * b
-        });
+        // Skipping the broadcast transpose does not skip its validity contract -- a malformed
+        // contraction would otherwise slip past these asserts and panic far downstream instead.
+        stream_adapter::verify_stream_adapter::<D, Lane, Time, Packet, OutTime, OutPacket>();
+        trf_sequencer::verify_trf_sequencer::<TrfD, Lane, TrfElement, OutTime, OutPacket>();
 
-        ContractOuterTensor::new(self.ctx, inner)
+        // The operands keep their own compact layouts: lhs is `[Chip, Cluster, Slice, Time, Packet]`
+        // (`self.inner`), rhs is `[Chip, Cluster, Slice, Lane, TrfElement]` (`trf_tensor`). A
+        // bare-buffer backend reads its strides from these; `MathStorage` ignores them (its axes live
+        // in the storage).
+        let lhs_map = <m![{ Chip }, { Cluster }, { Slice }, { Time }, { Packet }]>::to_value();
+        let rhs_map = <m![{ Chip }, { Cluster }, { Slice }, { Lane }, { TrfElement }]>::to_value();
+        let pre_reduce = <m![{ Chip }, { Cluster }, { Slice }, { Lane }, { OutTime }, { OutPacket }]>::to_value();
+
+        // Widen each operand to the `Out<D>` accumulator up front, at the operand's own (compact) size,
+        // not pre_reduce's -- the fold at `contract_lane` then runs entirely in `Out<D>`. Parity-identical
+        // to the old per-cell widen (same `Cast::cast` per element), it just never allocates the
+        // pre_reduce-shaped broadcast this stage used to build.
+        //
+        // `map_bounded`, NOT the plain `map`: `D` (the stream side) and `TrfD` (the TRF side) may each
+        // legitimately be a non-`MaterializableScalar` staging type (`i5`/`i9`, produced by
+        // `fetch_zero_point_sub` -- "an i5/i9 may still be a contraction weight resident in the TRF" per
+        // its own doc). Such a type's storage-native length recovery over-reports (its `BITS` names a
+        // real-hardware wire width, disconnected from its host in-memory size), so a plain `map`'s
+        // internal whole-buffer walk reads/writes past the buffer once the count crosses the true
+        // element count -- this is the ONE place either operand is read back as a whole tensor before
+        // `contract_lane`'s fused `Backend::contraction` (its only other lifetime is written-once by
+        // `fetch_zero_point_sub`, never read back that way), so it is also the one place this matters.
+        let contraction = LazyContraction {
+            lhs: self.inner.map_bounded(|v| -> Out<D> { v.cast() }).inner,
+            rhs: trf_tensor.inner.map_bounded(|v| -> Out<D> { v.cast() }).inner,
+            lhs_map,
+            rhs_map,
+            pre_reduce,
+        };
+        ContractOuterTensor::new(self.ctx, contraction)
     }
 }
 // ANCHOR_END: contract_outer_def

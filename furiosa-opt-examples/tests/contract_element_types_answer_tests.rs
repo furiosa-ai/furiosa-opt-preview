@@ -1,7 +1,7 @@
 //! Answer-key tests for the per-element-type contraction kernels: run the
 //! `#[device]` body under the default (simulation) backend and compare against
 //! an independent hand-computed true-math oracle. Unlike the `npu-visa-test`
-//! `compare_lir` tests (VISA-sim vs LIR), this pins whether the VISA/device
+//! `compare_edf` tests (VISA-sim vs LIR/EDF), this pins whether the VISA/device
 //! simulation itself is correct, localizing a divergence to either the
 //! eDSL/example or the LIR lowering.
 
@@ -39,8 +39,8 @@ async fn answer_i8_contract() {
     }
 
     let mut ctx = Context::acquire();
-    let input = HostTensor::<i8, m![A, K8]>::from_buf(input_vals);
-    let trf = HostTensor::<i8, m![R, K8]>::from_buf(trf_vals);
+    let input = HostTensor::<i8, m![A, K8]>::from_vec(input_vals);
+    let trf = HostTensor::<i8, m![R, K8]>::from_vec(trf_vals);
     let input_hbm = input.to_hbm::<Chip, m![A, K8]>(&mut ctx.pdma).await;
     let trf_hbm = trf.to_hbm::<Chip, m![R, K8]>(&mut ctx.pdma).await;
 
@@ -48,7 +48,7 @@ async fn answer_i8_contract() {
 
     assert_eq!(
         expected,
-        out.to_host::<m![A, R # 8]>(&mut ctx.pdma).await.into_buf(),
+        out.to_host::<m![A, R # 8]>(&mut ctx.pdma).await.into_vec(),
         "true-math oracle (left) vs VISA-sim (right)"
     );
 }

@@ -1,10 +1,10 @@
 //! Per-op preparation step shared across the backends.
 //!
 //! Each helper derives the mapping data an op needs (broadcast residue, reshape quotient, scatter
-//! payload, ...) and panics on ill-formed mappings. Simulation (`MathStorage`) and Emulation
-//! (`BufStorage`) consume the returned mapping to drive their loops; Typecheck
-//! (`PhantomStorage`) discards the value (`let _ = ...`) but still triggers the panic side, so
-//! type errors surface without any value-level loop running.
+//! payload, ...) and panics on ill-formed mappings. Emulation (`BufStorage`) consumes the
+//! returned mapping to drive its loops; Typecheck (`PhantomStorage`) discards the value
+//! (`let _ = ...`) but still triggers the panic side, so type errors surface without any
+//! value-level loop running.
 //!
 //! All helpers are noun-style and return a derived `Mapping` (or its parts). The shared file keeps
 //! the backends in lockstep on the mapping algebra without duplicating the prep step.
@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use furiosa_mapping::*;
 
 /// The broadcast portion of `dst` for `Tensor::transpose`, the part `src` does not cover;
-/// `MathStorage`'s write loop iterates over it. Panics on ill-formed mappings.
+/// `BufStorage`'s write loop iterates over it. Panics on ill-formed mappings.
 pub(crate) fn transpose_broadcast<Src: M, Dst: M>(allow_broadcast: bool) -> Mapping {
     let src_mapping = Src::to_value();
     let dst_mapping = Dst::to_value();
@@ -65,10 +65,6 @@ pub(crate) struct GatherParams {
     /// Axes shared by `src` (the table) and `dst` (the gather output), iterated identically
     /// on both sides. Derived as `dst ÷ idx_axes`.
     pub payload: Mapping,
-    /// Axes in `dst` that replace the indexed axis on the source side. The `gather` loop
-    /// iterates these positions and writes each output slot sequentially. Derived as
-    /// `dst ÷ payload`.
-    pub idx_residue: Mapping,
     /// Single-term locator on the `src` side identifying the indexed (lookup) axis. The runtime
     /// indices tensor's values index into this axis. Derived as the surviving term in
     /// `src ÷ payload`.
@@ -79,21 +75,19 @@ pub(crate) struct GatherParams {
 /// `Tensor::gather` body iterates the host. Panics on ill-formed gathers.
 ///
 /// `idx` is the full mapping of the indices tensor; the "key-axes-replacement" inside `dst` is
-/// derived as `dst ÷ payload`.
+/// derived as `dst ÷ payload`. `BufStorage::gather` (the sole caller) derives that residue from its
+/// own `Idx` type parameter instead, so the result here is discarded (`let _ = ...`); `carve` still
+/// runs for its ill-formed-mapping panic, the same pattern the module doc describes for Typecheck.
 pub(crate) fn gather_params(src: &Mapping, dst: &Mapping, idx: &Mapping) -> GatherParams {
     let payload = dst.carve(idx);
-    let idx_residue = dst.carve(&payload);
+    let _ = dst.carve(&payload);
     let src_term = src
         .carve(&payload)
         .axes()
         .into_iter()
         .next()
         .expect("gather src residue has no live target axis");
-    GatherParams {
-        payload,
-        idx_residue,
-        src_term,
-    }
+    GatherParams { payload, src_term }
 }
 
 #[cfg(test)]

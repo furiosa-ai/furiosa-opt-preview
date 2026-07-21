@@ -115,32 +115,32 @@ fn broadcasting_write(
     buf.write(stream)
 }
 # 
-# let buf_read = MemTensor::<bf16, m![A, B]>::from_buf(vec![bf16::from_f32(1f32); 8 * 512]);
-# let mut buf_write = MemTensor::<bf16, m![A, B]>::from_buf(vec![bf16::from_f32(1f32); 8 * 512]);
+# let buf_read = MemTensor::<bf16, m![A, B]>::from_vec(vec![bf16::from_f32(1f32); 8 * 512]);
+# let mut buf_write = MemTensor::<bf16, m![A, B]>::from_vec(vec![bf16::from_f32(1f32); 8 * 512]);
 # 
 # let stream = strided_read(&buf_read);
 # strided_write(&mut buf_write, stream);
 # 
 # // -----------------------------------------------------------------------------------
 # 
-# let buf_read = MemTensor::<bf16, m![N, C, H, W]>::from_buf(vec![bf16::from_f32(1f32); 4 * 3 * 8 * 8]);
-# let mut buf_write = MemTensor::<bf16, m![N, C, H, W]>::from_buf(vec![bf16::from_f32(0f32); 4 * 3 * 8 * 8]);
+# let buf_read = MemTensor::<bf16, m![N, C, H, W]>::from_vec(vec![bf16::from_f32(1f32); 4 * 3 * 8 * 8]);
+# let mut buf_write = MemTensor::<bf16, m![N, C, H, W]>::from_vec(vec![bf16::from_f32(0f32); 4 * 3 * 8 * 8]);
 # 
 # let stream = axis_reordering_read(&buf_read);
 # axis_reordering_write(&mut buf_write, stream);
 # 
 # // -----------------------------------------------------------------------------------
 # 
-# let buf_read = MemTensor::<i8, m![A, B, C # 8]>::from_buf(vec![1i8; 8 * 512 * 8]);
-# let mut buf_write = MemTensor::<i8, m![A, B, C # 8]>::from_buf(vec![0i8; 8 * 512 * 8]);
+# let buf_read = MemTensor::<i8, m![A, B, C # 8]>::from_vec(vec![1i8; 8 * 512 * 8]);
+# let mut buf_write = MemTensor::<i8, m![A, B, C # 8]>::from_vec(vec![0i8; 8 * 512 * 8]);
 # 
 # let stream = tiling_read(&buf_read);
 # tiling_write(&mut buf_write, stream);
 # 
 # // -----------------------------------------------------------------------------------
 # 
-# let buf_read = MemTensor::<i8, m![A]>::from_buf(vec![1i8; 8 ]);
-# let mut buf_write = MemTensor::<i8, m![A]>::from_buf(vec![0i8; 8 ]);
+# let buf_read = MemTensor::<i8, m![A]>::from_vec(vec![1i8; 8 ]);
+# let mut buf_write = MemTensor::<i8, m![A]>::from_vec(vec![0i8; 8 ]);
 #
 # let stream = broadcasting_read(&buf_read);
 # let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -313,7 +313,7 @@ fn read_rearranging<'l>(
     buf.read()
 }
 #
-# let buf_read = MemTensor::<i8, m![A, B, C # 32]>::from_buf(vec![1i8; 8 * 8 * 32]);
+# let buf_read = MemTensor::<i8, m![A, B, C # 32]>::from_vec(vec![1i8; 8 * 8 * 32]);
 # let _stream = read_rearranging(&buf_read);
 ```
 
@@ -347,7 +347,7 @@ fn read_splitting<'l>(
     buf.read()
 }
 #
-# let buf_read = MemTensor::<i8, m![A, B, C # 8]>::from_buf(vec![1i8; 8 * 8 * 8]);
+# let buf_read = MemTensor::<i8, m![A, B, C # 8]>::from_vec(vec![1i8; 8 * 8 * 8]);
 # let _stream = read_splitting(&buf_read);
 ```
 
@@ -381,7 +381,7 @@ fn read_slicing<'l>(
     buf.read()
 }
 #
-# let buf_read = MemTensor::<i8, m![A, B, C]>::from_buf(vec![1i8; 16 * 8 * 8]);
+# let buf_read = MemTensor::<i8, m![A, B, C]>::from_vec(vec![1i8; 16 * 8 * 8]);
 # let _stream = read_slicing(&buf_read);
 ```
 
@@ -416,7 +416,7 @@ fn read_broadcasting<'l>(
     buf.read()
 }
 #
-# let buf_read = MemTensor::<i8, m![A]>::from_buf(vec![1i8; 16]);
+# let buf_read = MemTensor::<i8, m![A]>::from_vec(vec![1i8; 16]);
 # let _stream = read_broadcasting(&buf_read);
 ```
 
@@ -453,7 +453,7 @@ fn read_merging<'l>(
     buf.read()
 }
 #
-# let buf_read = MemTensor::<i8, m![N, C, H, W]>::from_buf(vec![1i8; 8 * 8 * 8 * 32]);
+# let buf_read = MemTensor::<i8, m![N, C, H, W]>::from_vec(vec![1i8; 8 * 8 * 8 * 32]);
 # let _stream = read_merging(&buf_read);
 ```
 
@@ -511,8 +511,8 @@ fn write_padded(
     buf.write(stream)
 }
 #
-# let buf_read = MemTensor::<i8, m![A, B]>::from_buf(vec![1i8; 4 * 8]);
-# let mut buf_write = MemTensor::<i8, m![A, B # 16]>::from_buf(vec![0i8; 4 * 16]);
+# let buf_read = MemTensor::<i8, m![A, B]>::from_vec(vec![1i8; 4 * 8]);
+# let mut buf_write = MemTensor::<i8, m![A, B # 16]>::from_vec(vec![0i8; 4 * 16]);
 # let stream = buf_read.read();
 # write_padded(&mut buf_write, stream);
 ```
@@ -544,7 +544,7 @@ fn read_contiguous<'l>(
     buf.read()
 }
 #
-# let buf_read = MemTensor::<i8, m![N, C, H, W]>::from_buf(vec![1i8; 4 * 3 * 4 * 8]);
+# let buf_read = MemTensor::<i8, m![N, C, H, W]>::from_vec(vec![1i8; 4 * 3 * 4 * 8]);
 # let _stream = read_contiguous(&buf_read);
 
 // Compiler-generated configuration: [
@@ -561,7 +561,7 @@ fn read_non_contiguous<'l>(
     buf.read()
 }
 #
-# let buf_read = MemTensor::<i8, m![N, C, H, W]>::from_buf(vec![1i8; 4 * 3 * 4 * 8]);
+# let buf_read = MemTensor::<i8, m![N, C, H, W]>::from_vec(vec![1i8; 4 * 3 * 4 * 8]);
 # let _stream = read_non_contiguous(&buf_read);
 ```
 
@@ -597,7 +597,7 @@ fn read_incompatible<'l>(
     buf.read() // Compilation error: incompatible decomposition
 }
 #
-# let buf_read = MemTensor::<i8, m![A % 5, A / 5]>::from_buf(vec![1i8; 15]);
+# let buf_read = MemTensor::<i8, m![A % 5, A / 5]>::from_vec(vec![1i8; 15]);
 # let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { read_incompatible(&buf_read) }));
 # assert!(result.is_err());
 ```

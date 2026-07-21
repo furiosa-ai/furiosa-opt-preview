@@ -27,7 +27,6 @@ pub mod runtime;
 pub use tokio::sync::OnceCell;
 
 pub use context::Device;
-pub use tensor::BufferConvertError;
 
 pub use tensor::pseudo;
 

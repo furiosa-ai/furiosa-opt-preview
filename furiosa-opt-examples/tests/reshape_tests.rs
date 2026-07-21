@@ -10,7 +10,7 @@ async fn test_reshape() {
     let mut ctx = Context::acquire();
 
     let hbm_tensor: HbmTensor<i32, m![A / 4 % 4], m![A / 16, A % 4, B]> =
-        HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
+        HostTensor::<i32, m![A, B]>::from_vec((0..256 * 4096).collect::<Vec<_>>())
             .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma)
             .await;
 
@@ -20,8 +20,8 @@ async fn test_reshape() {
         output
             .to_host::<m![C, D, E, F, G, H, I]>(&mut ctx.pdma)
             .await
-            .into_buf(),
-        Tensor::<i32, m![C, D, E, F, G, H, I]>::from_buf(
+            .into_vec(),
+        Tensor::<i32, m![C, D, E, F, G, H, I]>::from_vec(
             (0..256 * 4096)
                 .map(|x| {
                     let index_a_4 = x / (2 * 16 * 16 * 16 * 2 * 16);
@@ -39,7 +39,7 @@ async fn test_reshape() {
                 })
                 .collect::<Vec<_>>(),
         )
-        .into_buf(),
+        .into_vec(),
     );
 }
 
@@ -50,15 +50,15 @@ async fn test_reshape_different_num_axes() {
     let mut ctx = Context::acquire();
 
     let hbm_tensor: HbmTensor<i32, m![A / 4 % 4], m![A / 16, A % 4, B]> =
-        HostTensor::<i32, m![A, B]>::from_buf((0..256 * 4096).collect::<Vec<_>>())
+        HostTensor::<i32, m![A, B]>::from_vec((0..256 * 4096).collect::<Vec<_>>())
             .to_hbm::<m![A / 4 % 4], m![A / 16, A % 4, B]>(&mut ctx.pdma)
             .await;
 
     let output = launch(reshape_different_num_axes, (&mut *ctx, &hbm_tensor)).await;
 
     assert_eq!(
-        output.to_host::<m![C, D, E, F]>(&mut ctx.pdma).await.into_buf(),
-        Tensor::<i32, m![C, D, E, F]>::from_buf(
+        output.to_host::<m![C, D, E, F]>(&mut ctx.pdma).await.into_vec(),
+        Tensor::<i32, m![C, D, E, F]>::from_vec(
             (0..256 * 4096)
                 .map(|x| {
                     let index_a_4 = x / (2 * 16 * 16 * 16 * 2 * 16);
@@ -76,6 +76,6 @@ async fn test_reshape_different_num_axes() {
                 })
                 .collect::<Vec<_>>(),
         )
-        .into_buf(),
+        .into_vec(),
     );
 }

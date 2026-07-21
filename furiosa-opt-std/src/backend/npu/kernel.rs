@@ -1,7 +1,7 @@
 use furiosa_mapping::M;
 
 use crate::prelude::HostTensor;
-use crate::scalar::Scalar;
+use crate::scalar::MaterializableScalar;
 use crate::tensor::memory::HbmTensor;
 
 use super::Npu;
@@ -139,11 +139,11 @@ impl Kernel {
     ///
     /// This is host-side I/O, not tensor computation. The copied bytes become the device
     /// function's HBM input; value-producing tensor operations are performed on the NPU.
-    pub async fn write<D: Scalar, Element: M, Chip: M, Element2: M>(
+    pub async fn write<D: MaterializableScalar, Element: M, Chip: M, Element2: M>(
         host: &HostTensor<D, Element, Npu>,
     ) -> HbmTensor<D, Chip, Element2, Npu> {
         let stride = std::mem::size_of::<D>();
-        let buf = host.clone().into_buf();
+        let buf = host.clone().into_vec();
         let len = buf.len() * stride;
 
         let src = CpuBuffer::cpu(len);
@@ -168,8 +168,8 @@ impl Kernel {
     /// Copies an NPU HBM tensor back into a host staging tensor via DMA.
     ///
     /// The returned `HostTensor` owns the bytes read from device memory as native `Vec<D>` data so
-    /// `to_buf` can expose them without an `Opt<D>` conversion layer.
-    pub async fn read<D: Scalar, Chip: M, Element: M, Element2: M>(
+    /// `to_vec` can expose them without an `Opt<D>` conversion layer.
+    pub async fn read<D: MaterializableScalar, Chip: M, Element: M, Element2: M>(
         hbm: &HbmTensor<D, Chip, Element, Npu>,
     ) -> HostTensor<D, Element2, Npu> {
         let stride = std::mem::size_of::<D>();
@@ -185,7 +185,7 @@ impl Kernel {
             "DMA read failed"
         );
         let ptr = dst.data_ptr() as *const u8;
-        HostTensor::from_buf((0..count).map(|i| {
+        HostTensor::from_vec((0..count).map(|i| {
             // SAFETY: `ptr` points to `count * stride` readable bytes from the DMA copy.
             unsafe { std::ptr::read(ptr.add(i * stride) as *const D) }
         }))

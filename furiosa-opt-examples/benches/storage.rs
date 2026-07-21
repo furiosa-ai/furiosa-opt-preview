@@ -3,7 +3,7 @@
 //! Each bench drives one `Tensor` op straight into the active backend's storage hot loop
 //! (`map` / `zip_with` / `reduce` / `transpose`, plus the fused `contraction`), with no scheduler or
 //! DMA in the path. The op code is backend-agnostic, so it measures whichever backend is compiled in:
-//! the default `simulation` (`MathStorage`), or `emulation` (`BufStorage`) under
+//! the default `emulation` (`BufStorage`), overridable via
 //! `RUSTFLAGS='--cfg backend="emulation"'`.
 //!
 //! ```sh

@@ -162,8 +162,18 @@ impl<
 // ANCHOR_END: commit_trim_impl
 
 // ANCHOR: commit_cast_impl
-impl<'l, const T: Tu, P: CanApplyCommitCast, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<
+    'l,
+    const T: Tu,
+    P: CanApplyCommitCast,
+    D: MaterializableScalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    B: Backend,
+> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Runs the Commit Adapter's type-casting stage, optionally fusing a
     /// ReLU.

@@ -20,7 +20,7 @@ async fn test_binary_add_2048() {
         lhs.into_inner()
             .map(|x| x as i32)
             .zip_with(&rhs.into_inner().map(|x| x as i32), |x, y| x + y)
-            .into_buf(),
-        out.to_host::<m![A]>(&mut ctx.pdma).await.into_buf()
+            .into_vec(),
+        out.to_host::<m![A]>(&mut ctx.pdma).await.into_vec()
     );
 }

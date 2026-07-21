@@ -5,9 +5,11 @@ use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
+use crate::cast::ContractionCast;
 use crate::context::*;
 use crate::engine::contraction::{ContractTensor, ContractTimeTensor};
 use crate::scalar::*;
+use crate::tensor::Tensor;
 
 /// Contraction mode for the Lane Folder.
 #[primitive(LaneMode)]
@@ -29,8 +31,18 @@ impl std::fmt::Display for LaneMode {
 }
 
 // ANCHOR: contract_lane_def
-impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M, Packet: M, B: Backend>
-    ContractTimeTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
+impl<
+    'l,
+    const T: Tu,
+    D: ContractionCast + MaterializableScalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Lane: M,
+    Time: M,
+    Packet: M,
+    B: Backend,
+> ContractTimeTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
 {
     /// Folds the `Lane` dimension into the output stream.
     /// `LaneMode::Interleaved` relocates `Lane` into `OutPacket`;
@@ -49,7 +61,32 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M
             self.pre_reduce_time,
             mode,
         );
-        ContractTensor::new(self.ctx, self.inner.transpose(false))
+        // Finalize the carried operands with ONE fused contraction onto this stage's input mapping
+        // `[Chip, Cluster, Slice, Lane, Time, Packet]` (Packet/Time were never actually reduced by the
+        // earlier stages, only relabeled to their post-stage extents). The Lane fold relayout
+        // (`transpose(false)`) then runs on the result, exactly as it always has.
+        //
+        // `out` is rebuilt here from this stage's own type params, independently of the `pre_reduce`
+        // stashed by `contract_outer`; `Backend::contraction` reduces `pre_reduce` onto `out` via
+        // `pre_reduce.carve(out)`, the same mapping-algebra carve `reduce` uses elsewhere, which is the
+        // authority on whether `out` is a valid restriction of `pre_reduce` -- NOT a manual re-check here.
+        // A naive per-symbol `.axes()` comparison is unsound for that: a contracted symbol can split
+        // across a spatial slot this fold never touches (e.g. `Cluster`, carrying a `K`-fragment that
+        // survives to `out` unreduced) and the slots that actually get contracted (`Time`/`Packet`,
+        // carrying the rest of `K`); `pre_reduce`'s canonical `K` term then legitimately has a different
+        // shape (wider modulo) than `out`'s, even though `out` is a correct restriction of `pre_reduce`.
+        let contraction = self.inner;
+        let out = <m![{ Chip }, { Cluster }, { Slice }, { Lane }, { Time }, { Packet }]>::to_value();
+        let reduced: Tensor<D, m![{ Chip }, { Cluster }, { Slice }, { Lane }, { Time }, { Packet }], B> =
+            Tensor::from_inner(B::contraction(
+                &contraction.lhs,
+                &contraction.rhs,
+                &contraction.lhs_map,
+                &contraction.rhs_map,
+                &contraction.pre_reduce,
+                &out,
+            ));
+        ContractTensor::new(self.ctx, reduced.transpose(false))
     }
 }
 // ANCHOR_END: contract_lane_def

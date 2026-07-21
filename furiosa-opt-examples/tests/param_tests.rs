@@ -5,7 +5,7 @@ use furiosa_opt_std::prelude::*;
 async fn tuple_param_passes() {
     let mut ctx = Context::acquire();
     let data = (0..<m![A, B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>();
-    let input = HostTensor::<i8, m![A, B]>::from_buf(data.clone())
+    let input = HostTensor::<i8, m![A, B]>::from_vec(data.clone())
         .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
         .await;
 
@@ -13,7 +13,7 @@ async fn tuple_param_passes() {
 
     assert_eq!(
         out.to_host::<m![A, B]>(&mut ctx.pdma).await.into_inner(),
-        Tensor::<_, m![A, B], CurrentBackend>::from_buf(data)
+        Tensor::<_, m![A, B], CurrentBackend>::from_vec(data)
     );
 }
 
@@ -21,7 +21,7 @@ async fn tuple_param_passes() {
 async fn struct_param_passes() {
     let mut ctx = Context::acquire();
     let data = (0..<m![A, B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>();
-    let input = HostTensor::<i8, m![A, B]>::from_buf(data.clone())
+    let input = HostTensor::<i8, m![A, B]>::from_vec(data.clone())
         .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
         .await;
 
@@ -29,6 +29,6 @@ async fn struct_param_passes() {
 
     assert_eq!(
         out.to_host::<m![A, B]>(&mut ctx.pdma).await.into_inner(),
-        Tensor::<_, m![A, B], CurrentBackend>::from_buf(data)
+        Tensor::<_, m![A, B], CurrentBackend>::from_vec(data)
     );
 }

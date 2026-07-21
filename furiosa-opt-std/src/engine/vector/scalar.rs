@@ -2,7 +2,7 @@
 
 use std::any::Any;
 
-use crate::scalar::Scalar;
+use crate::scalar::MaterializableScalar;
 
 /// The kind of scalar type supported by Vector Engine.
 #[derive(Debug, PartialEq, Eq)]
@@ -16,8 +16,12 @@ pub enum VeScalarKind {
 /// Marker trait for scalar types supported by Vector Engine.
 /// Only i32 and f32 are supported.
 ///
-/// This trait is sealed and cannot be implemented outside this module.
-pub trait VeScalar: Scalar + Any {
+/// This trait is sealed and cannot be implemented outside this module. `MaterializableScalar` is a
+/// supertrait, not just incidentally true of the two real impls: the VE paths already exclude i5/i9
+/// separately (per `MaterializableScalar`'s own doc), so declaring it here lets every VE-generic
+/// whole-tensor op (`Tensor::map`/`zip_with`/`transmute`, all `MaterializableScalar`-gated) stay
+/// callable under a bare `D: VeScalar` bound, with no separate restatement at each call site.
+pub trait VeScalar: MaterializableScalar + Any {
     /// The kind of this scalar type.
     const KIND: VeScalarKind;
 

@@ -57,7 +57,7 @@ pub(crate) fn rope(
         .commit_trim::<m![S % 8]>()
         .commit();
 
-    // Reshape offsets into the layout expected by `dma_gather` indexing.
+    // Reshape offsets into the layout expected by `dma_gather_scaled` indexing.
     let pos_reshaped: DmTensor<i32, Chip, Cluster, m![1 # 128, S / 64], m![S / 32 % 2, S % 16, S / 16 % 2]> = ctx
         .main
         .begin(pos_scaled.view())
@@ -70,7 +70,8 @@ pub(crate) fn rope(
     let pos_hbm: HbmTensor<i32, Chip, m![S]> = pos_reshaped.to_hbm(&mut ctx.tdma);
 
     // Gather per-position RoPE coefficients from `rope_table`.
-    let rope_dm: DmTensor<bf16, Chip, Cluster, m![S, D / 16 % 2], m![D % 16, R, R]> = rope_table.dma_gather(&pos_hbm);
+    let rope_dm: DmTensor<bf16, Chip, Cluster, m![S, D / 16 % 2], m![D % 16, R, R]> =
+        rope_table.dma_gather_scaled(&pos_hbm);
 
     // RoPE coefficient reshape + TRF load.
 

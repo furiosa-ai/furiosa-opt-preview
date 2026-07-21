@@ -5,23 +5,22 @@ mod alignment {
     use super::*;
     use furiosa_opt_examples::switch_assertions::alignment::*;
 
-    // Why buf-skipped: input mapping `m![A, B # 64]` has real padding (B=32, padded to 64) so
-    // the host buffer holds `Opt::Uninit` slots. `from_opt_buf` is Simulation/Typecheck-only —
-    // Npu / Emulation's native `Vec<D>` DMA staging has no `Opt::Uninit` representation, so this
-    // test cannot even compile under those cfgs (`cfg_attr(.., ignore)` wouldn't be enough).
-    #[cfg(not(backend = "npu"))]
+    /// Input mapping `m![A, B # 64]` has real padding (`B=32`, padded to `64`). Live cells get a
+    /// deterministic value; padding cells get a `0` filler. This test never asserts on `output`
+    /// (it only checks that the kernel runs to completion over a padded fetch/commit), so the
+    /// filler's exact value doesn't matter, unlike the tests further down that do compare `output`.
     #[tokio::test]
     async fn test_aligned_fetch_packet_i4() {
         let mut ctx = Context::acquire();
 
-        let input = HostTensor::<i4, m![A, B # 64]>::from_opt_buf(
+        let input = HostTensor::<i4, m![A, B # 64]>::from_vec(
             (0..<m![A, B # 64]>::SIZE)
                 .map(|i| {
                     if i % 64 < <B>::SIZE {
                         let real = (i / 64) * <B>::SIZE + (i % 64);
-                        Opt::Init(i4::from_i32((real % 16) as i32))
+                        i4::from_i32((real % 16) as i32)
                     } else {
-                        Opt::Uninit
+                        i4::from_i32(0)
                     }
                 })
                 .collect::<Vec<_>>(),
@@ -33,12 +32,13 @@ mod alignment {
 
         launch(aligned_fetch_packet_i4, (&mut *ctx, &input, &mut output)).await;
     }
+
     #[tokio::test]
     async fn test_aligned_fetch_packet_i8() {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -50,7 +50,7 @@ mod alignment {
     async fn test_aligned_fetch_packet_bf16() {
         let mut ctx = Context::acquire();
 
-        let input = HostTensor::<bf16, m![A, B]>::from_buf(
+        let input = HostTensor::<bf16, m![A, B]>::from_vec(
             (0..<m![A, B]>::SIZE)
                 .map(|x| bf16::from_f32(x as f32))
                 .collect::<Vec<_>>(),
@@ -73,7 +73,7 @@ pub mod packet {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -87,7 +87,7 @@ pub mod packet {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -101,7 +101,7 @@ pub mod packet {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -115,7 +115,7 @@ pub mod packet {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, C]>::from_buf((0..<m![A, C]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, C]>::from_vec((0..<m![A, C]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, C]>(&mut ctx.pdma)
                 .await;
 
@@ -129,7 +129,7 @@ pub mod packet {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -148,7 +148,7 @@ pub mod slice {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -167,7 +167,7 @@ mod broadcast1 {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -182,7 +182,7 @@ mod broadcast1 {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -200,7 +200,7 @@ mod broadcast01 {
     async fn test_valid_only_slice1() {
         let mut ctx = Context::acquire();
 
-        let input = HostTensor::<i8, m![B]>::from_buf((0..<m![B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+        let input = HostTensor::<i8, m![B]>::from_vec((0..<m![B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
             .to_hbm::<m![1], m![B]>(&mut ctx.pdma)
             .await;
 
@@ -214,7 +214,7 @@ mod broadcast01 {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -229,7 +229,7 @@ mod broadcast01 {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -248,7 +248,7 @@ mod transpose {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -262,7 +262,7 @@ mod transpose {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -276,7 +276,7 @@ mod transpose {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -295,7 +295,7 @@ mod inter_transpose {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 
@@ -311,7 +311,7 @@ mod inter_transpose {
         let mut ctx = Context::acquire();
 
         let input =
-            HostTensor::<i8, m![A, B]>::from_buf((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
+            HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| (x % 256) as i8).collect::<Vec<_>>())
                 .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
                 .await;
 

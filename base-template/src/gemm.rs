@@ -31,8 +31,8 @@ mod tests {
         let b_hbm = b.to_hbm(&mut ctx.pdma).await;
 
         // Reference: C[i, j] = sum_k A[i, k] * B[j, k] in f32, rounded to bf16.
-        let a_buf: Vec<bf16> = a.into_buf();
-        let b_buf: Vec<bf16> = b.into_buf();
+        let a_buf: Vec<bf16> = a.into_vec();
+        let b_buf: Vec<bf16> = b.into_vec();
         let expected: Vec<bf16> = a_buf
             .chunks(K::SIZE)
             .flat_map(|a_row| {
@@ -49,7 +49,7 @@ mod tests {
 
         let out_hbm = launch(gemm_kernel, (&mut ctx, &a_hbm, &b_hbm)).await;
 
-        let actual: Vec<bf16> = out_hbm.to_host::<m![I, J]>(&mut ctx.pdma).await.into_buf();
+        let actual: Vec<bf16> = out_hbm.to_host::<m![I, J]>(&mut ctx.pdma).await.into_vec();
         for (idx, (&e, &av)) in expected.iter().zip(&actual).enumerate() {
             let diff = (f32::from(av) - f32::from(e)).abs();
             let tol = (0.05 * f32::from(e).abs()).max(1.0);

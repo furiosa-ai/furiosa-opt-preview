@@ -28,15 +28,17 @@ impl<
     B: Backend,
 > ContractOuterTensor<'l, T, D, Storage, Chip, Cluster, Slice, Lane, Time, Packet, B>
 {
-    /// Spatial reduction within `Packet`: reduce-add along the contracted axes inside `Packet`
-    /// of the product already produced by the Outer stage. `D` is the widened accumulator carried
-    /// unchanged through this reduce; the DPE input packet is still sized in `Storage` bytes.
+    /// Spatial reduction within `Packet`: validates the reduce-add along the contracted axes inside
+    /// `Packet` that the fused fold at `contract_lane` will perform. `D` is the widened accumulator the
+    /// deferred carrier stays keyed on; the DPE input packet is still sized in `Storage` bytes.
     #[primitive(ContractOuterTensor::contract_packet)]
     pub fn contract_packet<OutPacket: M>(
         self,
     ) -> ContractPacketTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, OutPacket, B> {
         verify_contract_packet::<Storage, Packet, OutPacket>();
-        ContractPacketTensor::new(self.ctx, self.inner.reduce_add())
+        // Carry the deferred operands forward unreduced: the fused contraction at `contract_lane`
+        // performs this Packet reduction too. This stage only re-types the carrier to `OutPacket`.
+        ContractPacketTensor::new(self.ctx, self.inner)
     }
 }
 // ANCHOR_END: contract_packet_def

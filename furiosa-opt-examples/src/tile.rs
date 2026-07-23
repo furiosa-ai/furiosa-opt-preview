@@ -28,11 +28,11 @@ pub fn tile_computed_offset(
     const GROUP: usize = 16;
     const WINDOW: usize = 8;
     let input = input_hbm.to_dm::<m![A / 256], m![A % 256], m![B]>(&mut ctx.tdma);
-    let mut output = unsafe { DmTensor::<i8, m![1], m![A / 256], m![A % 256], m![B]>::from_addr(0x3000) };
+    let mut output = DmTensor::<i8, m![1], m![A / 256], m![A % 256], m![B]>::new();
 
     input.view().to_dm_view(&mut ctx.tdma, output.view_mut());
 
-    let mut scratch = unsafe { DmTensor::<i8, m![1], m![A / 256], m![A % 256], m![B]>::from_addr(0x6000) };
+    let mut scratch = DmTensor::<i8, m![1], m![A / 256], m![A % 256], m![B]>::new();
     for g in 0..GROUPS {
         for j in 0..(GROUP / WINDOW) {
             let b = g * GROUP + j * WINDOW;
@@ -60,7 +60,7 @@ pub fn tile_window_commit(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![D]>
     let tensor: DmTensor<f32, Chip, Cluster, Slice, m![D]> = input.to_dm(&mut ctx.tdma);
     let tile_one = tensor.view().tile::<m![D], 32, m![D = 32 # 64]>(0);
 
-    let mut result: DmTensor<f32, Chip, Cluster, Slice, m![D]> = unsafe { DmTensor::from_addr(1 << 12) };
+    let mut result: DmTensor<f32, Chip, Cluster, Slice, m![D]> = DmTensor::new();
 
     ctx.main
         .begin(tile_one)

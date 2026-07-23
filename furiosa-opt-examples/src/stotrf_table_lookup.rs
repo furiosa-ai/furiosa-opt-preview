@@ -50,7 +50,7 @@ pub fn stotrf_table_lookup_gemm(
 
     // Resident token-major output DM (tokens on slices, `Out` contiguous in the element).
     const OUT_DM_ADDR: Address = 0x0040_0000;
-    let mut out_dm: DmTensor<bf16, Chip, GemmCl, TokSlice, m![Out]> = unsafe { DmTensor::from_addr(OUT_DM_ADDR) };
+    let mut out_dm: DmTensor<bf16, Chip, GemmCl, TokSlice, m![Out]> = DmTensor::new();
 
     // The full `[Out]` per-output-channel dequant scale, broadcast across the token-slices.
     let scale_all_dm: DmTensor<bf16, Chip, GemmCl, TokSlice, m![Out]> = w_scale.to_dm(&mut ctx.tdma);
@@ -68,8 +68,7 @@ pub fn stotrf_table_lookup_gemm(
         // code to its e4m3 value. The decoded weight lands in a resident DM (fixed address, not a
         // transient `commit()` scratch) so the sub-context StoTrf below can read it back.
         const WEIGHT_F8_DM_ADDR: Address = 0x0060_0000;
-        let mut weight_f8_dm: DmTensor<f8e4m3, Chip, GemmCl, TokSlice, m![Out % 8, Red]> =
-            unsafe { DmTensor::from_addr(WEIGHT_F8_DM_ADDR) };
+        let mut weight_f8_dm: DmTensor<f8e4m3, Chip, GemmCl, TokSlice, m![Out % 8, Red]> = DmTensor::new();
         ctx.main
             .begin(weight_dm.view())
             .fetch::<m![Out % 8], m![Red]>()

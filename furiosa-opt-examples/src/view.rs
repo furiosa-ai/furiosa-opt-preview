@@ -15,7 +15,7 @@ pub mod simpl {
         let input = input_hbm.to_dm::<m![A / 256], m![A % 256], m![B]>(&mut ctx.tdma);
 
         // Allocate output tensor in DM with the same shape as input.
-        let mut output = unsafe { DmTensor::<i32, m![1], m![A / 256], m![A % 256], m![B]>::from_addr(0x3000) };
+        let mut output = DmTensor::<i32, m![1], m![A / 256], m![A % 256], m![B]>::new();
 
         // Create views on input (B=0,1,2,3) and output (B=2,3,4,5), and copy data from input to output.
         let input0123 = input.view().tile::<m![B], 4, m![B = 4 # 8]>(0);
@@ -48,7 +48,7 @@ pub mod nested {
         input_hbm: &HbmTensor<i32, m![1], m![A, B]>,
     ) -> HbmTensor<i32, m![1], m![A, B]> {
         let input = input_hbm.to_dm::<m![A / 256], m![A % 256], m![B]>(&mut ctx.tdma);
-        let mut output = unsafe { DmTensor::<i32, m![1], m![A / 256], m![A % 256], m![B]>::from_addr(0x3000) };
+        let mut output = DmTensor::<i32, m![1], m![A / 256], m![A % 256], m![B]>::new();
 
         // Define the whole output first (full copy) so no position is left `Uninit`.
         input.view().to_dm_view(&mut ctx.tdma, output.view_mut());
@@ -87,11 +87,8 @@ pub mod padding {
             .to_dm::<m![1], m![[A, B] # 1024 / 16], m![[A, B] # 1024 % 8, [A, B] # 1024 / 8 % 2]>(&mut ctx.tdma);
 
         // Allocate output tensor in DM with the same shape as input.
-        let mut output = unsafe {
-            DmTensor::<i32, m![1], m![1], m![[A, B] # 1024 / 16], m![[A, B] # 1024 % 8, [A, B] # 1024 / 8 % 2]>::from_addr(
-                0x4000,
-            )
-        };
+        let mut output =
+            DmTensor::<i32, m![1], m![1], m![[A, B] # 1024 / 16], m![[A, B] # 1024 % 8, [A, B] # 1024 / 8 % 2]>::new();
 
         // Create views on input (((A=9)(B=7)#1024%4)=0,1,2) and output (((A=9)(B=7)#1024%4)=1,2,3), and copy data from input to output.
         let input012 = input

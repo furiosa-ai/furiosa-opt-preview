@@ -141,7 +141,7 @@ impl<const T: Tu> TuContext<{ T }> {
         lhs: DmTensorView<'l, D, Chip, Cluster, Slice, Element>,
         rhs: DmTensorView<'l, D, Chip, Cluster, Slice, Element>,
     ) -> BeginTensor<'l, { T }, D, Chip, Cluster, Slice, Symbol<I>, Element> {
-        let mut output = Tensor::<D, m![{ Chip }, { Cluster }, { Slice }, { Symbol<I> }, { Element }]>::uninit();
+        let mut output = Tensor::<D, m![{ Chip }, { Cluster }, { Slice }, { Symbol<I> }, { Element }]>::zeroed();
 
         for (i, input) in [lhs, rhs].into_iter().enumerate() {
             output

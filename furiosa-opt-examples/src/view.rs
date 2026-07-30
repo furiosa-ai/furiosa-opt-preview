@@ -114,3 +114,19 @@ pub mod padding {
         output.to_hbm(&mut ctx.tdma)
     }
 }
+
+pub mod whole_view_mut {
+    use furiosa_opt_std::prelude::*;
+
+    axes![S = 128];
+
+    #[device(chip = 1)]
+    pub fn write_view_mut(
+        ctx: &mut Context,
+        input: &HbmTensor<bf16, m![1], m![S]>,
+        output: HbmTensorViewMut<'_, bf16, m![1], m![S]>,
+    ) {
+        let dm: DmTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![S]> = input.to_dm(&mut ctx.tdma);
+        dm.view().to_hbm_view(&mut ctx.tdma, output);
+    }
+}

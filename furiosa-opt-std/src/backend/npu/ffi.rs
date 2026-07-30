@@ -6,11 +6,74 @@ mod bindings {
 pub use bindings::NpuDesc;
 pub(crate) use bindings::*;
 
+use std::ffi::c_void;
 use std::sync::OnceLock;
 
 use crate::context::Device;
 
-pub(crate) fn rt() -> *const Runtime {
+/// `tracing` target and category for on-device profile spans, mirroring
+/// npu-executor's `TRACING_TARGET_NPU`/`TRACING_CATEGORY_NPU` so the shared
+/// furiosa-telemetry chrome exporter consumes VISA kernel spans identically.
+const TRACING_TARGET_NPU: &str = "span::npu";
+const TRACING_CATEGORY_NPU: &str = "NPU";
+
+/// Run a loaded kernel over its I/O buffers, arming on-device profiling only when
+/// a subscriber listens on the `span::npu` target. Returns the runtime status
+/// (0 on success). The enable check is the sole hot-path cost when profiling is
+/// off; read-back and decode are deferred by the runtime, so the launch itself
+/// never blocks.
+pub(super) fn run(kernel: *mut Kernel, inputs: &[*const NpuBuffer], outputs: &[*const NpuBuffer]) -> i32 {
+    if !tracing::enabled!(target: TRACING_TARGET_NPU, tracing::Level::INFO) {
+        // SAFETY: the kernel handle and pointer arrays stay live across this synchronous call.
+        return unsafe {
+            furiosa_kernel_run(
+                kernel,
+                rt(),
+                inputs.as_ptr(),
+                inputs.len(),
+                outputs.as_ptr(),
+                outputs.len(),
+            )
+        };
+    }
+
+    // `sink` emits each decoded span as an `info_span!` on `span::npu` (name +
+    // cycle window), matching npu-executor's schema; `done` is a noop since the
+    // ctx is `null`. The runtime calls them off the launch hot path during
+    // deferred read-back. They are `extern "C" fn` (not closures) because the C
+    // ABI callback slots require the C ABI, which Rust closures cannot carry.
+    unsafe extern "C" fn sink(_ctx: *mut c_void, name: Str, begin: u64, end: u64) {
+        // SAFETY: the runtime passes a valid name pointer and length for this call.
+        let bytes = unsafe { std::slice::from_raw_parts(name.ptr.cast::<u8>(), name.len) };
+        tracing::info_span!(
+            target: TRACING_TARGET_NPU,
+            "NPU",
+            cat = TRACING_CATEGORY_NPU,
+            name = String::from_utf8_lossy(bytes).as_ref(),
+            begin_cycle = begin,
+            end_cycle = end,
+        );
+    }
+    unsafe extern "C" fn done(_ctx: *mut c_void) {}
+
+    // SAFETY: the handle and pointer arrays stay live across the launch; the sink/done callbacks
+    // are `'static` and the ctx is `null`, so nothing must outlive this call.
+    unsafe {
+        furiosa_profiled_run(
+            rt(),
+            kernel,
+            inputs.as_ptr(),
+            inputs.len(),
+            outputs.as_ptr(),
+            outputs.len(),
+            Some(sink),
+            Some(done),
+            std::ptr::null_mut(),
+        )
+    }
+}
+
+pub(crate) fn rt() -> *mut Runtime {
     struct Handle(*mut Runtime);
     unsafe impl Send for Handle {}
     unsafe impl Sync for Handle {}
@@ -59,7 +122,8 @@ pub(crate) fn rt() -> *const Runtime {
     .0
 }
 
-/// Chip ids the host exposes, read from the `/dev/rngd/npu<N>mgmt` device nodes.
+/// Chip ids the host exposes, read from the `/dev/rngd/npu<N>mgmt` device nodes, narrowed to
+/// [`visible_chips`] when it is set.
 fn available_chips() -> Vec<u8> {
     let mut chips: Vec<u8> = std::fs::read_dir("/dev/rngd")
         .into_iter()
@@ -71,7 +135,31 @@ fn available_chips() -> Vec<u8> {
         })
         .collect();
     chips.sort_unstable();
+    if let Some(visible) = visible_chips() {
+        chips.retain(|chip| visible.contains(chip));
+    }
     chips
+}
+
+/// Chip ids `FURIOSA_VISIBLE_DEVICES` (comma-separated) restricts acquisition to; `None` when unset.
+///
+/// Acquisition skips busy chips but cannot reserve one, so processes starting together race for the
+/// same free chip. Listing disjoint chips pins them apart.
+fn visible_chips() -> Option<Vec<u8>> {
+    let spec = std::env::var("FURIOSA_VISIBLE_DEVICES").ok()?;
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    Some(
+        spec.split(',')
+            .map(|id| {
+                id.trim()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("FURIOSA_VISIBLE_DEVICES: `{id}` is not a chip index (0-255)"))
+            })
+            .collect(),
+    )
 }
 
 static DEVICE: OnceLock<Device> = OnceLock::new();

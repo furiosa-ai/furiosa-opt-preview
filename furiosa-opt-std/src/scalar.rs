@@ -18,6 +18,15 @@ pub trait Scalar: ndarray::LinalgScalar + Debug + Clone + Copy + PartialEq + Num
         crate::constraints::size_in_bytes(Self::BITS, length)
     }
 
+    /// The buffer byte length for `n` elements: the size of [`to_buf`](Self::to_buf)'s output, the
+    /// run [`load`](Self::load) / [`store`](Self::store) address per element. Byte-centric by default
+    /// (`n * size_of`); the sub-byte packers ([`i4`]/[`f4e2m1`]) override it to their `BITS`-packed
+    /// size. Wider than [`size_in_bytes_from_length`](Self::size_in_bytes_from_length) for a staging
+    /// type ([`i5`]/[`i9`]), whose `i8`/`i16` host form exceeds its narrower `BITS` wire width.
+    fn buf_bytes(n: usize) -> usize {
+        n * std::mem::size_of::<Self>()
+    }
+
     /// Reads element `i` from a packed byte image. This and [`store`](Self::store) are the sole place the
     /// byte-multiple-vs-sub-byte distinction lives: the default is byte-centric (element `i` owns its own
     /// `Self::BITS / 8`-byte run of the little-endian image), and only [`f4e2m1`] overrides it to unpack a
@@ -635,6 +644,10 @@ impl Scalar for i4 {
     fn to_buf(vals: &[Self]) -> Vec<u8> {
         pack_nibbles(vals)
     }
+
+    fn buf_bytes(n: usize) -> usize {
+        Self::size_in_bytes_from_length(n)
+    }
 }
 
 impl i4 {
@@ -1040,6 +1053,10 @@ impl Scalar for f4e2m1 {
     /// Two codes per byte (see [`store`](Self::store)); the sub-byte override of the memcpy default.
     fn to_buf(vals: &[Self]) -> Vec<u8> {
         pack_nibbles(vals)
+    }
+
+    fn buf_bytes(n: usize) -> usize {
+        Self::size_in_bytes_from_length(n)
     }
 }
 

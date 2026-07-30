@@ -164,6 +164,10 @@ impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> 
         &self.inner
     }
 
+    pub(crate) fn storage(&self) -> &B::Storage<D> {
+        &self.inner.inner
+    }
+
     /// Creates a tensor from an initialized buffer. Panics if the buffer length does not match the
     /// mapping size.
     pub fn from_vec(data: impl IntoIterator<Item = D>) -> Self {
@@ -359,7 +363,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     /// with the tensor mapping.
     #[primitive(HbmTensor::from_addr)]
     pub unsafe fn from_addr(address: Address) -> Self {
-        Self::new(Tensor::uninit(), address)
+        Self::new(Tensor::zeroed(), address)
     }
 }
 
@@ -408,7 +412,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
         &self,
         index: &HbmTensor<i32, Chip, Element3, B>,
     ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
-        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::from_parts(Tensor::uninit(), None);
+        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::from_parts(Tensor::zeroed(), None);
         self.inner.gather::<_, _>(&mut output.inner, &index.inner, true);
         output
     }
@@ -421,7 +425,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
         address: Address,
     ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
         let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> =
-            DmTensor::from_parts(Tensor::uninit(), Some(address));
+            DmTensor::from_parts(Tensor::zeroed(), Some(address));
         self.inner.gather::<_, _>(&mut output.inner, &index.inner, true);
         output
     }
@@ -438,7 +442,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
         &self,
         index: &DmTensor<i32, Chip, IdxCluster, IdxSlice, IdxElement, B>,
     ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
-        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::from_parts(Tensor::uninit(), None);
+        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::from_parts(Tensor::zeroed(), None);
         self.inner.gather::<_, _>(&mut output.inner, &index.inner, false);
         output
     }
@@ -495,7 +499,11 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     pub unsafe fn reshape<Chip2: M, Element2: M>(self) -> HbmTensor<D, Chip2, Element2, B> {
         constraints::assert_hbm_reshape_dimension_preserved::<Chip, Chip2, Element, Element2>();
         let reshaped = unsafe { self.inner.reshape::<m![{ Chip2 }, { Element2 }]>() };
-        HbmTensor::new(reshaped, self.address)
+        HbmTensor {
+            inner: reshaped,
+            address: self.address,
+            owner: self.owner,
+        }
     }
 }
 // ANCHOR_END: dma_impl
@@ -810,7 +818,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     #[allow(clippy::new_without_default)]
     #[primitive(DmTensor::new)]
     pub fn new() -> Self {
-        Self::from_parts(Tensor::uninit(), None)
+        Self::from_parts(Tensor::zeroed(), None)
     }
 
     /// Returns the SRAM (DM) address of this tensor, if one was assigned.
@@ -1287,7 +1295,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Element: M, B: Backend>
     /// The caller must ensure that the underlying data layout is compatible
     /// with the tensor mapping.
     pub unsafe fn from_addr(address: TrfAddress) -> Self {
-        Self::new(Tensor::uninit(), Some(address))
+        Self::new(Tensor::zeroed(), Some(address))
     }
 }
 
@@ -1342,7 +1350,7 @@ impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     /// The caller must ensure that the underlying data layout is compatible
     /// with the tensor mapping.
     pub unsafe fn from_addr(address: Address) -> Self {
-        Self::new(Tensor::uninit(), Some(address))
+        Self::new(Tensor::zeroed(), Some(address))
     }
 }
 
@@ -1437,9 +1445,42 @@ mod tests {
     fn typecheck_dma_gather_unscaled_runs_assertion_only() {
         axes![W = 8, V = 2, K = 64];
 
-        let table = HbmTensor::<i32, m![1], m![W, V], Typecheck>::new(Tensor::uninit(), 0);
-        let index = DmTensor::<i32, m![1], m![1], m![K], m![1], Typecheck>::from_parts(Tensor::uninit(), None);
+        let table = HbmTensor::<i32, m![1], m![W, V], Typecheck>::new(Tensor::zeroed(), 0);
+        let index = DmTensor::<i32, m![1], m![1], m![K], m![1], Typecheck>::from_parts(Tensor::zeroed(), None);
         let _output: DmTensor<i32, m![1], m![1], m![K], m![V], Typecheck> = table.dma_gather_unscaled(&index);
+    }
+
+    /// `reshape` consumes `self`, so it must hand the backend resource (`owner`) to the reshaped
+    /// handle. Releasing it here would free the device allocation while the returned handle still
+    /// names its address, so the next `launch` would drive a kernel over freed HBM. Only a handle
+    /// that owns its allocation (`Kernel::write`, `From<Buffer>`) can show this, which is why the
+    /// owner is observed through its `Drop`.
+    #[test]
+    fn reshape_hands_owner_to_reshaped_handle() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        axes![A = 4, B = 2, AB = 8];
+
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let freed = Arc::new(AtomicBool::new(false));
+        let tensor = HbmTensor::<i32, m![1], m![A, B], Emulation>::new(Tensor::zeroed(), 0x1000)
+            .owns(DropFlag(Arc::clone(&freed)));
+
+        // Merging `[A, B]` into `[AB]` keeps the wire order, so the relabel moves no data.
+        let reshaped = unsafe { tensor.reshape::<m![1], m![AB]>() };
+
+        assert!(
+            !freed.load(Ordering::SeqCst),
+            "reshape released the backend resource; the reshaped handle's address now dangles"
+        );
+        assert_eq!(reshaped.address(), 0x1000);
     }
 
     #[test]
@@ -1511,21 +1552,11 @@ mod tests {
         );
     }
 
+    /// A packed sub-byte load whose flat source element (`m![A, B]`, 32768 elements) feeds one
+    /// 128-element period of a modulo-decomposed DM tile. `dma_tails` compares their semantic prefix,
+    /// skipping the sixteen affine B rows despite the different factorization, so `reachable_end` is
+    /// the full 128-element period (64 bytes), which is `min_align(8)`-aligned.
     #[test]
-    #[ignore = "reachable_end (dma_tails) rejects this valid layout: src_element is the flat, \
-                non-decomposed `m![A, B]` (32768 elements) while dst_element is one 128-element period \
-                of a modulo-decomposed tile. dma_tails's bisect calls `.resize(s)` on both sides to hunt \
-                the largest live+period-compatible prefix, but `resize`'s plain truncation of a flat \
-                Pair never regains the periodic (modulo) structure that `canonical_period` needs to see \
-                dst as period-compatible with src; the predicate is monotonically false for every \
-                s in 9..=128 (confirmed by direct probe, not a bisect off-by-one), so matched caps at 8 \
-                elements = 4 bytes, which is not min_align(8)-aligned and the assert fires. A caller-side \
-                pre-slice of src via `split_at` (reverted from this function; see PR #18933 review \
-                3608361265) worked around it by handing dma_tails an already-modulo-shaped src, but that \
-                is a band-aid in the wrong layer (furiosa-opt-std) papering over a real gap in \
-                npu-mapping-impl's dma_tails/into_segment/canonical_period: it does not yet recognize a \
-                flat source many times larger than one dst period as periodically compatible with that \
-                period. Needs a fix in dma_tails itself, tracked separately; re-enable once that lands."]
     fn unittest_assert_dma_layout_packed_subbyte_sliced_load() {
         use crate::scalar::f4e2m1;
         // A packed sub-byte load whose innermost axis is a fraction of `min_align` bytes (`B = 8`

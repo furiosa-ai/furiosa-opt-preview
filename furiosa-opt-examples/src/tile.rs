@@ -55,7 +55,9 @@ type Slice = m![1 # 256];
 /// than rejecting the write. Copies `input[0..32]` into `result[32..64]`. Regression for a
 /// `view_mut().tile()` commit into a windowed-and-down-padded DM that surfaced as
 /// `StreamUnmatchedSegment`.
-#[device(chip = 1)]
+///
+/// Runs at a 4-PE device (1 cluster) so the `Cluster = m![1]` DM allocations match the config.
+#[device(chip = 1, pe = 4)]
 pub fn tile_window_commit(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![D]>) -> HbmTensor<f32, Chip, m![D]> {
     let tensor: DmTensor<f32, Chip, Cluster, Slice, m![D]> = input.to_dm(&mut ctx.tdma);
     let tile_one = tensor.view().tile::<m![D], 32, m![D = 32 # 64]>(0);

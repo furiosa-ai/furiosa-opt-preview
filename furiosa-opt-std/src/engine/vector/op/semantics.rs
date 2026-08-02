@@ -231,7 +231,7 @@ impl IntraSliceReduceOpF32 {
 
 impl InterSliceReduceOpI32 {
     /// Returns the raw binary reduction function.
-    pub(crate) fn reduce_fn(&self) -> fn(i32, i32) -> i32 {
+    pub fn reduce_fn(&self) -> fn(i32, i32) -> i32 {
         match self {
             Self::Add => |a, b| a.wrapping_add(b),
             Self::AddSat => |a, b| a.saturating_add(b),
@@ -252,7 +252,7 @@ impl InterSliceReduceOpI32 {
 
 impl InterSliceReduceOpF32 {
     /// Returns the raw binary reduction function.
-    pub(crate) fn reduce_fn(&self) -> fn(f32, f32) -> f32 {
+    pub fn reduce_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
             Self::Add => |a, b| a + b,
             Self::Max => |a, b| a.max(b),

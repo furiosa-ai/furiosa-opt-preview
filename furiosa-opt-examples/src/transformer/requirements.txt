@@ -1,0 +1,3 @@
+furiosa-torch @ git+https://github.com/furiosa-ai/furiosa-torch.git@99e874d43705bf39d86b088407291e73242904fe
+safetensors
+tokenizers

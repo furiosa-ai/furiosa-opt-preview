@@ -1,4 +1,10 @@
 fn main() {
+    // docs.rs sandbox blocks network, so the prebuilt fetch below can never
+    // succeed there. Rustdoc compiles deps to rlib only and never performs a
+    // final native link, so skipping the fetch and link directives is safe.
+    if std::env::var_os("DOCS_RS").is_some() {
+        return;
+    }
     link_furiosa_opt_lower_impl();
 }
 

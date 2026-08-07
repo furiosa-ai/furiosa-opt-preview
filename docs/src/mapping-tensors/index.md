@@ -1,9 +1,11 @@
 # Mapping Tensors
 
+Use this chapter when a logical tensor needs a physical layout, placement, padding, or tiling decision.
+
 Tensors have no intrinsic order of elements.
 A mapping assigns each tensor index to a buffer position, defining that order.
 
-This chapter shows how layout choices affect memory access and explains TCP's declarative approach to tensor layout with mapping expressions.
+This chapter explains how layout choices affect memory access and how mapping expressions declare those choices.
 
 ## Layout and Performance
 

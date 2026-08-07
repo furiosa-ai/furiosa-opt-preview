@@ -655,4 +655,3 @@ Slicing a fully valid axis, for instance `B = 4 → B = 3`, violates this constr
 
 The `ring_size` parameter must be a power of 2.
 The compiler also derives the expected `ring_size` from the input/output mappings (the outermost non-direct-cast boundary) and rejects any user-supplied value that does not match.
-

@@ -436,21 +436,9 @@ For a symmetric-signed input the residual is a difference of two same-width valu
 
 The subtraction therefore produces one more bit than it consumes. The conversion checks this at runtime: a residual outside the `i5`/`i9` range (an out-of-range `zero_point` or input) is rejected rather than silently wrapped.
 
-### Contraction Engine specification
-
-`i5` and `i9` exist only as Contraction Engine operands. The engine multiplies operand pairs drawn from the same integer precision family and accumulates in `i32`:
-
-| Stream (activation) | Weight (TRF) | Accumulator |
-|---------------------|--------------|-------------|
-| `i4` or `i5` | `i4` or `i5` | `i32` |
-| `i8` or `i9` | `i8` or `i9` | `i32` |
-
-Either operand may be the raw form (`i4`/`i8`) or its zero-point-subtracted staging (`i5`/`i9`); the two operands need not match within a family, but they may not cross families (no `i4` against `i8`) or kinds (no integer against float).
-Floating-point contraction pairs (`bf16`, `f8e4m3`, `f8e5m2`) must match exactly and are never zero-point-subtracted.
-
 ### Staging is contraction-only
 
-An `i5`/`i9` stream may flow through the [Switch Engine](./switch-engine.md) and [Collect Engine](./collect-engine.md), but from there its **only** legal consumer is `contract_outer`.
+An `i5`/`i9` stream may flow through the [Switch Engine](./switch-engine.md) and [Collect Engine](./collect-engine.md), but from there its **only** legal consumer is `contract_outer`, which pairs it with a weight as [Operand types](./contraction-engine/outer.md#operand-types) lays out.
 It cannot be committed to memory, stored to a register file (`to_trf`/`to_vrf`), transposed, or fed to any other engine.
 
 This restriction is enforced at compile time, not by a runtime check: passing an `i5`/`i9` stream to any consumer other than `contract_outer` is a compile error.

@@ -4,6 +4,10 @@
 The scheduler translates vISA programs into execution schedules from programmer input: the execution context selected for each operation, the written order of operations, and explicit memory address assignments.
 The scheduler reduces execution cycles while preserving the exact same results as sequential execution.
 
+Use this chapter when execution contexts, memory lifetimes, or resource conflicts determine schedule makespan.
+
+This chapter does not describe dependency-graph construction or the scheduler's output representation.
+
 ## Basic Scheduling Rules
 
 This chapter explains the basic scheduling rules with the MNIST vISA kernel in [`furiosa-opt-examples/src/mnist/mod.rs`](https://github.com/furiosa-ai/furiosa-opt/blob/main/furiosa-opt-examples/src/mnist/mod.rs).

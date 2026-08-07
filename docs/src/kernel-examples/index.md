@@ -1,8 +1,24 @@
 # Kernel Examples
 
-This chapter shows how to combine mapping, movement, computation, and scheduling into complete, working kernels.
-The preceding chapters explained how mapping expressions distribute work across TCP's hardware hierarchy and how each component reduces partial results.
-The [introductory tutorial](../quick-start.md) briefly introduced temporal and spatial partitioning for large tensors.
+Use this chapter to choose a pattern that combines mapping, movement, computation, and scheduling.
+
+## Choose a Starting Point
+
+Start implementation from a [Quick Start](../quick-start.md) pattern whenever it can express the contract.
+The remaining pages are design references until their code is verified against the current API.
+
+| Need | Start with | Technical focus and status |
+|------|------------|----------------------------|
+| Elementwise operation or basic contraction | [Quick Start](../quick-start.md) | Base-template source examples are generated and tested in CI with emulation. Verify the target release before reuse. |
+| Tiling and accumulation strategy | [Tiling](./tiling.md) | Tile size, memory layout, and accumulation strategy. Conceptual guidance. |
+| Layout transformation through fetch and commit | [Fetch and Commit Engine](./fetch-commit-engine.md) | Axis permutation, full-flit writes, packet padding, and explicit tiled segmentation. Conceptual guidance rather than copyable source. |
+| Reduction split across tensor instances | [Split Reduce](./split-reduce.md) | Interleaved Fetch reduces across tensor instances when one tile cannot hold the reduction. Conceptual guidance rather than copyable source. |
+| Reduction across chips or clusters | [Chip/Cluster Reduce](./chip-cluster-reduce.md) | DMA broadcast with Vector Engine binary add for ReduceScatter and AllReduce patterns. Conceptual guidance. |
+| Transformer or MoE architecture | [Transformer](./transformer.md) or [Mixture of Experts](./mixture-of-experts.md) | Tiling, multi-chip reduction, memory management, and sparse dynamic routing. Architecture guidance, not vISA implementation recipes. |
+| Double-buffered GEMM | [Tiling](./tiling.md) and [Fetch and Commit Engine](./fetch-commit-engine.md) | HBM DMA, sub-context TRF prefetch, main-context tiled contraction, cast, and commit. No complete example is available yet. |
+
+## Place and Reduce Dimensions
+
 The table below summarizes the available parallelism and reduction at each level:
 
 | Dimension | Type | Defined in | Reduced in |
@@ -16,20 +32,3 @@ The table below summarizes the available parallelism and reduction at each level
 
 The `Chip` and `Cluster` rows above involve cross-chip and cross-cluster reduction patterns.
 See [Chip/Cluster Reduce](./chip-cluster-reduce.md), which demonstrates DMA broadcast followed by Vector Engine binary add.
-
-
-The examples progress from single-engine patterns to composed multi-engine patterns to full model implementations:
-
-- [Tiling](./tiling.md): Tile size selection, memory layout, and accumulation strategies.
-
-
-- [Fetch and Commit Engine](./fetch-commit-engine.md): Axis permutation, full-flit commit, tail padding, and tensor segmentation.
-  Use when data layout transformations are needed between memory and compute.
-- [Split Reduce](./split-reduce.md): Interleaved fetch for reducing across multiple tensor instances.
-  Use when a reduction dimension exceeds what a single tile can accumulate.
-- [Chip/Cluster Reduce](./chip-cluster-reduce.md): ReduceScatter and AllReduce across chips.
-  Use when computation must be distributed across multiple chips or clusters.
-- [Transformer](./transformer.md): Llama 3 70B implementation with prefill and decode phases.
-  A full model combining tiling, multi-chip reduce, and memory management.
-- [Mixture of Experts](./mixture-of-experts.md): Branchless TopK routing and blockwise sparse computation.
-  A full model demonstrating dynamic routing with sparse computation patterns.

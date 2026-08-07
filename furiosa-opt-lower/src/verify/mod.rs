@@ -26,16 +26,18 @@ pub mod engine;
 
 pub use engine::{
     CastError, CollectError, CommitCastError, CommitTrimError, ContractLaneError, ContractPacketError,
-    ContractTimeError, LaneMode, StreamAdapterError, ToTrfError, VectorError, config_cast, config_collect,
+    ContractTimeError, LaneMode, StreamAdapterError, ToTrfError, ToVrfError, VectorError, config_cast, config_collect,
     config_commit_cast, config_commit_trim, config_contract_lane, config_contract_packet, config_contract_time,
-    config_reduce_label, config_stream_adapter, config_to_trf, config_vector_narrow_split, config_vector_narrow_trim,
-    config_vector_widen_concat, config_vector_widen_pad,
+    config_reduce_label, config_stream_adapter, config_to_trf, config_to_vrf, config_vector_narrow_split,
+    config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad,
 };
 
 /// Bits in a byte.
 pub const BITS_PER_BYTE: usize = 8;
 /// Size of a single flit in bytes; the switching network moves data in flit-sized units.
 pub const FLIT_BYTES: usize = 32;
+/// Vector register file capacity in bytes, per slice. One `to_vrf` operand must fit this.
+pub const VRF_BYTES: usize = 8 * 1024;
 /// Columns of the temporal accumulator (the packet reducer's output-width bound).
 pub const TEMPORAL_ACCUMULATOR_COLS: usize = 32;
 /// Elements of the lane-folder / packet-reducer output packet (one flit of `i32`/`f32`).

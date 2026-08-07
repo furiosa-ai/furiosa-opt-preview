@@ -1,5 +1,7 @@
 # Computing Tensors
 
+Use this chapter when a kernel needs to transform a Tensor Unit stream or place a stationary operand in TRF or VRF.
+
 ## Tensor Unit
 
 The Tensor Unit is the on-chip compute pipeline.
@@ -86,4 +88,3 @@ For example, the Vector Engine and the Cast Engine form one such unit of schedul
 So when sub is running Vector Engine work, main runs its type casting through the [Commit Adapter's Type Casting stage](./commit-adapter.md#type-casting) instead of the Cast Engine, to avoid serializing with sub.
 
 The scheduler may also assign a Tensor Unit operation to the DMA context defensively when its DM access pattern would otherwise risk a hardware-level memory conflict (see [Memory Performance](../moving-tensors/memory-performance.md) for the rules that trigger this).
-

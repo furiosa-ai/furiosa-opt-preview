@@ -279,6 +279,8 @@ pub(crate) fn forward(
         .commit_trim::<m![N % 4, G]>()
         .commit();
 
+    max.view().to_hbm_view(&mut ctx.tdma, max_hbm.view_mut());
+
     let alpha: DmTensor<f32, Chip, Cluster, Slice, m![N, G]> = ctx
         .main
         .begin(max.view())

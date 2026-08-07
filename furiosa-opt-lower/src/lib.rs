@@ -20,10 +20,11 @@ pub use furiosa_opt_lower_types::{
 mod verify;
 pub use verify::{
     BITS_PER_BYTE, CastError, CollectError, CommitCastError, CommitTrimError, ContractLaneError, ContractPacketError,
-    ContractTimeError, FLIT_BYTES, LaneMode, StreamAdapterError, TEMPORAL_ACCUMULATOR_COLS, ToTrfError, VectorError,
-    config_cast, config_collect, config_commit_cast, config_commit_trim, config_contract_lane, config_contract_packet,
-    config_contract_time, config_reduce_label, config_stream_adapter, config_to_trf, config_vector_narrow_split,
-    config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad,
+    ContractTimeError, FLIT_BYTES, LaneMode, StreamAdapterError, TEMPORAL_ACCUMULATOR_COLS, ToTrfError, ToVrfError,
+    VRF_BYTES, VectorError, config_cast, config_collect, config_commit_cast, config_commit_trim, config_contract_lane,
+    config_contract_packet, config_contract_time, config_reduce_label, config_stream_adapter, config_to_trf,
+    config_to_vrf, config_vector_narrow_split, config_vector_narrow_trim, config_vector_widen_concat,
+    config_vector_widen_pad,
 };
 
 /// Raw `extern "C-unwind"` decls for the prebuilt impl's exports.

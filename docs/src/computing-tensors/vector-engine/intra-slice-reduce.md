@@ -216,4 +216,3 @@ Throughput stays at one flit per cycle since the tree reduce is fully pipelined 
 
 Latency adds a first-output delay of `n` flit cycles where `n` is the number of time steps in the reduce axis, because the stage must accumulate all input flits for a reduction group before emitting the result.
 In a multi-engine pipeline, this accumulation delay stalls downstream engines waiting for the first flit.
-

@@ -101,12 +101,14 @@ impl<'l, const T: Tu, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice:
     /// Stores to the vector register file.
     #[primitive(TuTensor::to_vrf)]
     pub fn to_vrf<Element: M>(self) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
+        constraints::assert_vrf_capacity::<D, Element>();
         VrfTensor::new(self.inner.transpose(false), None)
     }
 
     /// Stores to the vector register file at `address`.
     #[primitive(TuTensor::to_vrf_at)]
     pub fn to_vrf_at<Element: M>(self, address: Address) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
+        constraints::assert_vrf_capacity::<D, Element>();
         VrfTensor::new(self.inner.transpose(false), Some(address))
     }
 }

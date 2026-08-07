@@ -1,13 +1,13 @@
 use furiosa_mapping::Mapping as MappingValue;
 use furiosa_mapping::*;
 
-use crate::cast::ContractionCast;
 use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::PhantomStorage;
 use crate::tensor::Tensor;
 use crate::tensor::memory::{HbmTensor, HostTensor};
 
 use crate::backend::Backend;
+use crate::cast::{ContractionAccumulator, ContractionCast};
 
 /// Typecheck backend: shape/mapping-only, no host-side computation.
 ///
@@ -42,20 +42,7 @@ impl Backend for Typecheck {
         storage.into_vec(mapping)
     }
 
-    fn map<D: MaterializableScalar, D2: Scalar>(
-        src: &Self::Storage<D>,
-        f: impl Fn(D) -> D2 + Sync,
-    ) -> Self::Storage<D2> {
-        src.map(f)
-    }
-
-    fn map_bounded<D: Scalar, D2: Scalar>(
-        src: &Self::Storage<D>,
-        _len: usize,
-        f: impl Fn(D) -> D2 + Sync,
-    ) -> Self::Storage<D2> {
-        // `PhantomStorage` carries no values (see `PhantomStorage::map`), so the explicit `len` this
-        // exists to honor for a real buffer is moot here; delegate straight to the ordinary phantom map.
+    fn map<D: Scalar, D2: Scalar>(src: &Self::Storage<D>, f: impl Fn(D) -> D2 + Sync) -> Self::Storage<D2> {
         src.map(f)
     }
 
@@ -107,6 +94,17 @@ impl Backend for Typecheck {
         out: &MappingValue,
     ) -> Self::Storage<D> {
         // `PhantomStorage` holds no values, so it neither widens nor folds; see its doc.
+        lhs.contraction(rhs, out)
+    }
+
+    fn contraction_prewidened<D: ContractionAccumulator>(
+        lhs: &Self::Storage<D>,
+        rhs: &Self::Storage<D>,
+        _lhs_map: &MappingValue,
+        _rhs_map: &MappingValue,
+        _pre_reduce: &MappingValue,
+        out: &MappingValue,
+    ) -> Self::Storage<D> {
         lhs.contraction(rhs, out)
     }
 

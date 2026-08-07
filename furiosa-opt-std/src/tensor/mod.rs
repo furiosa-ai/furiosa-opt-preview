@@ -9,7 +9,7 @@ use self::view::*;
 use crate::scalar::*;
 
 use crate::backend::Backend;
-use crate::cast::ContractionCast;
+use crate::cast::{ContractionAccumulator, ContractionCast};
 use crate::runtime::CurrentBackend;
 
 pub(crate) mod memory;
@@ -84,7 +84,14 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     /// inverse). Contrast [`Self::from_vec`], which packs logical values: pre-packed data (fp4 / f4e2m1
     /// weights) comes through here so the bytes are stored as-is, not decoded to a logical `Vec` and
     /// re-packed. Panics if the byte length does not match the mapping's packed size.
-    pub fn from_buf(buf: Vec<u8>) -> Self {
+    ///
+    /// A device image exists only for a dtype that reaches a device, hence the `MaterializableScalar`
+    /// bound that [`Self::into_buf`] also carries: a staging type (`i5`/`i9`) has none, and its
+    /// `Scalar::BITS` (the wire width this length check uses) is not the width it occupies in a buffer.
+    pub fn from_buf(buf: Vec<u8>) -> Self
+    where
+        D: MaterializableScalar,
+    {
         assert_eq!(
             buf.len() * 8,
             Mapping::SIZE * D::BITS,
@@ -114,44 +121,11 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     /// Maps the tensor element-wise to a new scalar; same layout. The bare-scalar closure is lifted
     /// by the backend's own [`Backend::map`] strategy (Emulation/Npu a bare buffer walk, Typecheck a
     /// no-op), no offset-uniform primitive imposed across storages.
-    ///
-    /// Only valid for a `D` whose storage-native length recovery is exact -- every
-    /// [`crate::scalar::MaterializableScalar`] type, where `Scalar::BITS` always agrees with what
-    /// `to_buf`/`load`/`store` actually pack per element. A non-materializable staging type (`i5`/`i9`)
-    /// does NOT hold that invariant (`BITS` names a hardware-only wire width, disconnected from its host
-    /// `size_of`-based default `load`/`store`) and must use [`Self::map_bounded`] instead -- see that
-    /// method's doc for why this one is unsound for it.
     pub fn map<D2: Scalar, F>(&self, f: F) -> Tensor<D2, Mapping, B>
     where
         F: Fn(D) -> D2 + Sync,
-        D: MaterializableScalar,
     {
         Tensor::from_inner(B::map(&self.inner, f))
-    }
-
-    /// [`Self::map`], but bounded by this tensor's own `Mapping::SIZE` instead of trusting the backend
-    /// storage's own length recovery.
-    ///
-    /// For most `D` this is equivalent to [`Self::map`] (redundant, so prefer the simpler `map`). It
-    /// exists for a non-`MaterializableScalar` staging type (`i5`/`i9`, the zero-point-subtracted
-    /// contraction operands): such a `D` is deliberately never routed through any device image, HBM, or
-    /// DM (`MaterializableScalar` gates those entry points), so its `Scalar::BITS` describes only a
-    /// real-hardware wire width -- for `i9` that's 8 bits, one physical byte, because the extra bit is
-    /// produced inside the contraction engine at consumption time and never actually crosses a wire or
-    /// sits in device memory. Host-side (Emulation), `i5`/`i9` still need a REAL, full-precision value
-    /// (`fetch_zero_point_sub` computes the exact zero-point-subtracted result eagerly), so they stay in
-    /// their full in-memory representation (`i9` is `i16`-backed) -- neither overrides `load`/`store`/
-    /// `to_buf`, so those default to `size_of::<Self>()`, twice `BITS`'s 8-bit claim. `self.len()`
-    /// (used by [`Self::map`] via [`crate::storage::buf::BufStorage::par_iter`]) derives the element
-    /// count from the buffer's byte length using `BITS`, so for `i9` it silently reports DOUBLE the
-    /// true count, and an unpaired whole-buffer walk (this widen has no shorter sibling to truncate it,
-    /// unlike a `zip_with`) reads/writes past the buffer once the count crosses the true half.
-    /// `Mapping::SIZE` is the type-level truth regardless of any of that, so bound the walk on it here.
-    pub(crate) fn map_bounded<D2: Scalar, F>(&self, f: F) -> Tensor<D2, Mapping, B>
-    where
-        F: Fn(D) -> D2 + Sync,
-    {
-        Tensor::from_inner(B::map_bounded(&self.inner, Mapping::SIZE, f))
     }
 
     /// Zips two same-layout tensors element-wise. Delegates to the backend's [`Backend::zip_with`];
@@ -221,13 +195,31 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
 
     /// Performs contraction between two tensors: a generalized matmul that multiplies `lhs` and `rhs`
     /// over the shared `Union` index space and reduces the axes absent from the output `Mapping`.
-    /// Delegates to [`Backend::contraction`], which the host backend fuses into a single accumulating
-    /// pass (Emulation does, so no full `Union` outer product is materialized).
+    ///
+    /// Delegates to [`Backend::contraction`], one fused pass with no `Union`-shaped intermediate. The
+    /// host reference for one engine contraction: it accumulates in [`ContractionCast::Output`], the
+    /// width the device path uses, so a kernel's output compares against it directly.
     pub fn contraction<Union: M, Lhs: M, Rhs: M>(lhs: &Tensor<D, Lhs, B>, rhs: &Tensor<D, Rhs, B>) -> Self
     where
         D: ContractionCast + MaterializableScalar,
     {
         Tensor::from_inner(B::contraction(
+            &lhs.inner,
+            &rhs.inner,
+            &Lhs::to_value(),
+            &Rhs::to_value(),
+            &Union::to_value(),
+            &Mapping::to_value(),
+        ))
+    }
+
+    /// [`Self::contraction`] over operands already at accumulator width. A storage dtype does not
+    /// compile here, so a narrow accumulation cannot be reached by accident.
+    pub fn contraction_prewidened<Union: M, Lhs: M, Rhs: M>(lhs: &Tensor<D, Lhs, B>, rhs: &Tensor<D, Rhs, B>) -> Self
+    where
+        D: ContractionAccumulator,
+    {
+        Tensor::from_inner(B::contraction_prewidened(
             &lhs.inner,
             &rhs.inner,
             &Lhs::to_value(),
@@ -288,7 +280,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     /// Kept a *runtime* `assert_eq!`, not a `const` block: every
     /// `{Dm,Hbm}Tensor(View/ViewMut)::reshape` delegates its `Element`-inclusive combined mapping here
     /// (their own per-axis checks stop at `Chip`/`Cluster`/`Slice` -- see
-    /// [`constraints::assert_reshape_dimension_preserved`]'s TODO: some current examples reshape with
+    /// [`crate::constraints::assert_reshape_dimension_preserved`]'s TODO: some current examples reshape with
     /// a mismatched `Element`). A `const` block is evaluated at monomorphization regardless of whether
     /// the call is ever reached at runtime, so making this check static would trip on those dead-but-
     /// compiled paths too, not just the ones actually exercised.
@@ -517,6 +509,19 @@ mod tests {
         let sum = lhs.zip_with(&rhs, |a, b| a + b);
 
         assert_eq!(sum.into_vec(), vec![11, 22, 33, 44]);
+    }
+
+    /// This entry point hands the fold `ContractionCast::Output`, not `D`, which would overflow on the
+    /// first product. The fold's own widen / narrow is pinned at the `BufStorage` level.
+    #[test]
+    fn emulation_contraction_accumulates_integers_in_i32() {
+        axes![M = 1, K = 100, N = 1];
+
+        let lhs = Tensor::<i8, m![M, K], Emulation>::from_vec(vec![100i8; 100]);
+        let rhs = Tensor::<i8, m![K, N], Emulation>::from_vec(vec![100i8; 100]);
+        let out = Tensor::<i8, m![M, N], Emulation>::contraction::<m![M, K, N], _, _>(&lhs, &rhs);
+
+        assert_eq!(out.into_vec()[0], 1_000_000i32 as i8);
     }
 
     /// Multi-axis layout: `m![K, M]` (K outer / M inner) exercises per-axis buffer strides

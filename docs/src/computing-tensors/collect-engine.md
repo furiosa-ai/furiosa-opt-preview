@@ -244,4 +244,3 @@ fn load_vrf<'l, const T: Tu>(
 # let c: CollectTensor<'_, _, i32, m![1], m![1 # 2], m![1 # 256], m![B / 8], m![B % 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
 # let _o = load_vrf(c);
 ```
-

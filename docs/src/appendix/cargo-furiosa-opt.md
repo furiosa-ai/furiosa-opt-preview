@@ -1,5 +1,7 @@
 # `cargo-furiosa-opt`
 
+Use this page when building, testing, running, or directly compiling a Furiosa Optimizer kernel.
+
 `cargo-furiosa-opt` is a thin wrapper around cargo for the Furiosa NPU compiler toolchain.
 Anywhere you would run `cargo`, run `cargo furiosa-opt` instead: every cargo argument passes through verbatim, and the wrapper selects a backend and compiles the kernels your build needs.
 
@@ -19,8 +21,12 @@ The second form compiles kernels directly; see [Direct compilation](#direct-comp
 
 Compared to plain cargo, `cargo furiosa-opt` does a few things around the cargo invocation:
 
-- **Selects a backend.** It builds/tests/runs with your specified backend. See [`--backend`](#--backend-backend).
-- **Builds the kernels you need, automatically.** Under `--backend npu`, `cargo furiosa-opt` compiles the necessary `#[device]` functions into kernels before the cargo build so the resulting binary can load them at runtime. See [Automatic kernel builds](#automatic-kernel-builds).
+- **Selects a backend.**
+  It builds, tests, or runs with your specified backend.
+  See [`--backend`](#--backend-backend).
+- **Builds the kernels you need automatically.**
+  Under `--backend npu`, `cargo furiosa-opt` compiles necessary `#[device]` functions before the cargo build so the resulting binary can load them at runtime.
+  See [Automatic kernel builds](#automatic-kernel-builds).
 
 ## `--backend` _backend_
 
@@ -32,28 +38,33 @@ cargo furiosa-opt --backend typecheck run
 cargo furiosa-opt --backend npu test my_test
 ```
 
-**Default:** `simulation`
+**Default:** `emulation`
 
 **Possible values:**
 
-- `typecheck`: Type-level mapping/shape validation; value-level loops are short-circuited with phantom tensors. No NPU hardware required.
-- `simulation`: Host-side interpretation of tensor ops. No NPU hardware required.
-- `emulation`: Host-side simulation of the NPU device path. No NPU hardware required.
-- `npu`: Real NPU dispatch via compiled kernels. Triggers automatic kernel compilation. Requires a physical NPU and the Furiosa SDK.
+- `typecheck`: Type-level mapping and shape validation with value-level loops short-circuited by phantom tensors.
+  No NPU hardware is required.
+- `emulation`: Host-side buffer emulation of tensor operations.
+  No NPU hardware is required.
+- `npu`: Real NPU dispatch through compiled kernels.
+  It triggers automatic kernel compilation.
+  It requires a physical NPU and the Furiosa SDK.
 
 See [Backends](../introduction.md#backends) for a task-oriented overview.
 
 ## Automatic kernel builds
 
 Under `--backend npu`, `cargo furiosa-opt` runs a kernel pre-compilation step before handing off to cargo.
-The pre-step runs only when it will matter. It is skipped unless **both** of the following hold:
+The pre-step runs only when it matters.
+It is skipped unless **both** of the following hold:
 
 - The cargo subcommand builds or executes code: `build`, `check`, `test`, `run`, `bench`, or `doc`.
 - The invocation is not a `-h` / `--help` query.
 
 When it runs, the pre-step compiles only the kernels the build actually needs:
 
-- It reads cargo's unit graph — honoring your `-p` / `--package` and workspace selection — to find which kernel packages the command builds. A crate is a kernel package if its `Cargo.toml` declares `[package.metadata.furiosa-opt]` (see [Layout](../introduction.md#layout)).
+- It reads cargo's unit graph, honoring your `-p` / `--package` and workspace selection, to find kernel packages.
+  A crate is a kernel package if its `Cargo.toml` declares `[package.metadata.furiosa-opt]`.
 - When the command resolves to specific runnable targets, such as a test, example, or binary, the compiler scans each target and compiles only the `#[device]` functions reachable from it.
 - Otherwise, it falls back to compiling every kernel in the selected packages.
 

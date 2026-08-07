@@ -66,7 +66,7 @@ Reduce along the `A` axis (summing across chips) while keeping results distribut
 
 **Processing:**
 
-The algorithm works through six stages: create four intermediate tensors using diagonal `Slice` + `ChipShuffle` patterns, add them to reduce the `A` axis, then broadcast results to all chips.
+The algorithm works through five stages: create four intermediate tensors using diagonal `Slice` and `ChipShuffle` patterns, then add them to reduce the `A` axis.
 The diagonal pattern ensures each chip receives the data it needs for its assigned `B` value.
 `Slice` (also called asymmetric slice) is a sub-context operation that extracts a subset of elements from specific chip positions (see [Implementation Methods](#implementation-methods-for-each-operation)).
 `ChipShuffle` is a DMA-based redistribution operation that moves data from one chip to another.
@@ -149,19 +149,11 @@ This step performs the actual reduction by adding all 4 tensors element-wise:
 After this addition, each chip holds only one value because the A axis has been reduced:
 - `Intermediate = { chip: B, slice: 256, element: 1 }`
 
-#### Step 6: AllGather
-
-
-This final step broadcasts the result so all chips hold the complete reduction output.
-Each chip gathers data from Chip 0 through Chip 3:
-
-- `Intermediate = { chip: 4, slice: 256, element: B }`
 
 **Output:**
 
-
-After all six steps complete, each chip holds a portion of the reduced result:
-- **Final distribution**: `Out = {chip: A, slice: 256, element: 4}`
+After all five steps complete, each chip holds one portion of the reduced result:
+- **Final distribution**: `Out = {chip: B, slice: 256, element: 1}`
 - **Chip 0**: Holds sum of all `(A=*, B=0)` values
 - **Chip 1**: Holds sum of all `(A=*, B=1)` values
 - **Chip 2**: Holds sum of all `(A=*, B=2)` values
@@ -189,6 +181,7 @@ The diagonal slicing pattern is key: it ensures that data needed for each output
 
 `AllReduce` reduces data distributed across the chip axis so that all chips have identical reduction results.
 Unlike `ReduceScatter`, `AllReduce` ensures every chip ends up with the complete result rather than a portion.
+Conceptually, `AllReduce` combines `ReduceScatter` with `AllGather`.
 
 ### Example: 4-chip `AllReduce` with Add
 

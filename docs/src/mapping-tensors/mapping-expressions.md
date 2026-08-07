@@ -3,7 +3,6 @@
 A mapping expression is a Rust type that encodes a mapping.
 This page defines its constructors and equivalence rules.
 
-
 ## Axis Sizes
 
 The `axes!` macro declares axis identifiers and their sizes.

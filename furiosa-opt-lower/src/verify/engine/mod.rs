@@ -7,7 +7,7 @@ mod contraction;
 mod vector;
 
 pub use cast::{CastError, config_cast};
-pub use collect::{CollectError, ToTrfError, config_collect, config_to_trf};
+pub use collect::{CollectError, ToTrfError, ToVrfError, config_collect, config_to_trf, config_to_vrf};
 pub use commit_adapter::{CommitCastError, CommitTrimError, config_commit_cast, config_commit_trim};
 pub use contraction::{
     ContractLaneError, ContractPacketError, ContractTimeError, LaneMode, StreamAdapterError, config_contract_lane,

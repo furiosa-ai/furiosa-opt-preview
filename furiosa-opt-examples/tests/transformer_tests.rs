@@ -1,7 +1,8 @@
 //! Run-to-completion smoke tests for the transformer decoder-block `#[device]` entry points,
 //! launched on `zero`ed inputs — they only check that a kernel compiles and runs without
 //! panicking; numerical correctness lives in `transformer.py verify` (diffs every kernel
-//! against the PyTorch reference).
+//! against the PyTorch reference) — save for the running-max test below, which needs three
+//! chunks and so has no single-chunk equivalent in `verify`.
 
 #![allow(clippy::type_complexity)]
 
@@ -95,6 +96,43 @@ async fn test_attention_forward() {
         (&mut *ctx, &q, &k, &v, &mask, &mut max_hbm, &mut sum_hbm, &mut out_hbm),
     )
     .await;
+}
+
+/// Each `forward` must persist the max it folded, or a later chunk rescales the accumulated sum
+/// and output against chunk 0's max. Takes three chunks to see: with two, the stored max and the
+/// running one still agree. Only the max is asserted, since that is the state that went missing.
+#[tokio::test]
+async fn test_attention_forward_persists_running_max() {
+    let mut ctx = Context::acquire();
+
+    // Middle chunk's keys of 1 raise the max to `D / sqrt(D)` between two zeroed chunks, so the
+    // third chunk sees `sqrt(D)` only if the second one stored it. v/mask stay zero: the max is
+    // taken before masking, and nothing else is read back.
+    let ones = |n| std::iter::repeat_n(bf16::from_f32(1.0), n);
+    let q = HostTensor::<bf16, m![N, G, D]>::from_vec(ones(N::SIZE * G::SIZE * D::SIZE));
+    let k_one = HostTensor::<bf16, m![T, N, D]>::from_vec(ones(T::SIZE * N::SIZE * D::SIZE));
+
+    let q = q.to_hbm(&mut ctx.pdma).await;
+    let k_one = k_one.to_hbm(&mut ctx.pdma).await;
+    let k_zero = HostTensor::<bf16, m![T, N, D]>::zero().to_hbm(&mut ctx.pdma).await;
+    let v = HostTensor::<bf16, m![T, N, D]>::zero().to_hbm(&mut ctx.pdma).await;
+    let mask = HostTensor::<f32, m![T]>::zero().to_hbm(&mut ctx.pdma).await;
+    let mut max_hbm = HostTensor::<f32, m![N, G]>::zero().to_hbm(&mut ctx.pdma).await;
+    let mut sum_hbm = HostTensor::<f32, m![N, G]>::zero().to_hbm(&mut ctx.pdma).await;
+    let mut out_hbm = HostTensor::<bf16, m![N, G, D]>::zero().to_hbm(&mut ctx.pdma).await;
+
+    for (chunk, k) in [&k_zero, &k_one, &k_zero].into_iter().enumerate() {
+        let args = (&mut *ctx, &q, k, &v, &mask, &mut max_hbm, &mut sum_hbm, &mut out_hbm);
+        match chunk {
+            0 => launch(ops::attention_forward_first, args).await,
+            _ => launch(ops::attention_forward, args).await,
+        }
+    }
+
+    let expected = (D::SIZE as f32).sqrt();
+    for max in max_hbm.to_host::<m![N, G]>(&mut ctx.pdma).await.into_vec() {
+        assert!((max - expected).abs() < 0.05, "running max {max} is not {expected}");
+    }
 }
 
 #[tokio::test]

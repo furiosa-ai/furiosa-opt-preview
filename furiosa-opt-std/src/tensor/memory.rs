@@ -174,7 +174,7 @@ impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> 
         Tensor::from_vec(data).into()
     }
 
-    /// Creates a tensor from a pre-packed device byte image ([`Self::to_buf`]'s inverse), stored as-is.
+    /// Creates a tensor from a pre-packed device byte image ([`crate::scalar::Scalar::to_buf`]'s inverse), stored as-is.
     /// Contrast [`Self::from_vec`], which packs logical values; pre-packed fp4 weights come through here
     /// to avoid a decode + re-pack round-trip. Panics on a byte-length mismatch.
     pub fn from_buf(buf: Vec<u8>) -> Self {

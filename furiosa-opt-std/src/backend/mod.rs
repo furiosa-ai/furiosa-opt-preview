@@ -19,7 +19,7 @@ use std::fmt::Debug;
 use furiosa_mapping::Mapping as MappingValue;
 use furiosa_mapping::*;
 
-use crate::cast::ContractionCast;
+use crate::cast::{ContractionAccumulator, ContractionCast};
 use crate::scalar::{MaterializableScalar, Scalar};
 use crate::tensor::memory::{HbmTensor, HostTensor};
 
@@ -57,9 +57,9 @@ pub trait Backend: Sized + 'static {
     /// Build a storage from its dense physical device byte image (`mapping`-order, packed on `D::BITS`):
     /// the inverse of [`Self::into_buf`]. The default decodes the packed bytes to a logical `Vec<D>` and
     /// packs via [`Self::from_vec`]; a backend whose storage already IS the packed image (Emulation /
-    /// Npu's [`BufStorage`]) overrides this to store the bytes directly, no decode / re-pack. Pre-packed
+    /// Npu's [`crate::storage::BufStorage`]) overrides this to store the bytes directly, no decode / re-pack. Pre-packed
     /// data (fp4 / f4e2m1 weights) enters through here. Backs [`crate::tensor::Tensor::from_buf`].
-    fn from_buf<D: Scalar>(mapping: &MappingValue, buf: Vec<u8>) -> Self::Storage<D> {
+    fn from_buf<D: MaterializableScalar>(mapping: &MappingValue, buf: Vec<u8>) -> Self::Storage<D> {
         Self::from_vec(mapping, (0..mapping.size()).map(|i| D::load(&buf, i)))
     }
 
@@ -74,7 +74,7 @@ pub trait Backend: Sized + 'static {
     /// Serialize the storage to its dense physical device byte image (`mapping`-order, packed on
     /// `D::BITS`): the exact bytes that sit in HBM / DM, half the logical length for a 4-bit `D`. The
     /// default decodes to a logical `Vec<D>` and re-packs via [`Scalar::to_buf`]; a backend whose
-    /// storage already IS the packed image (Emulation / Npu's [`BufStorage`]) overrides this to move the
+    /// storage already IS the packed image (Emulation / Npu's [`crate::storage::BufStorage`]) overrides this to move the
     /// internal bytes out directly. Backs [`crate::tensor::memory::HbmTensor::to_buf`].
     fn into_buf<D: MaterializableScalar>(storage: Self::Storage<D>, mapping: &MappingValue) -> Vec<u8> {
         D::to_buf(&Self::into_vec(storage, mapping))
@@ -86,19 +86,7 @@ pub trait Backend: Sized + 'static {
     /// layout, so no mapping type parameter is needed.
     /// The closure must be `Fn + Sync` (not `FnMut`): an elementwise map has no cross-cell state, and
     /// [`Emulation`] folds the cells across the rayon pool.
-    fn map<D: MaterializableScalar, D2: Scalar>(
-        src: &Self::Storage<D>,
-        f: impl Fn(D) -> D2 + Sync,
-    ) -> Self::Storage<D2>;
-
-    /// [`Self::map`], but bounded by a caller-supplied `len` instead of the storage's own length
-    /// recovery. Backs [`crate::tensor::Tensor::map_bounded`]; see its doc for why plain [`Self::map`]
-    /// is unsound for a non-`MaterializableScalar` staging type (`i5`/`i9`).
-    fn map_bounded<D: Scalar, D2: Scalar>(
-        src: &Self::Storage<D>,
-        len: usize,
-        f: impl Fn(D) -> D2 + Sync,
-    ) -> Self::Storage<D2>;
+    fn map<D: Scalar, D2: Scalar>(src: &Self::Storage<D>, f: impl Fn(D) -> D2 + Sync) -> Self::Storage<D2>;
 
     /// Element-wise zip of two same-layout tensors to a new scalar. See [`Self::map`]; the result is
     /// defined only where both inputs are.
@@ -176,7 +164,21 @@ pub trait Backend: Sized + 'static {
     ///
     /// Like [`Self::reduce`], [`Emulation`]'s per-output-cell sum regroups across threads, so its
     /// `f32` result can differ from serial and vary run-to-run.
+    ///
+    /// Operands arrive at the engine's operand width and accumulate in [`ContractionCast::Output`].
+    /// [`Self::contraction_prewidened`] is the same fold over operands already at that width.
     fn contraction<D: ContractionCast + MaterializableScalar>(
+        lhs: &Self::Storage<D>,
+        rhs: &Self::Storage<D>,
+        lhs_map: &MappingValue,
+        rhs_map: &MappingValue,
+        pre_reduce: &MappingValue,
+        out: &MappingValue,
+    ) -> Self::Storage<D>;
+
+    /// [`Self::contraction`] over operands already at [`ContractionAccumulator`] width, so its widen and
+    /// narrow are the identity. This is the pipeline's own fold, at `contract_lane`.
+    fn contraction_prewidened<D: ContractionAccumulator>(
         lhs: &Self::Storage<D>,
         rhs: &Self::Storage<D>,
         lhs_map: &MappingValue,

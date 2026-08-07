@@ -71,7 +71,9 @@ fn bench_contraction(c: &mut Criterion) {
     let lhs = Tensor::<f32, m![M, K]>::rand(&mut rng());
     let rhs = Tensor::<f32, m![K, N]>::rand(&mut rng());
     c.bench_function("contraction 128x128x128", |b| {
-        b.iter(|| Tensor::<f32, m![M, N]>::contraction::<m![M, K, N], _, _>(black_box(&lhs), black_box(&rhs)))
+        b.iter(|| {
+            Tensor::<f32, m![M, N]>::contraction_prewidened::<m![M, K, N], _, _>(black_box(&lhs), black_box(&rhs))
+        })
     });
 }
 

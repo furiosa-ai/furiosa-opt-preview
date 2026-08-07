@@ -18,8 +18,8 @@ use furiosa_mapping::M;
 
 use crate::scalar::Scalar;
 
-/// Bits in a byte / flit byte size, single-sourced from the published verifier crate.
-pub(crate) use furiosa_opt_lower::{BITS_PER_BYTE, FLIT_BYTES};
+/// Bits in a byte / flit byte size / VRF capacity, single-sourced from the published verifier crate.
+pub(crate) use furiosa_opt_lower::{BITS_PER_BYTE, FLIT_BYTES, VRF_BYTES};
 
 /// Supported `Cluster` dimension sizes.
 pub(crate) const CLUSTER_SIZES: [usize; 2] = [1, 2];
@@ -97,6 +97,19 @@ pub(crate) fn assert_packet_one_or_two_flit<D: Scalar, Packet: M>() {
         assert!(
             bytes == FLIT_BYTES || bytes == 2 * FLIT_BYTES,
             "Packet size must be one or two flits (32 or 64 bytes)"
+        );
+    };
+}
+
+/// Asserts one slice's vector register file operand fits [`VRF_BYTES`] (`to_vrf`).
+///
+/// A compile-time check, unlike the TRF's: the VRF is one undivided file per slice, so its capacity
+/// is fixed here, while `to_trf`'s depends on the `TrfAddress` region passed at run time.
+pub(crate) fn assert_vrf_capacity<D: Scalar, Element: M>() {
+    const {
+        assert!(
+            size_in_bytes(D::BITS, Element::SIZE) <= VRF_BYTES,
+            "VRF data must fit the vector register file (8192 bytes per slice)"
         );
     };
 }

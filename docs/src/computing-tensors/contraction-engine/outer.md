@@ -215,6 +215,23 @@ The TRF read cache and bank alternation (see [Register Files: Double Buffering](
 
 ## Multiplier
 
-The Multiplier consumes the two aligned operands from the Stream Adapter and TRF Sequencer, widens each input element to the contraction output type (`i4`/`i8` -> `i32`, `f8`/`bf16` -> `f32`) to keep the downstream accumulator from overflowing, and multiplies them elementwise.
+The Multiplier consumes the two aligned operands from the Stream Adapter and TRF Sequencer, widens each input element to the contraction output type to keep the downstream accumulator from overflowing, and multiplies them elementwise.
 Its output, a single tensor in the joint mapping `[Chip, Cluster, Slice, Lane, Time, Packet]`, becomes the input to the [Packet Reducer](./packet-reducer.md).
 Each `Time` cycle, every `Lane` produces a full `packet` of products in parallel.
+
+### Operand types
+
+These are the operand pairs the Multiplier accepts, with the type each pair widens to:
+
+| Stream (activation) | Weight (TRF) | Accumulator |
+|---------------------|--------------|-------------|
+| `i4` or `i5` | `i4` or `i5` | `i32` |
+| `i8` or `i9` | `i8` or `i9` | `i32` |
+| `f8e4m3` | `f8e4m3` | `f32` |
+| `f8e5m2` | `f8e5m2` | `f32` |
+| `bf16` | `bf16` | `f32` |
+
+An integer operand may be the raw form (`i4`/`i8`) or its zero-point-subtracted staging (`i5`/`i9`, produced by [Zero-Point Subtraction](../fetch-adapter.md#zero-point-subtraction)), and the two operands need not match within a family.
+They may not cross families (no `i4` against `i8`) or kinds (no integer against float), and a float pair must match exactly.
+
+A contraction over an element type this table does not list runs in the [Vector Engine](../vector-engine/index.md) instead: multiply elementwise, then reduce with [Intra-Slice Reduce](../vector-engine/intra-slice-reduce.md), which computes in `i32` / `f32`.

@@ -1,7 +1,8 @@
 # Moving Tensors
 
-[Quick Start](../quick-start.md#memory-tiers) introduced TCP's memory tiers.
-This chapter covers how tensors move between three of them: HBM, DM, and SPM, through three dedicated engines:
+Use this chapter when a kernel must stage data between memory tiers or turn a buffer into a Tensor Unit stream.
+
+This chapter covers movement between HBM, DM, and SPM through three dedicated engines:
 - **[Fetch](./fetch-engine.md)**: DM → Tensor Unit stream
 - **[Commit](./commit-engine.md)**: Tensor Unit stream → DM
 - **[DMA](./dma-engine.md)**: any pair among DM, SPM, HBM
@@ -30,7 +31,7 @@ flowchart TB
     click TU "../computing-tensors/index.html" "Tensor Unit"
 ```
 
-Their APIs are designed around what the programmer controls: which engine moves each tensor and how axes map to hardware dimensions.
+The APIs expose the decisions a kernel author controls: which engine moves each tensor and how axes map to hardware dimensions.
 The compiler translates these declarations into low-level hardware concerns such as memory bank scheduling, stride calculation, and access alignment.
 
 The [Sequencer](./sequencer.md) is the shared mechanism all three engines use to convert between memory buffers and packet streams.

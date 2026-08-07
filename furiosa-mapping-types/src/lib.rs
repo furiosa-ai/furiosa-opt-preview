@@ -766,7 +766,7 @@ pub enum SequencerMode {
     Read,
     /// Stream writes to memory (each memory cell is written exactly once).
     Write,
-    /// A read carve ([`MappingExt::carve`]) that also tolerates a `Bottom` pad in the stream (a
+    /// A read carve (`MappingExt::carve`) that also tolerates a `Bottom` pad in the stream (a
     /// `view_mut` hole, read as a `Top` don't-care). TRANSIENT (PROG-480): a stopgap until the sequencer
     /// can carve the broadcast from the memory leftover (see `read_carved_down_memory_keeps_broadcast_term`),
     /// at which point this mode can be retired.

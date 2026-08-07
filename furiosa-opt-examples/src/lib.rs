@@ -34,6 +34,7 @@ pub mod stotrf_table_lookup;
 pub mod switch_assertions;
 pub mod switch_engine;
 pub mod tile;
+pub mod to_vrf_assertions;
 pub mod transformer;
 pub mod transpose;
 pub mod typelevel_const;

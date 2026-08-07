@@ -1,524 +1,312 @@
 # Fetch and Commit Engine
 
-These examples demonstrate how fetch-commit patterns govern layout transformation, write granularity, and hardware capacity handling across the complete streaming path: input tensor -> fetch sequencer -> [Switch Engine](../computing-tensors/switch-engine.md) -> [Collect Engine](../computing-tensors/collect-engine.md) -> commit unit -> output tensor.
+Fetch and Commit move a logical tensor between DM layouts while preserving every logical index.
+The streaming path is input DM, Fetch, Switch, Collect, Commit, and output DM.
+Collect and every stage after it consume a flit, which is a fixed 32-byte transfer unit, so packet size relative to flit size drives most of the decisions here.
+This chapter covers four of those decisions: layout permutation, full-flit commits, packet padding, and capacity-bounded segmentation.
+The [Fetch Engine](../moving-tensors/fetch-engine.md), [Collect Engine](../computing-tensors/collect-engine.md), and [Commit Engine](../moving-tensors/commit-engine.md) are the canonical API references.
 
-The four examples cover distinct aspects of the fetch-commit streaming path (axis reordering, write granularity, memory layout choices, and handling of tensors that exceed hardware capacity), corresponding to the patterns: axis permutation, full-flit commit, tail padding optimization, and tensor segmentation.
+## Data Movement Design Objectives
 
+| Need | Design decision | Required evidence |
+|------|-----------------|-------------------|
+| Layout permutation | Preserve each logical index while changing its physical order. | A host oracle compares each logical index before and after movement. |
+| Full-flit movement | Match packet and commit granularity to avoid unnecessary slicing. | Schedule and alignment constraints justify the chosen granularity. |
+| Tail handling | Pad only when the padding cost is lower than the movement cost it avoids. | The oracle ignores padded values and validates the logical output shape. |
+| Large tensors | Partition work into independently valid segments that fit the selected memory level. | The oracle covers segment boundaries and the recombined output. |
 
-## Example 1: Axis Permutation
+Every transformation begins by defining the logical input-to-output index relation.
+`typecheck run` validates mapping and shape decisions, an emulation oracle validates values and boundaries, and the Schedule Viewer compares fixed candidates.
 
-This example demonstrates tensor reshaping by permuting axes during a fetch-commit cycle, using the Switch Engine to reorder axes without additional computation.
+## Layout Permutation
 
-```rust,ignore
+Fetch and Commit permute the axes that the stream visits over time; they do not exchange the axis that sits innermost in a packet.
+The runnable example below reads an `i8` tensor whose DM layout is `[A, B, C]` and writes the same values as `[B, A, C]`.
+`C` remains innermost in both layouts because it is the packet axis, while `A` and `B` are `Time` axes whose visiting order the kernel chooses.
+Exchanging the innermost axis instead, as in `[A, B]` to `[B, A]`, belongs to the [Transpose Engine](../computing-tensors/transpose-engine.md) within a flit or to a [tensor DMA](../moving-tensors/dma-engine.md) between memories.
+
+```rust
+# #![feature(adt_const_params)]
+# extern crate furiosa_opt_std;
+# use furiosa_opt_std::prelude::*;
+axes![A = 4, B = 8, C = 32];
+
+fn fetch_and_commit_permuted<'l, const T: Tu>(
+    input: BeginTensor<'l, T, i8, m![1], m![1 # 2], m![1 # 256], m![1], m![A, B, C]>,
+) -> DmTensor<i8, m![1], m![1 # 2], m![1 # 256], m![B, A, C]> {
+    input
+        .fetch::<m![B, A], m![C]>()
+        .collect::<m![B, A], m![C # 32]>()
+        .commit_trim::<m![C]>()
+        .commit()
+}
+#
+# let mut ctx = Context::acquire();
+# let input: BeginTensor<'_, _, i8, m![1], m![1 # 2], m![1 # 256], m![1], m![A, B, C]> = BeginTensor::new(&mut ctx.main, Tensor::zero());
+# let _output = fetch_and_commit_permuted(input);
+```
+
+The input DM mapping keeps `C` innermost, so each Fetch packet is 32 contiguous `i8` values, which is both a legal packet size and exactly one flit.
+`fetch::<m![B, A], m![C]>()` states the permutation directly: it streams `B × A = 32` time steps of one packet each, visiting `B` before `A` even though the input buffer stores `A` before `B`.
+The Fetch Sequencer computes the strides for that order, so the read walks the input in steps of `B × C` bytes.
+`collect` passes the 32-byte packet through unchanged, `commit_trim` keeps all 32 values, and `commit` writes them in stream order, which makes the output contiguous under `m![B, A, C]`.
+
+A permutation changes which values are adjacent in memory without a Vector Engine or Contraction Engine operation, which prepares an operand for a later stage that needs a different visiting order.
+An activation stored as `[batch, token, channel]`, for example, can be presented as `[token, batch, channel]` for a stage that iterates tokens outermost, because only the two outer axes move and `channel` stays innermost.
+The current API derives both sequencer configurations from these mappings, so a kernel author writes no physical base address or commit size.
+
+The same permutation can be expressed on the Commit side instead, by fetching `m![A, B]` and committing to `m![B, A, C]`.
+Both produce the same output tensor and differ only in which sequencer absorbs the strided access: permuting at Fetch reads strided and writes contiguously, while permuting at Commit reads contiguously and writes strided.
+Prefer the side whose access pattern the [Sequencer](../moving-tensors/sequencer.md) can express in fewer entries, and confirm the choice with a schedule comparison rather than by inspection.
+
+### Permutation Dataflow
+
+| Stage | Time | Packet | Effect |
+|-------|------|--------|--------|
+| Input DM | `1` | `A, B, C` | The Element mapping, which keeps `C` as a 32-byte contiguous tail. |
+| Fetch | `B, A` | `C` | Reads one `C` packet per time step in `B`-major order, which strides the input. |
+| Collect | `B, A` | `C # 32` | Passes the full flit through without padding or splitting. |
+| Commit Trim | `B, A` | `C` | Keeps all 32 values, so trimming is a no-op. |
+| Commit | `B, A` | `C` | Writes each packet contiguously, which realizes `m![B, A, C]`. |
+
+The table below traces the first few time steps, using DM byte offsets within one slice.
+Input offsets are `(a × B + b) × C` and output offsets are `(b × A + a) × C`, which is the stream position itself times `C`.
+
+| Stream position | Index `[a, b]` | Input byte offset | Output byte offset |
+|-----------------|----------------|-------------------|--------------------|
+| `0` | `[0, 0]` | `0` | `0` |
+| `1` | `[1, 0]` | `256` | `32` |
+| `2` | `[2, 0]` | `512` | `64` |
+| `3` | `[3, 0]` | `768` | `96` |
+| `4` | `[0, 1]` | `32` | `128` |
+| `31` | `[3, 7]` | `992` | `992` |
+
+### Correctness Requirements
+
+The host oracle must compare `output[b, a, c]` with `input[a, b, c]` for every logical index.
+A test that checks only one time step, or only the total set of values, accepts a kernel that permutes the wrong axis pair.
+`typecheck run` checks the mapping and shape path, while an emulation test checks the values that actually land in DM.
+In RNGD, the generated sequencer must satisfy the current hardware limits of at most eight entries, at most 65,536 iterations per entry, and a packet size of 1, 2, 4, 8, 16, or 32 bytes.
+Commit rejects a broadcast stream because every output tensor location must have exactly one source position.
+
+The `fetch_commit_simple` example in `furiosa-opt-examples` changes an innermost axis instead, so it uses the other mechanism.
+Its Tensor Unit stage fetches, casts to `i32`, and commits without changing the layout, and the `[A, B]` to `[B, A]` exchange comes from the output mapping of `to_hbm`, which the tensor DMA performs.
+Its emulation test compares every `[B, A]` output index against the transposed and widened input.
+
+## Full-Flit Commit
+
+A full-flit write is a 32-byte output packet, not a separate Commit API.
+The Collect Engine passes an exactly 32-byte packet through without padding or splitting it into more time steps.
+`commit_trim` remains mandatory, but trimming a 32-byte valid packet is a no-op before `commit` writes it to DM.
+
+Choose a full-flit packet when the logical packet and element type make 32 bytes natural for the next stage.
+Do not add padding solely to make a packet 32 bytes without comparing the memory cost and schedule.
+The [Collect Engine single-flit example](../computing-tensors/collect-engine.md#single-flit-packet) and [Commit Engine multi-write model](../moving-tensors/commit-engine.md#multi-write-packet) define the current behavior.
+
+### Commit Granularity and Cost
+
+An `i8` packet with `L = 32` occupies one complete flit with no Collect padding.
+The code keeps `L` unchanged through `commit_trim`, so every byte in the flit is logical output rather than tail padding.
+In the main context, the Commit Engine writes one valid packet per cycle when the mapping gives a contiguous 32-byte access.
+In the sub context, Commit uses fixed eight-byte write units, so the same 32-byte packet takes four writes.
+The output mapping still determines address order, so a full flit does not by itself make a non-contiguous layout efficient.
+
+| Logical packet | Flits after Collect | Padding per logical packet | Commit consideration |
+|----------------|---------------------|----------------------------|----------------------|
+| 8 `i8` values | 1 × 32-byte flit | 24 bytes | A small packet consumes a full flit. |
+| 16 `i8` values | 1 × 32-byte flit | 16 bytes | Padding may be acceptable when it reduces Fetch iterations. |
+| 32 `i8` values | 1 × 32-byte flit | 0 bytes | The packet is a natural full-flit Commit candidate. |
+| 40 `i8` values | 2 × 32-byte flits | 24 bytes | The final flit is padded. |
+
+### Full-Flit Commit API
+
+The following current API function commits an already-cast `i8` packet with `L = 32`.
+The packet occupies one complete 32-byte flit, so `commit_trim` keeps all 32 values before `commit` writes the DM tensor.
+
+```rust
+# #![feature(adt_const_params)]
+# extern crate furiosa_opt_std;
+# use furiosa_opt_std::prelude::*;
+axes![P = 256, M = 4, K = 2, L = 32];
+
+fn commit_full_flit<'l, const T: Tu>(
+    input: CastTensor<'l, T, i8, m![1], m![1 # 2], m![P], m![M, K], m![L]>,
+) -> DmTensor<i8, m![1], m![1 # 2], m![P], m![M, K, L]> {
+    input.commit_trim::<m![L]>().commit()
+}
+#
+# let mut ctx = Context::acquire();
+# let input: CastTensor<'_, _, i8, m![1], m![1 # 2], m![P], m![M, K], m![L]> = CastTensor::new(&mut ctx.main, Tensor::zero());
+# let _output = commit_full_flit(input);
+```
+
+| Boundary | Logical packet | Physical size | Result |
+|----------|----------------|---------------|--------|
+| Commit input | `L = 32` `i8` values | 32 bytes | One complete flit. |
+| `commit_trim::<m![L]>()` | All 32 values | 32 bytes | No tail values are removed. |
+| `commit()` | `M, K, L` | 32 bytes per packet | Writes the full logical packet to DM. |
+
+## Packet Padding and Size
+
+Padding is part of the tensor mapping, not an independent runtime `dummy` parameter.
+The `#` mapping operator makes physical capacity available while leaving the logical tensor shape unchanged.
+Fetch derives its `read_size` from contiguous DM access, packet size, and downstream cast constraints.
+Larger packets can reduce fetch cycles, but Collect pads every non-32-byte packet to a 32-byte flit and can add time steps for multi-flit packets.
+
+Use the [Fetch Engine optimization model](../moving-tensors/fetch-engine.md#optimizations) to compare candidate packet mappings.
+Use the [Collect Engine](../computing-tensors/collect-engine.md) to determine the resulting flit and time mappings.
+Use [`commit_trim`](../computing-tensors/commit-adapter.md#trimming) and a host oracle to ensure padding never appears in the logical output.
+Compare candidates in the Schedule Viewer with the release, shapes, data types, and mappings fixed.
+
+### Padding Performance Model
+
+Fetch throughput depends on contiguous DM access and packet size.
+Non-adjacent axes reduce `max_access_size` and therefore `read_size`, while a packet smaller than the contiguous run also limits `read_size`.
+Padding can increase `read_size`, but the downstream Collect Engine converts packets to 32-byte flits.
+A 20-byte packet wastes 12 of 32 flit bytes, and a 40-byte packet spans two flits and wastes 24 of 64 bytes.
+Padding reads beyond logical data are safe only when those values do not affect computation.
+The output path must still trim the padded tail before Commit materializes the logical tensor.
+
+### Packet-Size Alternatives
+
+The three current API functions below read the same `A = 3`, `B = 5`, `C = 2` `f8e4m3` tensor with different packet mappings.
+Each value has one byte, so the packet mapping directly gives the packet byte size.
+
+| Function | Fetch `Time` | Fetch `Packet` | Fetch work | Collect padding |
+|----------|--------------|----------------|------------|-----------------|
+| `fetch_packet_c` | `A, B` | `C # 8` | 15 packets of 8 bytes | 24 bytes for each packet. |
+| `fetch_packet_bc` | `A` | `[B, C] # 16` | 3 packets of 16 bytes | 16 bytes for each packet. |
+| `fetch_packet_abc` | `1` | `[A, B, C] # 32` | 1 packet of 32 bytes | None. |
+
+The 8-byte and 16-byte candidates require Collect to pad each packet to a 32-byte flit.
+The 32-byte candidate reaches Collect as one full flit, but its extra physical capacity can increase DM usage.
+The schedule comparison decides whether fewer fetches outweigh the padding and the downstream layout cost for the fixed workload.
+
+### Packet-Size API Examples
+
+The current Fetch Engine examples express three packet sizes for the same `f8e4m3` tensor with `A = 3`, `B = 5`, and `C = 2`.
+They process fifteen 8-byte packets, three 16-byte packets, or one 32-byte packet respectively before the downstream stages decide the final flit layout.
+
+```rust
+# #![feature(adt_const_params)]
+# extern crate furiosa_opt_std;
+# use furiosa_opt_std::prelude::*;
 axes![A = 3, B = 5, C = 2];
 
-// Input: shape [A, B, C]
-let input: DmTensor<f8, m![1], m![1], m![1], m![A, B, C]> = ...;
+fn fetch_packet_c<'l, const T: Tu>(
+    input: BeginTensor<'l, T, f8e4m3, m![1], m![1 # 2], m![1 # 256], m![1], m![A, B, C]>,
+) -> FetchTensor<'l, T, f8e4m3, m![1], m![1 # 2], m![1 # 256], m![A, B], m![C # 8]> {
+    input.fetch()
+}
 
-// Output: shape [B, A, C] (permuted layout)
-let output: DmTensor<f8, m![1], m![1], m![1], m![B, A, C # 6]> = ctx
-    .main
-    .begin(input.view())
-    .fetch::<m![A, B], m![C # 6]>()           // Time=[A,B], Packet=[C] padded to 8 bytes
-    .collect::<m![A, B], m![C # 30]>()        // Pad to 32-byte flit (forwarding switch implied)
-    .commit();                                // Write with permuted sequencer config
+fn fetch_packet_bc<'l, const T: Tu>(
+    input: BeginTensor<'l, T, f8e4m3, m![1], m![1 # 2], m![1 # 256], m![1], m![A, B, C]>,
+) -> FetchTensor<'l, T, f8e4m3, m![1], m![1 # 2], m![1 # 256], m![A], m![[B, C] # 16]> {
+    input.fetch()
+}
+
+fn fetch_packet_abc<'l, const T: Tu>(
+    input: BeginTensor<'l, T, f8e4m3, m![1], m![1 # 2], m![1 # 256], m![1], m![A, B, C]>,
+) -> FetchTensor<'l, T, f8e4m3, m![1], m![1 # 2], m![1 # 256], m![1], m![[A, B, C] # 32]> {
+    input.fetch()
+}
+#
+# let mut ctx = Context::acquire();
+# let input: BeginTensor<'_, _, f8e4m3, m![1], m![1 # 2], m![1 # 256], m![1], m![A, B, C]> = BeginTensor::new(&mut ctx.main, Tensor::zero());
+# let _packet_c = fetch_packet_c(input);
 ```
 
-#### Input Tensor
+The larger packet is not automatically better because padding consumes DM capacity and can change the downstream dataflow.
+Use the host oracle to prove that padding is excluded and the schedule to compare the fixed workload.
 
-The input is a 3D tensor stored in SRAM with dimensions `[A=3, B=5, C=2]`, containing 30 elements total:
-- **Shape**: `A × B × C = 3 × 5 × 2`
-- **Data type**: `f8` (8-bit floating-point)
-- **Memory layout**: `m![A, B, C]` - consecutive in memory as `A` varies slowest, `C` varies fastest
-- **Base address**: `b = 0` (starts at SRAM address 0)
-- **Physical storage**: Elements are arranged as `[A0,B0,C0][A0,B0,C1][A0,B1,C0]...[A2,B4,C1]`
+## Capacity-Bounded Segmentation
 
-Labeling elements by their indices, memory contains:
-```text
-Address 0-1:   (A=0,B=0,C=0-1)
-Address 2-3:   (A=0,B=1,C=0-1)
-Address 4-5:   (A=0,B=2,C=0-1)
-...continuing with A=0, varying B...
-Address 10-11: (A=1,B=0,C=0-1)
-...and so on
+An operand that does not fit the register file it must live in is processed one segment at a time, and the kernel writes that loop itself.
+The current API exposes no contract that automatically splits one Fetch and Commit operation into capacity-sized executions.
+
+The example below adds a vector of `B = 4096` `i32` values to every row of a matrix with `A = 128` rows.
+The Vector Engine reads its second operand from the vector register file (VRF), which holds 8 KiB per slice, and the whole vector occupies 16 KiB per slice, so the vector cannot be resident for a single pass.
+The kernel therefore splits `B` into two segments of 2048 values, which is 8 KiB each.
+Each iteration selects one segment with `tile`, loads only that segment with `to_vrf`, adds it to the matching input segment, and writes the result with `commit_view` before the next iteration overwrites the VRF.
+
+```rust
+# #![feature(adt_const_params)]
+# extern crate furiosa_opt_std;
+# use furiosa_opt_std::prelude::*;
+axes![A = 128, B = 4096];
+
+type Chip = m![1];
+type Cluster = m![1];
+
+fn segmented_add(
+    ctx: &mut Context,
+    lhs: HbmTensorView<'_, i32, Chip, m![A, B]>,
+    rhs: HbmTensorView<'_, i32, Chip, m![B]>,
+    mut out: DmTensor<i32, Chip, Cluster, m![A / 2 # 64], m![A % 2, B]>,
+) -> DmTensor<i32, Chip, Cluster, m![A / 2 # 64], m![A % 2, B]> {
+    let lhs_dm = lhs.to_dm::<Cluster, m![A / 2 # 64], m![A % 2, B]>(&mut ctx.tdma);
+    let rhs_dm = rhs.to_dm::<Cluster, m![A / 2 # 64], m![B]>(&mut ctx.tdma);
+
+    for i in 0..2 {
+        let rhs_tile = rhs_dm
+            .view()
+            .tile::<m![B / 2048], 1, m![B / 2048 = 1 # 2, B % 2048]>(i);
+        let rhs_vrf: VrfTensor<i32, Chip, Cluster, m![A / 2 # 64], m![B % 2048]> = ctx
+            .sub
+            .begin(rhs_tile)
+            .fetch::<m![B / 2048 = 1], m![B % 2048]>()
+            .fetch_cast::<i32>()
+            .collect::<m![B / 2048 = 1, B / 8 % 256], m![B % 8]>()
+            .to_vrf();
+
+        let lhs_tile = lhs_dm
+            .view()
+            .tile::<m![B / 2048], 1, m![A % 2, B / 2048 = 1 # 2, B % 2048]>(i);
+        let out_tile = out
+            .view_mut()
+            .tile::<m![B / 2048], 1, m![A % 2, B / 2048 = 1 #{!} 2, B % 2048]>(i);
+        ctx.main
+            .begin(lhs_tile)
+            .fetch::<m![A % 2, B / 2048 = 1], m![B % 2048]>()
+            .fetch_cast::<i32>()
+            .collect::<m![A % 2, B / 2048 = 1, B / 8 % 256], m![B % 8]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_fxp(FxpBinaryOp::AddFxp, &rhs_vrf)
+            .vector_final()
+            .commit_trim::<m![B % 8]>()
+            .commit_view(out_tile);
+    }
+
+    out
+}
 ```
 
-#### Output Tensor (Target)
-
-Store the same logical tensor with axes permuted to layout `[B, A, C]`:
-- **Shape**: Still `B × A × C = 5 × 3 × 2` (same 30 elements, different order)
-- **Data type**: `f8` (unchanged)
-- **Memory layout**: `m![B, A, C # 6]` - now `B` varies slowest, with 6-byte padding per element
-- **Base address**: `b = 1024` (stored at SRAM address 1024)
-- **Physical storage**: Elements arranged as `[B0,A0,C0-1][B0,A1,C0-1][B0,A2,C0-1][B1,A0,C0-1]...`
-
-This reordering changes which elements are adjacent in memory: in the input, all `B` values for `A=0` are contiguous; in the output, all `A` values for `B=0` are contiguous.
-
-#### Processing
-
-Three stages execute in sequence to achieve the permutation: Fetch, Switch, and Commit.
-
-1. **Fetch Sequencer**: Reads the input tensor from SRAM and creates a packet stream
-   - Time dimension: `Time = m![A, B]` - iterates through 15 cycles (3×5)
-   - Packet dimension: `Packet = m![C # 6]` - each packet contains 2 `C` elements plus 6 bytes padding
-   - Fetch size: 8 bytes per cycle (meets hardware alignment requirement)
-   - Note: Hardware requires 8-byte packet alignment, so we cannot use `C=2` bytes alone; we pad to 8 bytes
-2. **Collect Engine**: Normalizes packets into standard 32-byte flits for the commit stage
-   - Input packets (8 bytes) are padded to create 32-byte flits
-   - Time dimension: `Time = m![A, B]` - unchanged, still 15 cycles
-   - flit dimension: `Flit = m![C # 30]` - 2 data bytes + 30 bytes padding = 32-byte flit
-   - The collect engine pads and normalizes packet sizes without reordering data
-3. **Commit Unit**: Writes data to SRAM with the new axis order `[B, A, C]`
-   - Receives flits with time `m![A, B]` but writes to memory layout `m![B, A, C # 6]`
-   - The write sequencer configuration creates the permutation
-   - Commit size: 8 bytes per write (matching fetch size)
-   - Slices incoming 32-byte flits down to 8-byte write units
-
-The write sequencer configuration determines how to map the incoming time-ordered stream `m![A, B, C]` to the permuted memory layout `m![B, A, C #6]`.
-The notation `[axis=count:stride, ...] @ base / commit_size` means: for each axis, loop `count` times advancing `stride` bytes per step; `@` sets the base address; `/` sets the bytes written per commit operation (see [Sequencer](../moving-tensors/sequencer.md) for the full sequencer model).
-
-The sequencer is configured as: `[A=3:8, B=5:24, C=8:1] @ 1024 / 8`
-- `A=3:8` means loop 3 times with stride 8 bytes between iterations
-- `B=5:24` means loop 5 times with stride 24 bytes between iterations
-- `C=8:1` means write 8 bytes (the packet size) with stride 1
-- **Base address**: 1024 (output tensor starts here)
-- **Commit size**: 8 bytes per write operation
-
-This configuration causes data arriving in `[A, B]` time order to be written to addresses that correspond to `[B, A]` spatial order. Here's how the writes occur:
-
-| Cycle `i` | Time axes | Write to memory address | Explanation |
-|-----------|-----------|------------------------|-------------|
-| 0 | A=0, B=0 | 1024-1032 (B=0, A=0) | First element: writes to base address |
-| 1 | A=0, B=1 | 1048-1056 (B=1, A=0) | Stride 24 bytes forward (next B) |
-| 2 | A=0, B=2 | 1072-1080 (B=2, A=0) | Another 24-byte stride |
-| 3-4 | A=0, B=3-4 | Continue with B=3,4 | Complete A=0 row |
-| 5 | A=1, B=0 | 1032-1040 (B=0, A=1) | Jump to B=0, A=1 (+8 from cycle 0) |
-| 6 | A=1, B=1 | 1056-1064 (B=1, A=1) | +24 stride for next B |
-| 7-14 | Continue | ... | Complete all A=1,2 rows |
-
-Notice how the write pattern interleaves: we write `A=0,B=0` then `A=0,B=1`, but these end up at addresses that place all `A` values for each `B` together in the output layout.
-
-#### Output
-
-After commit completes, SRAM address 1024 onwards contains the tensor with permuted layout:
-- **Memory layout**: `[B=5, A=3, C=2]` with 6-byte padding
-- **Physical arrangement**: All `A` values for `B=0` are contiguous, then all `A` values for `B=1`, etc.
-- **Address structure**:
-  ```text
-  1024-1032: (B=0, A=0, C=0-1) + 6 bytes padding
-  1032-1040: (B=0, A=1, C=0-1) + 6 bytes padding
-  1040-1048: (B=0, A=2, C=0-1) + 6 bytes padding
-  1048-1056: (B=1, A=0, C=0-1) + 6 bytes padding
-  ...and so on
-  ```
-
-The permutation is complete: the same 30 data elements that were in `[A, B, C]` order are now in `[B, A, C]` order. This operation takes 15 cycles (one per A×B combination) and requires no actual computation; only memory read/write with different address patterns.
-
-**Key constraints:**
-Three constraints govern axis permutation operations:
-
-- **8-byte alignment**: `commit_in_size` and `commit_size` are always in 8-byte units, so the target tensor for commit always corresponds to an 8-byte aligned range, naturally creating 8-byte tail alignment (a dummy is added to align the tail to 8 bytes).
-- **Sequencer limit**: Like the Fetch Engine, sequencer entries are limited to 8 total (limit < 65,536).
-- **Non-contiguous writes**: Since the write sequencer sets the commit address, committed data need not be contiguous in flit time order. Permutations like `AB -> BA` are possible.
-
-**Why this example is useful:**
-Axis permutation is a common requirement in deep learning:
-- **Tensor layout transformations**: Converting between `NCHW` (batch, channels, height, width) and `NHWC` (batch, height, width, channels) formats for different operations
-- **Matrix transpose**: Preparing data for operations that require transposed matrices without actual computation
-- **Memory access optimization**: Reordering axes to make the most frequently accessed dimension innermost for better cache performance
-- **Inter-operation compatibility**: Reformatting tensors to match the input requirements of subsequent operations
-
-The TCP architecture performs these reshapes during data movement without consuming compute resources or requiring separate transpose kernels.
-
-## Example 2: Full-flit Commit
-
-This example demonstrates full-flit commit, an optimization that writes entire 32-byte flits directly to memory without slicing them into smaller chunks.
-When tensor dimensions are naturally aligned to 32-byte boundaries, the commit slicer is unnecessary, eliminating its overhead and simplifying write sequencer configuration.
-
-```rust,ignore
-axes![A = 3, B = 5, C = 2];
-
-// Input: same shape [A, B, C]
-let input: DmTensor<f8, m![1], m![1], m![1], m![A, B, C]> = ...;
-
-// Output: merge B and C, pad to 32 bytes per A slice
-let output: DmTensor<f8, m![1], m![1], m![1], m![A, [B, C] # 22]> = ctx
-    .main
-    .begin(input.view())
-    .fetch::<m![A], m![[B, C] # 22]>()        // Time=[A], Packet=[B,C] padded to 32 bytes
-    .collect::<m![A], m![[B, C] # 22]>()      // Already 32-byte flit, identity collect
-    .commit();                                // Full-flit commit: 3 cycles vs 15 in Example 1
-```
-
-#### Input Tensor
-
-The input tensor is identical to Example 1, but committed with a different memory layout that allows full-flit writes:
-- **Shape**: `[A=3, B=5, C=2]` containing 30 elements
-- **Data type**: `f8` (8-bit floating-point, 1 byte per element)
-- **Memory layout**: `m![A, B, C]` - standard row-major order
-- **Base address**: `b = 0`
-- **Element size**: 1 byte × 30 elements = 30 bytes of data
-
-#### Output Tensor (Target)
-
-Instead of permuting axes like Example 1, we merge the last two dimensions and add padding:
-- **Shape**: Still `[A=3, B=5, C=2]` logically, but stored as `[A=3, BC=10]`
-- **Data type**: `f8` (unchanged)
-- **Memory layout**: `m![A, [B, C] # 22]` - merge B and C dimensions, add 22 bytes padding
-- **Base address**: `b = 1024`
-- **Physical layout**: Each `A` iteration stores 10 data bytes (B×C) plus 22 padding bytes = 32 bytes total
-- The 32-byte size per `A` slice perfectly matches hardware flit size, enabling full-flit writes
-
-#### Processing
-
-Data dimensions aligned with hardware flit size enable a simpler pipeline than Example 1:
-
-1. **Fetch Sequencer**: Reads input and pads to 32-byte packets immediately
-   - Time dimension: `Time = m![A, B]` - 15 cycles (3×5)
-   - Packet dimension: `Packet = m![[B, C] # 22]` - merges B and C, adds 22 bytes padding to reach 32 bytes
-   - Fetch size: 32 bytes per cycle (full packet, not split)
-   - The sequencer pads from 10 data bytes to 32 bytes during fetch
-2. **Collect Engine**: Receives 32-byte packets and passes them as 32-byte flits
-   - Time dimension: `Time = m![A]` - simplified to just 3 cycles since B and C are merged into packet
-   - flit dimension: `Flit = m![[B, C] # 22]` - full 32-byte flit with no additional padding needed
-   - No reformatting required: packet size = flit size = 32 bytes
-3. **Commit Unit**: Writes full 32-byte flits directly to memory without slicing
-   - Receives 32-byte flits and writes them as complete 32-byte units
-   - **commit_in_size = 32 bytes**: No slicer operation needed
-   - **commit_size = 32 bytes**: Each write operation handles a full flit
-   - Time: Only 3 cycles (one per `A`), much faster than Example 1's 15 cycles
-
-The write sequencer configuration is simple: `[A=3:32, [B,C]=32:1] @ 1024 / 32`
-- `A=3:32` means loop 3 times with 32-byte stride (one full flit per A)
-- `[B,C]=32:1` means write 32 bytes with stride 1 (continuous write of flit contents)
-- Each cycle writes one complete flit: cycle 0 writes flit for A=0, cycle 1 for A=1, cycle 2 for A=2
-
-#### Output
-
-After commit, SRAM address 1024 onwards contains the tensor packed into 32-byte-aligned blocks:
-- **Memory layout**: `[A=3, BC=10+padding]` with each `A` slice occupying exactly 32 bytes
-- **Physical structure**:
-  ```text
-  1024-1056: (A=0, all 10 B×C elements) + 22 bytes padding = 32 bytes
-  1056-1088: (A=1, all 10 B×C elements) + 22 bytes padding = 32 bytes
-  1088-1120: (A=2, all 10 B×C elements) + 22 bytes padding = 32 bytes
-  ```
-- **Performance**: Only 3 write cycles vs 15 in Example 1 (5× faster)
-- **Simplicity**: No slicing overhead, no complex stride patterns
-
-**Why this example is useful:**
-Full-flit commit demonstrates an important optimization strategy:
-- **Alignment optimization**: When you can pad dimensions to 32-byte boundaries, commit becomes much more efficient
-- **Reduced cycles**: Fewer, larger writes complete faster than many small writes
-- **Hardware efficiency**: Writing full flits maximizes memory bandwidth utilization
-- Sometimes adding padding to align with hardware granularity improves overall performance
-
-This technique is particularly valuable for:
-- Small tensors where padding overhead is minimal compared to the benefit
-- Intermediate results that don't need compact storage
-- Situations where downstream operations also benefit from 32-byte alignment
-
-Write sequencer configurations require non-zero stride for all entries.
-This means you cannot discard data beyond slicing (no selective writes), and broadcast (reuse) operations are not possible during commit.
-
-## Example 3: Tail Padding and Fetch Size
-
-The amount of tail padding dramatically affects fetch/commit efficiency.
-This example commits a tensor with `A=65`, where the choice of padding amount determines the available fetch sizes.
-Understanding padding interaction with hardware fetch size constraints enables optimization between memory usage (less padding) and performance (more padding aligned to hardware boundaries).
-
-```rust,ignore
-axes![A = 65, B = 2];
-
-let input: DmTensor<f8, m![1], m![1], m![1], m![B, A # 72]> = ...;
-
-// Option 1: dummy=7, fetch_size=24 bytes, 6 cycles
-let out_7: DmTensor<f8, m![1], m![1], m![1], m![B, A # 72]> = ctx.main
-    .begin(input.view())
-    .fetch::<m![B * (A # 72) / 24], m![A % 24]>()
-    .collect::<m![B * (A # 72) / 24], m![A % 24 # 8]>()
-    .commit();
-
-// Option 2: dummy=31, fetch_size=32 bytes, 6 cycles (best performance)
-let out_31: DmTensor<f8, m![1], m![1], m![1], m![B, A # 96]> = ctx.main
-    .begin(input.view())
-    .fetch::<m![B * (A # 96) / 32], m![A % 32]>()
-    .collect::<m![B * (A # 96) / 32], m![A % 32]>()
-    .commit();
-```
-
-In the mapping expression `m![A # 72]`, the `# 72` pads `A` up to 72 elements.
-The pads are referred to as `dummy` in the hardware configuration below.
-
-#### The Problem
-
-Commit a tensor with shape `[A=65, B=2]` (130 bytes of data). Hardware fetch sizes must be 8, 16, 24, or 32 bytes.
-Determine the padding amount for dimension `A` to maximize performance.
-
-#### Input Tensor
-
-- **Shape**: `[A=65, B=2]` - 130 elements (65 elements across A dimension, 2 across B)
-- **Data type**: `f8` (1 byte per element)
-- **Memory layout**: `m![B, A+7]` - stored with 7 bytes of tail padding after A
-- **Base address**: `b = 0`
-- **Total size**: `2 × (65 + 7) = 144 bytes` (includes padding)
-
-#### Output Tensor (Variable Padding)
-
-The target can have different padding amounts, each enabling different fetch sizes:
-- **Shape**: `[A=65, B=2]` (same logical data)
-- **Data type**: `f8`
-- **Base address**: `b = 1024`
-- **Memory layout options**:
-  - `m![B, A # 7]`: 7 bytes padding → enables 24-byte fetch size
-  - `m![B, A # 15]`: 15 bytes padding → enables 16-byte fetch size
-  - `m![B, A # 23]`: 23 bytes padding → enables 8-byte fetch size (worst)
-  - `m![B, A # 31]`: 31 bytes padding → enables 32-byte fetch size (best)
-
-The optimal fetch size unit varies depending on the tail `dummy` value.
-The following subsections show each case:
-
-### `dummy = 7`
-- fetch sequencer output
-  - `Time = m![B * (A # 7) / 24]`
-  - `Flit = m![A % 24]`
-  - fetch_size = 24 bytes
-- Switch Engine output (= commit unit input)
-  - `Time = m![B * (A # 7) / 24]`
-  - `Flit = m![A % 24 # 8]`
-- Commit Unit
-  - commit_in_size = 24 bytes
-  - sliced shape
-    - `Time = m![B * (A # 7) / 24]`
-    - `Flit = m![A % 24]`
-  - write sequencer configuration
-    - `m![B, A # 7]` -> `m![B * (A # 7) / 24 * A % 24]`
-    - Sequencer configuration: `[B=2:72, (A # 7)/24=3:24, A=24:1] @ 1024 / 24`
-
-### `dummy = 15`
-- fetch sequencer output
-  - `Time = m![B * (A # 15) / 16]`
-  - `Flit = m![A % 16]`
-  - fetch_size = 16 bytes
-- Switch Engine output (= commit unit input)
-  - `Time = m![B * (A # 15) / 16]`
-  - `Flit = m![A % 16]`
-- Commit Unit
-  - commit_in_size = 16 bytes
-  - sliced shape
-    - `Time = m![B * (A # 15) / 16]`
-    - `Flit = m![A % 16]`
-  - write sequencer configuration
-    - `m![B, A # 15]` -> `m![B * (A # 15) / 16 * A % 16]`
-    - Sequencer configuration: `[B=2:80, (A # 15)/16=5:16, A=16:1] @ 1024 / 16`
-
-### `dummy = 23`
-- fetch sequencer output
-  - `Time = m![B * (A # 23) / 8]`
-  - `Flit = m![A % 8]`
-  - fetch_size = 8 bytes
-- Switch Engine output (= commit unit input)
-  - `Time = m![B * (A # 23) / 8]`
-  - `Flit = m![A % 8 # 24]`
-- Commit Unit
-  - commit_in_size = 8 bytes
-  - sliced shape
-    - `Time = m![B * (A # 23) / 8]`
-    - `Flit = m![A % 8]`
-  - write sequencer configuration
-    - `m![B, A # 23]` -> `m![B * (A # 23) / 8 * A % 8]`
-    - Sequencer configuration: `[B=2:88, (A # 23)/8=11:8, A=8:1] @ 1024 / 8`
-
-### `dummy = 31`
-- fetch sequencer output
-  - `Time = m![B * (A # 31) / 32]`
-  - `Flit = m![A % 32]`
-  - fetch_size = 32 bytes
-- Switch Engine output (= commit unit input)
-  - `Time = m![B * (A # 31) / 32]`
-  - `Flit = m![A % 32]`
-- Commit Unit
-  - commit_in_size = 32 bytes
-  - sliced shape
-    - `Time = m![B * (A # 31) / 32]`
-    - `Flit = m![A % 32]`
-  - write sequencer configuration
-    - `m![B, A # 31]` -> `m![B * (A # 31) / 32 * A % 32]`
-    - Sequencer configuration: `[B=2:96, (A # 31)/32=3:32, A=32:1] @ 1024 / 32`
-
-### Summary: The Impact of Padding Choice
-
-The following table summarizes how output tail padding affects performance:
-
-| Padding (`dummy`) | `fetch_size` | Fetch cycles | Memory overhead | Efficiency |
-|-------------------|------------|--------------|-----------------|------------|
-| 7 | 24 bytes | 6 cycles | 14 bytes (9.7%) | Good |
-| 15 | 16 bytes | 10 cycles | 30 bytes (18.8%) | Moderate |
-| 23 | 8 bytes | 22 cycles | 46 bytes (26.1%) | Poor |
-| 31 | 32 bytes | 6 cycles | 62 bytes (32.3%) | Best |
-
-**Key Insights:**
-
-- **Performance varies dramatically**: `dummy=23` requires 22 cycles (8-byte fetches) while `dummy=31` requires only 6 cycles (32-byte fetches) - nearly 4× faster despite using similar amounts of padding
-- **Optimal padding aligns with hardware**: The best performance comes when `(data_size + padding)` is divisible by 32 bytes (the largest fetch size)
-- **Trade-off**: Adding 8 more bytes of padding (23→31) increases memory overhead from 26.1% to 32.3% (only 6% increase) but improves performance by 3.7× (22 cycles→6 cycles)
-- **Prefer padding amounts that enable the largest possible fetch size** (32 bytes), even with slightly more memory waste
-
-**Why this example is useful:**
-Naive padding choices cause severe performance degradation:
-- Padding to arbitrary values like 23 bytes forces small 8-byte fetches
-- Understanding fetch size constraints enables strategic padding choices
-- Pad to the next multiple of 32 bytes when possible
-- The memory cost of better padding is usually negligible compared to the performance gain
-
-### Why `dummy=23` Cannot Use 32-byte Commits
-
-Write sequencer configurations must never exceed tensor boundaries; because of this constraint, the `dummy=23` case cannot use 32-byte commits:
-
-- fetch sequencer output
-  - `Time = m![B * (A # 31) / 32]` : Since A + 23 is not divisible by 32, setting fetch_size=32 bytes requires fetching A+31 elements.
-  - `Flit = m![A % 32]`
-  - fetch_size = 32 bytes
-- Switch Engine output (= commit unit input)
-  - `Time = m![B * (A # 31) / 32]`
-  - `Flit = m![A % 32]`
-- Commit Unit
-  - commit_in_size = 32 bytes (if commit_in_size < 32, it would cut valid A portion: must set commit_in_size=32 bytes)
-  - sliced shape
-    - `Time = m![B * (A # 31) / 32]`
-    - `Flit = m![A % 32]`
-  - write sequencer configuration
-    - `m![B, A # 23]` -> `m![B * (A # 31) / 32 * A % 32]`
-    - Sequencer configuration: `[B=2:88, (A # 31)/32=3:32, A=32:1] @ 1024 / 32`
-
-**Key insight:** Read sequencer configurations can safely overfetch (reading `dummy` addresses beyond the input tensor range is acceptable), but write sequencer configurations must never write beyond the tensor boundary (as it could write data to space occupied by other tensors).
-This asymmetry is why `dummy=23` cannot use 32-byte fetches.
-
-
-## Example 4: Tensor Segmentation
-
-TCP handles tensors exceeding Vector Register File (VRF) capacity through segmentation, automatically splitting them into smaller chunks that fit within hardware constraints, with each chunk processed independently.
-
-```rust,ignore
-axes![A = 2048, B = 32];
-
-// Input: 64KB tensor, exceeds 8KB VRF limit
-let input: DmTensor<f8, m![1], m![1], m![1], m![A, B]> = ...;
-
-// Segmented into two executions (compiler handles this automatically)
-
-// Execution #0: first half of A
-let seg_0: DmTensor<f8, m![1], m![1], m![1], m![A % 1024, B]> = ctx.main
-    .begin(input.view().slice(A, 0..1024))
-    .fetch::<m![A % 1024], m![B]>()
-    .collect::<m![A % 1024], m![B]>()
-    .commit();
-
-// Execution #1: second half of A
-let seg_1: DmTensor<f8, m![1], m![1], m![1], m![A @ 1024, B]> = ctx.main
-    .begin(input.view().slice(A, 1024..2048))
-    .fetch::<m![A @ 1024], m![B]>()
-    .collect::<m![A @ 1024], m![B]>()
-    .commit();
-```
-
-#### The Problem
-
-The Vector Engine's VRF has only 8KB of capacity per slice. Tensors requiring more storage than this cannot be fetched and processed in one operation. Segmentation splits the tensor across multiple executions.
-
-The 8KB limit is per-slice, not total.
-While a cluster has 256 slices (2MB total VRF), each slice holds only 8KB.
-Tensor distribution across slices is controlled by the slice dimension in the tensor mapping.
-Tensors without enough elements mapped to the slice dimension, or operations requiring entire rows/columns in individual slices (common in reduction operations), hit the per-slice limit before using all 256 slices.
-A [2048, 32] tensor with mapping `m![1, 1, 1, 2048, 32]` (no slice distribution) attempts to store all 64KB in slice 0, exceeding the 8KB limit.
-Even with slice distribution `m![1, 1, 256, 8, 32]`, each slice stores only 256 bytes, but intermediate results or operation constraints may require more per-slice storage.
-Segmentation ensures each slice's VRF usage stays within the 8KB hardware limit.
-
-#### Input Tensor
-
-A large 2D tensor that exceeds VRF capacity:
-- **Shape**: `[A=2048, B=32]` - 65,536 elements
-- **Data type**: `f8` (1 byte per element)
-- **Total size**: 2048 × 32 = 65,536 bytes = 64 KB
-- **Memory layout**: `m![A, B]` - standard row-major
-- **Base address**: `b = 0`
-- **Problem**: 64 KB far exceeds the 8 KB VRF limit per slice
-
-#### Output Tensor
-
-The same tensor needs to be written to a different SRAM location:
-- **Shape**: `[A=2048, B=32]` (identical)
-- **Data type**: `f8`
-- **Memory layout**: `m![A, B]`
-- **Base address**: `b = 256K` (different location)
-
-#### Solution Strategy
-
-Split the `A` dimension into two segments:
-- **Segment 1**: `A % 1024` (first 1,024 elements) = 1024 × 32 = 32 KB
-- **Segment 2**: `A @ 1024` (second 1,024 elements) = 1024 × 32 = 32 KB
-
-Each segment is still larger than 8 KB per slice, so further splitting or distributing dimensions across slices is required.
-Segmentation processes arbitrarily large tensors by dividing them into hardware-manageable chunks.
-
-#### Processing
-
-Process the tensor in two separate executions:
-
-### Execution #0
-- fetch sequencer output
-  - `Time = m![A % 1024]`
-  - `Flit = m![B]`
-  - fetch_size = 32 bytes
-- Switch Engine output (= commit unit input)
-  - `Time = m![A % 1024]`
-  - `Flit = m![B]`
-- Commit Unit
-  - commit_in_size = 32 bytes
-  - sliced shape
-    - `Time = m![A % 1024]`
-    - `Flit = m![B]`
-  - write sequencer configuration
-    - `m![A, B]` -> `m![(A % 1024), B]`
-    - Sequencer configuration: `[A%1024=1024:32, B=32:1] @ 256K / 32`
-    - From the entire output tensor with mapping `m![A, B]`, only the first half is fetched and committed.
-
-### Execution #1 (Second Half)
-
-Processes the second half of the A dimension:
-- **Fetch sequencer output**:
-  - `Time = m![A @ 1024]` - time dimension covers A elements 1024-2047
-  - `Flit = m![B]` - 32-byte packets containing full B dimension
-  - fetch_size = 32 bytes
-- **Switch Engine output**:
-  - `Time = m![A @ 1024]` - 1,024 cycles for second half of A
-  - `Flit = m![B]` - 32-byte flits
-- **Commit Unit**:
-  - commit_in_size = 32 bytes (full flit commit)
-  - write sequencer configuration: `[A@1024=1024:32, B=32:1] @ (256K + 32 * 1024) / 32`
-  - Base address: `256K + 32KB` (offset to skip the first segment)
-  - Writes to addresses 256K+32KB through 256K+64KB
-
-#### Output
-
-After both executions complete, the output tensor is reconstructed:
-- **Memory layout**: SRAM starting at address 256K contains the complete tensor `[A=2048, B=32]`
-- **Segment 1**: Addresses 256K to 256K+32KB hold `A[0:1023, B[0:31]]`
-- **Segment 2**: Addresses 256K+32KB to 256K+64KB hold `A[1024:2047, B[0:31]]`
-- **Result**: Logically identical to the input, just stored at a different location
-
-The compiler automatically determines segmentation requirements and splits tensors into multiple executions. From the programmer's perspective, this is a single logical operation; the segmentation is transparent.
-
-**Why this example is useful:**
-Tensor segmentation is essential for practical deep learning workloads:
-- **Large model support**: Modern LLMs have tensors with billions of elements that cannot fit in VRF
-- **Automatic handling**: The compiler manages segmentation automatically based on VRF capacity
-- **No performance penalty for well-designed splits**: When segment boundaries align with memory access patterns, segmentation adds minimal overhead
-- **Scalability**: This mechanism enables processing tensors of arbitrary size on fixed hardware
-- **Memory hierarchy exploitation**: Segmentation naturally maps to hierarchical memory systems (VRF → SRAM → HBM)
-
-In practice, the compiler considers multiple factors when segmenting:
-- VRF capacity constraints
-- Memory bandwidth utilization
-- Alignment with tensor unit requirements
-- Minimizing the number of segments to reduce overhead
+### Segment Capacity Contract
+
+Capacity is a per-slice constraint, so the segment size follows from what one slice must hold rather than from the total cluster capacity.
+The `A / 2 # 64` mapping spreads 64 outer `A` positions across slices, and each slice keeps both `A % 2` positions of the segment it is working on.
+
+| Per active slice | Values | Bytes | Where it must fit |
+|------------------|--------|-------|-------------------|
+| Whole `rhs_dm` vector | `4096` `i32` | 16 KiB | DM, which is why it cannot go to VRF in one pass. |
+| One `rhs_vrf` segment | `2048` `i32` | 8 KiB | VRF, exactly at its per-slice capacity. |
+| One `lhs_tile` | `2 × 2048` `i32` | 16 KiB | DM, read by Fetch. |
+| One `out_tile` | `2 × 2048` `i32` | 16 KiB | DM, written by `commit_view`. |
+
+| Loop iteration | Selected `B / 2048` position | Logical `B` indices | VRF content |
+|----------------|------------------------------|---------------------|-------------|
+| `0` | `0` | `0` through `2047` | The first vector segment. |
+| `1` | `1` | `2048` through `4095` | The second vector segment, overwriting the first. |
+
+`to_vrf` rejects an operand larger than the file, so this split is a contract the API enforces rather than a convention to remember.
+Because one segment fills the VRF exactly, a kernel that also keeps a second vector operand resident must halve the segment again.
+The segment count is therefore part of the kernel contract: changing it changes both the capacity that each pass demands and the schedule that the pass produces.
+The Contraction Engine register file (8 KiB per lane) and DM (512 KiB per slice) bound their own operands the same way, so the same loop shape applies with a different capacity number.
+
+### Segmentation Verification
+
+Check that the segments cover every logical `B` index exactly once and that output segments do not overlap.
+Check the host oracle across the segment boundary, because a correct first segment does not prove the second segment's offset or write mapping.
+Compare schedule makespan after fixing the segment shape, data type, mappings, and release.
+The [Tiling](./tiling.md) chapter explains the capacity decision, and the [Commit Engine](../moving-tensors/commit-engine.md) defines the write constraints.

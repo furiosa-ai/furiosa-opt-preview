@@ -1,13 +1,13 @@
 use furiosa_mapping::Mapping as MappingValue;
 use furiosa_mapping::*;
 
-use crate::cast::ContractionCast;
 use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::BufStorage;
 use crate::tensor::memory::{HbmTensor, HostTensor};
 
 use super::{CpuBuffer, Kernel};
 use crate::backend::Backend;
+use crate::cast::{ContractionAccumulator, ContractionCast};
 
 /// NPU backend.
 ///
@@ -22,7 +22,7 @@ impl Backend for Npu {
         BufStorage::from_vec(data)
     }
 
-    fn from_buf<D: Scalar>(_mapping: &MappingValue, buf: Vec<u8>) -> Self::Storage<D> {
+    fn from_buf<D: MaterializableScalar>(_mapping: &MappingValue, buf: Vec<u8>) -> Self::Storage<D> {
         BufStorage::from_buf(buf)
     }
 
@@ -38,19 +38,8 @@ impl Backend for Npu {
         storage.into_buf(mapping)
     }
 
-    fn map<D: MaterializableScalar, D2: Scalar>(
-        src: &Self::Storage<D>,
-        f: impl Fn(D) -> D2 + Sync,
-    ) -> Self::Storage<D2> {
+    fn map<D: Scalar, D2: Scalar>(src: &Self::Storage<D>, f: impl Fn(D) -> D2 + Sync) -> Self::Storage<D2> {
         src.map(f)
-    }
-
-    fn map_bounded<D: Scalar, D2: Scalar>(
-        src: &Self::Storage<D>,
-        len: usize,
-        f: impl Fn(D) -> D2 + Sync,
-    ) -> Self::Storage<D2> {
-        src.map_bounded(len, f)
     }
 
     fn zip_with<D: MaterializableScalar, D2: MaterializableScalar, D3: Scalar>(
@@ -100,6 +89,17 @@ impl Backend for Npu {
         out: &MappingValue,
     ) -> Self::Storage<D> {
         BufStorage::contraction(lhs, rhs, lhs_map, rhs_map, pre_reduce, out)
+    }
+
+    fn contraction_prewidened<D: ContractionAccumulator>(
+        lhs: &Self::Storage<D>,
+        rhs: &Self::Storage<D>,
+        lhs_map: &MappingValue,
+        rhs_map: &MappingValue,
+        pre_reduce: &MappingValue,
+        out: &MappingValue,
+    ) -> Self::Storage<D> {
+        BufStorage::contraction_prewidened(lhs, rhs, lhs_map, rhs_map, pre_reduce, out)
     }
 
     fn scatter<D: Scalar, Src: M, Key: M, Dst: M, Idx: M>(

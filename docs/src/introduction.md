@@ -4,10 +4,18 @@ FuriosaAI's Tensor Contraction Processor (TCP) is a massively parallel AI accele
 Unlike high-level frameworks like PyTorch and XLA, which abstract away memory layouts and hardware scheduling, TCP exposes direct programmer control without requiring the byte-level reasoning of low-level kernel APIs.
 
 TCP's Virtual Instruction Set Architecture (Virtual ISA, or vISA) is the programming interface that exposes this control.
-It lets programmers reason in tensors while directly managing memory allocation and tensor unit scheduling.
-This manual introduces that interface, targeting two audiences: programmers writing vISA directly and compiler developers generating it.
+It lets programmers reason in tensors while directly managing memory allocation and Tensor Unit scheduling.
+This manual primarily helps authors guide an AI agent to write, verify, and optimize vISA kernels.
+It also provides the reference material that compiler developers need when generating vISA.
+[The `furiosa-opt-std` rustdoc](https://docs.rs/crate/furiosa-opt-std) is the canonical API source for published releases.
+This book explains how to make and review kernel design decisions.
 Both audiences assume basic Rust familiarity.
 See [the language manual](https://doc.rust-lang.org/book/) if needed.
+
+## Read This Book by Task
+
+Start with [Quick Start](./quick-start.md) to understand a base-template kernel pattern.
+Read [Mapping Tensors](./mapping-tensors/index.md), [Moving Tensors](./moving-tensors/index.md), [Computing Tensors](./computing-tensors/index.md), and [Scheduling](./scheduling.md) when a pattern needs a new capability.
 
 > [!WARNING]
 > **Alpha Test Build: Experimental Software**
@@ -16,7 +24,8 @@ See [the language manual](https://doc.rust-lang.org/book/) if needed.
 >
 > Before using this software for any production work, critical tasks, or for important data, you must consult with Furiosa engineers.
 >
-> Your feedback is vital to our development. Please provide it.
+> Your feedback is vital to our development.
+> Please provide it.
 
 ## Installation
 
@@ -43,7 +52,7 @@ Install three pieces:
 
 ## Your First Program
 
-Use [`cargo-generate`](https://cargo-generate.github.io/cargo-generate/) to scaffold a fresh project from the `base-template` starter, which ships with the five worked examples covered in the [Quick Start](./quick-start.md) chapter:
+Use [`cargo-generate`](https://cargo-generate.github.io/cargo-generate/) to scaffold the `base-template` starter:
 
 ```bash
 cargo install cargo-generate
@@ -51,70 +60,54 @@ cargo generate furiosa-ai/furiosa-opt base-template
 cd base-template
 ```
 
-### Layout
+The template is the canonical executable example and CI generates the current source under an arbitrary name before testing it with emulation.
+Read [Quick Start](./quick-start.md) before adapting it, including [Use the Kernel Authoring Skill](./quick-start.md#use-the-kernel-authoring-skill) when an agent implements the change.
+
+### Template Layout
+
+The generated `Cargo.toml` declares `[package.metadata.furiosa-opt]`, which marks the package for kernel compilation.
+`src/kernel/` contains each `#[device]` function and `src/kernel/mod.rs` re-exports those kernel modules.
+Direct `src/*.rs` files are host binaries that call `launch(kernel, ...)` and contain their host-oracle tests.
+Each host binary has an explicit `[[bin]]` entry with `path = "src/<name>.rs"` in `Cargo.toml`.
+Do not move host binaries into `src/bin/`, `examples/`, or `tests/`, because the compiler plugin scans cargo targets rooted at `src/`.
 
 ```text
 base-template/
-├── Cargo.toml                               # `[package.metadata.furiosa-opt]` marks it a kernel package
-├── README.md
+├── Cargo.toml
 ├── rust-toolchain.toml
 └── src/
-    ├── lib.rs                                # `pub mod kernel;`
-    ├── kernel/                               # every #[device] function lives here
-    │   ├── mod.rs                            # `pub mod {constant_add,...}_kernel;`
-    │   ├── constant_add_kernel.rs            # `#[device] fn constant_add_kernel(...)`
-    │   ├── elementwise_mul_kernel.rs
-    │   ├── dot_product_kernel.rs
-    │   ├── gemv_kernel.rs
-    │   └── gemm_kernel.rs
-    ├── constant_add.rs                       # host binary that `launch()`es its kernel
-    ├── elementwise_mul.rs
-    ├── dot_product.rs
-    ├── gemv.rs
-    └── gemm.rs
-```
-
-Keep these layout rules intact:
-
-- A package opts into kernel compilation by declaring `[package.metadata.furiosa-opt]` in its `Cargo.toml`.
-- Host programs should live as direct `src/*.rs` files and are registered with explicit `[[bin]] path = "src/<name>.rs"` entries in `Cargo.toml`.
-- Do not move host programs into `src/bin/`, `examples/`, or `tests/`; the rustc plugin scans cargo targets rooted at `src/` and skips those other locations.
-
-All five kernel examples live under `src/kernel/` and are re-exported through `src/kernel/mod.rs` and `src/lib.rs`.
-Each binary's `main()` only calls `launch(kernel, ...)`.
-The value comparison against a host-side reference lives in a `#[cfg(test)] mod tests` block inside the same file.
-
-### Run a worked example
-
-```bash
-# Host-side emulation (default; no NPU hardware required).
-cargo furiosa-opt run --release --bin gemm
-
-# Mapping/shape verification only — kernel body runs against phantom (empty) tensors.
-cargo furiosa-opt --backend typecheck run --release --bin gemm
-
-# Real NPU dispatch (requires the SDK and a physical NPU; see Installation step 3).
-cargo furiosa-opt --backend npu run --release --bin gemm
-```
-
-### Verify against the reference
-
-```bash
-# Full numeric comparison on emulated values.
-cargo furiosa-opt test --release --bin gemm
-
-# Under typecheck the comparison loop trivially passes: `actual` is the
-# phantom-empty Vec, so the per-element assertion has zero iterations.
-cargo furiosa-opt --backend typecheck test --release --bin gemm
+    ├── lib.rs
+    ├── kernel/
+    │   ├── mod.rs
+    │   └── <name>_kernel.rs
+    └── <name>.rs
 ```
 
 ### Add a Kernel
 
-1. Drop `src/kernel/<name>_kernel.rs` with a `#[device(...)] pub fn <name>_kernel(...)`.
-2. Append `pub mod <name>_kernel;` to `src/kernel/mod.rs`.
-3. Add `src/<name>.rs` as the host program that calls `launch(<name>_kernel, ...)`.
-4. Register a matching `[[bin]]` entry in `Cargo.toml` with `path = "src/<name>.rs"`.
-5. Run your kernel with `cargo furiosa-opt run --release --bin <name>`.
+1. Add `src/kernel/<name>_kernel.rs` with a `#[device(...)] pub fn <name>_kernel(...)` function.
+2. Re-export it from `src/kernel/mod.rs`.
+3. Add `src/<name>.rs` with the host program, host oracle, and a call to `launch(<name>_kernel, ...)`.
+4. Register the host program as a `[[bin]]` target in `Cargo.toml`.
+5. Run the kernel with `cargo furiosa-opt run --release --bin <name>`.
+
+### Run and Verify a Template Example
+
+```bash
+# Run values with the default emulation backend.
+cargo furiosa-opt run --release --bin gemm
+
+# Execute the kernel body with phantom tensors to check mappings and shapes.
+cargo furiosa-opt --backend typecheck run --release --bin gemm
+
+# Compare emulated values with the host oracle.
+cargo furiosa-opt --backend emulation test --release --bin gemm
+
+# Run the hardware path when the SDK and an NPU are available.
+cargo furiosa-opt --backend npu run --release --bin gemm
+```
+
+`typecheck test` is not numerical-correctness evidence because the phantom output can make an elementwise comparison loop execute zero iterations.
 
 ## Development Tools
 
@@ -125,41 +118,24 @@ It complements the [Furiosa SDK's compiler](https://developer.furiosa.ai/latest/
 
 A vISA program is a Rust program that uses the `furiosa-opt-std` API. `cargo furiosa-opt` selects which backend evaluates the kernel by setting `--cfg backend="..."`:
 
-| Backend     | Default? | What runs                                   | Use when                                                                             |
-|-------------|----------|---------------------------------------------|--------------------------------------------------------------------------------------|
-| `typecheck` |          | Kernel body runs with phantom (empty) tensors | Catching mapping/shape errors fast (value computation skipped)                       |
-| `emulation`  | yes      | Full host-side interpretation over the physical buffer | Default for development; verifies numerical correctness                              |
-| `npu`       |          | Compiled EDF on hardware (or NVP simulator) | End-to-end including the hardware path                                               |
+| Backend | Default? | What runs | Use when |
+|---------|----------|-----------|----------|
+| `typecheck` | | Kernel body runs with phantom tensors and skips value computation. | Catching mapping and shape errors quickly. |
+| `emulation` | yes | Host-side buffer emulation of tensor operations. | Checking numerical correctness against a host oracle without an NPU. |
+| `npu` | | Compiled EDF on hardware. | Running the hardware path with the Furiosa SDK and an NPU. |
 
-```bash
-# Default: emulation backend, no NPU hardware needed.
-cargo furiosa-opt run --release
+`cargo check` checks types.
+`cargo furiosa-opt --backend typecheck run` also executes the kernel body, so it catches additional mapping and shape errors.
+`cargo check` does not execute kernel bodies, so use `typecheck run` when a mapping assertion must execute.
+`cargo furiosa-opt` forwards cargo subcommands and flags, so `build`, `check`, `run`, and `test` retain their normal cargo target selection.
 
-# Fast mapping/shape verification (kernel body runs with phantom tensors).
-cargo furiosa-opt --backend typecheck run --release
-
-# Real NPU dispatch (requires the SDK and a physical NPU).
-cargo furiosa-opt --backend npu run --release
-```
-
-`cargo check` (under any backend) only runs the type checker; it does **not** execute kernel function bodies and therefore cannot reach mapping assertions like `Collect output packet must be exactly 32 bytes`. Use `--backend typecheck run` for that.
-
-`cargo furiosa-opt` forwards every cargo flag verbatim, so `cargo run`, `cargo test`, `cargo check`, and `cargo build` all have direct equivalents:
-
-```bash
-cargo furiosa-opt build              # cargo build with emulation backend
-cargo furiosa-opt --backend npu test # cargo test on real NPU
-```
-
-See the [`cargo furiosa-opt` appendix](./appendix/cargo-furiosa-opt.md) for the complete command reference.
-
+See the [`cargo-furiosa-opt` appendix](./appendix/cargo-furiosa-opt.md) for commands and the [rustdoc](https://docs.rs/crate/furiosa-opt-std) for API details.
 
 ### Language Server
 
-`furiosa-rust-analyzer-proxy` is a proxy for `rust-analyzer` that provides standard Rust IDE features with enhanced support for mapping expressions.
-It keeps the usual `rust-analyzer` experience while simplifying verbose types like `Stride<Symbol<A>, 8>` into readable mapping expressions like `m![A / 8]`.
-
-For installation and configuration, see the [Language Server appendix](./appendix/language-server.md).
+`furiosa-rust-analyzer-proxy` provides standard Rust IDE features with readable Furiosa mapping expressions.
+It renders verbose mapping types such as `Stride<Symbol<A>, 8>` as `m![A / 8]`.
+See the [Language Server appendix](./appendix/language-server.md) for installation and configuration.
 
 ### Schedule Viewer
 
@@ -167,17 +143,6 @@ The Schedule Viewer visualizes the execution timeline to help identify performan
 Use `furiosa-opt` to export a schedule JSON file, then open it with `furiosa-schedule-viewer`.
 
 For installation and usage, see the [Schedule Viewer appendix](./appendix/schedule-viewer.md).
-
-## Book Organization
-
-Each chapter builds on the previous: mapping and moving tensors establish the data model, computing tensors covers the pipeline engines, and scheduling and kernel examples show how to compose them into real programs.
-
-- **[Quick Start](./quick-start.md)**: How vISA programming works, introduced through worked examples covering element-wise operations and tensor contractions.
-- **[Mapping Tensors](./mapping-tensors/index.md)**: How logical tensors map to physical memory: axis layout, stride, padding, and tiling.
-- **[Moving Tensors](./moving-tensors/index.md)**: How data moves between memory tiers (HBM, DM) and the Tensor Unit via Fetch, Commit, and DMA engines.
-- **[Computing Tensors](./computing-tensors/index.md)**: How the Tensor Unit pipeline (Switch, Collect, Contraction, Vector, Cast, Transpose) transforms data each cycle.
-- **[Scheduling](./scheduling.md)**: How operations are ordered and executed concurrently across contexts.
-- **[Kernel Examples](./kernel-examples/index.md)**: End-to-end examples showing how mapping, movement, computation, and scheduling combine into real kernels.
 
 ## License
 

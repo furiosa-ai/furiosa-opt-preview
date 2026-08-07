@@ -17,7 +17,7 @@ mod sequencer;
 mod switch;
 mod transpose;
 
-pub use commit::{COMMIT_VALID_PACKET_SIZES, CommitError};
+pub use commit::{COMMIT_BASE_SIZE, COMMIT_VALID_PACKET_SIZES, CommitError};
 pub use divide::{DivideTerm, FactorLeaf, RelaxedDivision};
 pub use fetch::FetchError;
 pub use sequencer::{MAX_SEQUENCER_ENTRIES, StreamSequencerConfig};

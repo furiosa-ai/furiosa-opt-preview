@@ -140,7 +140,7 @@ enum Media {
 }
 
 enum Dtype {
-    I4, I8, F8E4M3, F8E5M2, I16, Bf16, F16, I32, F32,
+    I4, I8, F8E4M3, F8E5M2, I16, Bf16, I32, F32,
 }
 ```
 

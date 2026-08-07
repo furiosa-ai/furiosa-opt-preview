@@ -81,12 +81,12 @@ How many elements pack into a single 320-bit row depends on the data type:
 
 | Type | Element size stored | Elements per row |
 |------|---------------------|------------------|
-| `i4` → `i5` | 5 bits | 64 |
-| `i4` → `i9` | 9 bits (approx; rounds up to fit 320-bit row) | 32 |
+| `i4` → `i5` (hardware behaviour; not wired, so an `i4` weight stays `i4` today) | 5 bits | 64 |
+| `i8` → `i9` | 9 bits (approx; rounds up to fit 320-bit row) | 32 |
 | `i8` / `f8` | 8 bits | 32 (40 bytes per row) |
 | `bf16` | 16 bits | 16 (32 bytes per row) |
 
-Only `i4` elements promote on store: `i4 → i5` (5 bits) and `i4 → i9` (9 bits) leave room for the fetch adapter's optional zero-point subtraction, which can widen `i4` intermediates by one bit per nibble.
+Only integers promote on store: `i4 → i5` (5 bits) and `i8 → i9` (9 bits) leave room for the fetch adapter's optional zero-point subtraction, which widens an integer weight by one bit.
 `i8` / `f8` and `bf16` stay at their native widths (8 and 16 bits respectively); the 320-bit row holds extra slack relative to a flat 8- or 16-bit packing so the same physical row width serves all types.
 
 

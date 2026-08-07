@@ -325,8 +325,15 @@ Sigmoid and GeLU can also be expressed directly in the [Vector Engine](./vector-
 ```
 
 The decode table is selected by the input scalar type (via the `TableLookup` trait), not by a runtime argument, exactly as `fetch_cast` selects its conversion by the input type.
-The hardware paired-key table for 4-bit keys supports only a 4-bit to 8-bit decode, so the sole implemented decode is `f4e2m1 -> f8e4m3`.
-Widen to `bf16` / `f32` with a following `fetch_cast`, and apply any NVFP4 / MXFP4 per-block scale downstream in the Vector Engine (it is intentionally not folded into the table, which stays a static 16-entry, block-independent decode).
+The key width picks the table and the requested output type picks the entry encoding:
+
+| Input | Output |
+|-------|--------|
+| `f4e2m1` | `f8e4m3`, `f8e5m2` |
+| `f8e4m3` | `bf16` |
+| `f8e5m2` | `bf16` |
+
+Widen a decoded 8-bit float to `f32` with a following `fetch_cast`, and apply any NVFP4 / MXFP4 per-block scale downstream in the [Vector Engine](./vector-engine/index.md) or the [Contraction Engine](./contraction-engine/index.md) (it is intentionally not folded into the table, which stays a static 16-entry, block-independent decode).
 
 The table for the `f4e2m1` decode is a compile-time constant baked into the fetch-sequencer configuration, so the `f4e2m1` weight stream is the only data input to the stage; there is no per-invocation table staging. The 16-entry e2m1 decode is block-independent, which is why the per-block scale stays out of it: folding the scale in would need a distinct table per block and defeat the shared static table.
 
@@ -362,7 +369,7 @@ Type casting adds 1 to 2 cycles of latency.
 {{#include ../../../furiosa-opt-std/src/engine/fetch_adapter.rs:fetch_cast_impl}}
 ```
 
-RNGD supports the following `fetch_cast` conversions (the `i4` to `i5` and `i8` to `i9` widenings are [Zero-Point Subtraction](#zero-point-subtraction), not type casts):
+RNGD supports the conversions below and no others: every widening lands in the `i32` / `f32` compute width, and `f32` to `bf16` is the only narrowing.
 
 | Input | Output |
 |-------|--------|
@@ -372,8 +379,10 @@ RNGD supports the following `fetch_cast` conversions (the `i4` to `i5` and `i8` 
 | `f8e4m3` | `f32` |
 | `f8e5m2` | `f32` |
 | `bf16` | `f32` |
-| `f16` | `f32` |
 | `f32` | `bf16` |
+
+In particular the Fetch Adapter has no cast from an 8-bit float to `bf16`, and none from `f32` to an 8-bit float.
+To land an `f8e4m3` stream in `bf16`, decode it through the non-paired [Table Lookup](#table-lookup) table instead; to reach an 8-bit float, narrow with the [Cast Engine](./cast-engine.md) later in the pipeline.
 
 The example below fetches an 8-element `i8` stream and casts it to `i32`.
 The `Time` and `Packet` mapping is unchanged across the call.

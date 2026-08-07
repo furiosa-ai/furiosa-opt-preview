@@ -91,8 +91,7 @@ If the main-context performed its `f32` → `bf16` conversion through the Cast E
 Routing the conversion through the Commit Adapter instead leaves the Vector Engine free for the sub-context.
 Sub-context itself does not support type casting (consistent with the support matrix above).
 
-`commit_cast` takes an `Activation`. `Activation::None` is a plain cast. `Activation::Relu` clamps negative values to zero as part of the same cast. ReLU has no standalone hardware stage, and exists only fused with a narrowing cast (`f32` → `bf16` + ReLU).
-
+`commit_cast` and `commit_cast_relu` are separate methods because they are separate hardware conversions, not one conversion with a mode: ReLU has no standalone stage to select at run time, and exists only fused with the narrowing cast.
 
 ```rust,ignore
 {{#include ../../../furiosa-opt-std/src/engine/commit_adapter.rs:commit_cast_impl}}
@@ -110,7 +109,7 @@ fn commit_cast_example<'l, const T: Tu>(
     // Cast f32 to bf16 (values preserved), no activation. A real main
     // commit runs `.commit_trim()` first, then `.commit(...)` after.
     // W = 8 f32 elements (32 bytes) stays 8 bf16 elements (16 bytes).
-    input.commit_cast::<bf16>(Activation::None)
+    input.commit_cast::<bf16>()
 }
 
 fn commit_cast_relu_example<'l, const T: Tu>(
@@ -118,7 +117,7 @@ fn commit_cast_relu_example<'l, const T: Tu>(
 ) -> CommitCastTensor<'l, T, bf16, m![1], m![1], m![1], m![N, C, H], m![W]> {
     // f32 -> bf16 with a fused ReLU: negative values clamped to zero.
     // e.g. [-5.0, -0.1, 0.0, 3.7] -> [0.0, 0.0, 0.0, 3.7]
-    input.commit_cast::<bf16>(Activation::Relu)
+    input.commit_cast_relu::<bf16>()
 }
 ```
 

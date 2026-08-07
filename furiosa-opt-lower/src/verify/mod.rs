@@ -25,10 +25,11 @@ use crate::DivideTerm;
 pub mod engine;
 
 pub use engine::{
-    CastError, CollectError, CommitTrimError, ContractLaneError, ContractPacketError, ContractTimeError, LaneMode,
-    StreamAdapterError, ToTrfError, VectorError, config_cast, config_collect, config_commit_trim, config_contract_lane,
-    config_contract_packet, config_contract_time, config_reduce_label, config_stream_adapter, config_to_trf,
-    config_vector_narrow_split, config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad,
+    CastError, CollectError, CommitCastError, CommitTrimError, ContractLaneError, ContractPacketError,
+    ContractTimeError, LaneMode, StreamAdapterError, ToTrfError, VectorError, config_cast, config_collect,
+    config_commit_cast, config_commit_trim, config_contract_lane, config_contract_packet, config_contract_time,
+    config_reduce_label, config_stream_adapter, config_to_trf, config_vector_narrow_split, config_vector_narrow_trim,
+    config_vector_widen_concat, config_vector_widen_pad,
 };
 
 /// Bits in a byte.

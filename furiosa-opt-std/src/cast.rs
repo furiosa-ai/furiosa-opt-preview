@@ -4,18 +4,42 @@ use crate::scalar::{bf16, f4e2m1, f8e4m3, f8e5m2, i4, i5, i9};
 
 use super::scalar::Scalar;
 
-/// Trait for types that can be cast during fetch operations.
-pub trait FetchCast<D: Scalar>: Into<D> + Cast<D> {}
+/// Host-side value conversion between scalar types: what a conversion computes, not a claim that
+/// hardware performs it. Some impls match no hardware conversion at all (`i32 -> u8`, `i32 -> i5`),
+/// existing only for the contraction fold's round trip. Each converting stage names its own legal
+/// subset in a subtrait its primitive binds instead ([`FetchCast`], [`CastEngineCast`],
+/// [`CommitCast`]); only `contract_outer` still binds `Cast`, gated by [`ContractionCast`].
+pub trait Cast<D: Scalar> {
+    /// Casts self to target type D.
+    fn cast(self) -> D;
+}
+
+/// Element-type pairs the Fetch Adapter's type-casting stage converts, one impl per RNGD
+/// conversion. `i4 -> i5` and `i8 -> i9` belong to [`FetchZeroPointSub`] instead. See
+/// `computing-tensors/fetch-adapter.md`.
+pub trait FetchCast<D: Scalar>: Cast<D> {}
+
+// Identity: the stage is programmed `TypeConversion::None`.
+impl<D> FetchCast<D> for D where D: Scalar {}
+
+// Integer widenings to the i32 compute width.
+impl FetchCast<i32> for i4 {}
+impl FetchCast<i32> for i8 {}
+impl FetchCast<i32> for i16 {}
+// Float widenings to the f32 compute width.
+impl FetchCast<f32> for f8e4m3 {}
+impl FetchCast<f32> for f8e5m2 {}
+impl FetchCast<f32> for bf16 {}
+impl FetchCast<bf16> for f32 {}
+// No 8-bit float to `bf16`; use `fetch_table_lookup`. `TypeConversion`'s four Renegade-S variants
+// stay out: the trait has no chip-generation axis to hold them.
 
 /// Input scalar types the Fetch Adapter's table-lookup stage can decode to `OutD`.
 ///
-/// The RNGD table-lookup only supports a 4-bit key decoding to an 8-bit value
-/// (paired-key table, 4b->8b only), so the only implementor is
-/// `f4e2m1: TableLookup<f8e4m3>`. Wider floats and the per-block scale come from a
-/// downstream `fetch_cast`. Stating the table at the type level lets
-/// `fetch_table_lookup` take no
-/// runtime table argument. See the book chapter
-/// `computing-tensors/fetch-adapter.md` (the "Table Lookup" section).
+/// One impl per hardware table: a paired 4b->8b decode of `f4e2m1` into either 8-bit float, and a
+/// non-paired 8-bit decode of either into `bf16`, which is the only route from an 8-bit float to
+/// `bf16` since no [`FetchCast`] does it. Selecting the table by type is what lets
+/// `fetch_table_lookup` take no runtime table argument. See `computing-tensors/fetch-adapter.md`.
 pub trait TableLookup<D: Scalar> {
     /// Functional model of the hardware decode table.
     fn lookup(self) -> D;
@@ -27,26 +51,27 @@ impl TableLookup<f8e4m3> for f4e2m1 {
     }
 }
 
-impl TableLookup<bf16> for f8e4m3 {
-    /// The non-paired `f8e4m3 -> bf16` baked decode table. `f8e4m3 -> f32` is exact and `f8e4m3` has
-    /// only 3 mantissa bits, so the low 16 bits of the `f32` are zero and the `bf16` truncation the
-    /// hardware table performs (`build_fp8_to_bf16_lookup_table`) equals `from_f32` exactly.
+impl TableLookup<f8e5m2> for f4e2m1 {
+    fn lookup(self) -> f8e5m2 {
+        f8e5m2::from_f32(self.to_f32())
+    }
+}
+
+impl TableLookup<bf16> for f8e5m2 {
+    /// Exact for the same reason as the `f8e4m3` decode: 2 mantissa bits leave the `f32`'s low 16
+    /// bits zero, so the hardware table's truncation equals `from_f32`.
     fn lookup(self) -> bf16 {
         bf16::from_f32(self.to_f32())
     }
 }
 
-// TODO: extend `FetchCast` with the remaining int/float widening and narrowing conversions
-// (including the Renegade-S-only variants).
-
-// Identity casts
-impl<D> FetchCast<D> for D where D: Scalar {}
-
-impl FetchCast<i32> for i8 {}
-impl FetchCast<f32> for bf16 {}
-impl FetchCast<f32> for f8e4m3 {}
-impl FetchCast<f32> for f8e5m2 {}
-impl FetchCast<i32> for i4 {}
+impl TableLookup<bf16> for f8e4m3 {
+    /// `f8e4m3 -> f32` is exact and `f8e4m3` has only 3 mantissa bits, so the low 16 bits of the
+    /// `f32` are zero and the hardware table's `bf16` truncation equals `from_f32` exactly.
+    fn lookup(self) -> bf16 {
+        bf16::from_f32(self.to_f32())
+    }
+}
 
 /// Valid zero-point-subtraction widenings for `fetch_zero_point_sub`.
 ///
@@ -83,10 +108,48 @@ impl FetchZeroPointSub<i9> for i8 {
     }
 }
 
-/// Trait for casting between scalar types.
-pub trait Cast<D: Scalar> {
-    /// Casts self to target type D.
-    fn cast(self) -> D;
+/// Output element types the Cast Engine narrows an `i32` / `f32` packet to, one impl per RNGD
+/// cast-compaction conversion. No identity impl: a width-preserving cast is not a compaction and
+/// the stage rejects it. See `computing-tensors/cast-engine.md`.
+#[diagnostic::on_unimplemented(
+    message = "the Cast Engine cannot cast `{Self}` to `{D}`",
+    label = "not a cast-compaction conversion",
+    note = "widenings belong to the Fetch Adapter: `.fetch_cast::<{D}>()`"
+)]
+pub trait CastEngineCast<D: Scalar>: Cast<D> {}
+
+impl CastEngineCast<i4> for i32 {}
+impl CastEngineCast<i8> for i32 {}
+impl CastEngineCast<i16> for i32 {}
+impl CastEngineCast<f8e4m3> for f32 {}
+impl CastEngineCast<f8e5m2> for f32 {}
+impl CastEngineCast<bf16> for f32 {}
+
+/// The one cast the Commit Adapter folds in on the way to DM: `f32 -> bf16`
+/// (`CommitConversion::CommitF32ToBf16`, ReLU optionally fused). Anything else narrows in
+/// [`CastEngineCast`]; a plain `commit()` is already `NoCommitConversion`. See
+/// `computing-tensors/commit-adapter.md`.
+#[diagnostic::on_unimplemented(
+    message = "the Commit Adapter cannot cast `{Self}` to `{D}`",
+    label = "commit_cast converts only `f32` to `bf16`",
+    note = "narrow to anything else in the Cast Engine: `.cast::<{D}, OutPacket>()`"
+)]
+pub trait CommitCast<D: Scalar>: Cast<D> {
+    /// The fused-ReLU form of the same conversion: negatives clamp to zero on the way through.
+    /// ReLU has no standalone hardware stage, so it lives on the cast it fuses into.
+    fn cast_relu(self) -> D;
+}
+
+impl CommitCast<bf16> for f32 {
+    /// NaN is tested before the clamp, so a NaN canonicalizes even with its sign bit set. The clamp
+    /// then keys on the sign bit rather than on `< 0.0`, so `-0.0` and every negative subnormal land
+    /// on `+0.0` instead of keeping their sign.
+    fn cast_relu(self) -> bf16 {
+        if !self.is_nan() && self.is_sign_negative() {
+            return Cast::cast(0.0);
+        }
+        Cast::cast(self)
+    }
 }
 
 // `#[inline]` because each `cast` runs once per MAC in the contraction fold; the integer narrow legs
@@ -116,14 +179,14 @@ impl Cast<i8> for i32 {
 impl Cast<f32> for bf16 {
     #[inline]
     fn cast(self) -> f32 {
-        self.to_f32()
+        crate::float::bf16_to_f32(self.to_half())
     }
 }
 
 impl Cast<bf16> for f32 {
     #[inline]
     fn cast(self) -> bf16 {
-        bf16::from_f32(self)
+        bf16::from_half(crate::float::f32_to_bf16(self))
     }
 }
 
@@ -142,12 +205,14 @@ impl Cast<f8e4m3> for f32 {
 }
 
 impl Cast<f32> for f8e5m2 {
+    #[inline]
     fn cast(self) -> f32 {
         self.to_f32()
     }
 }
 
 impl Cast<f8e5m2> for f32 {
+    #[inline]
     fn cast(self) -> f8e5m2 {
         f8e5m2::from_f32(self)
     }

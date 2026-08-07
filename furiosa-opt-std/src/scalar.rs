@@ -340,6 +340,26 @@ impl bf16 {
     pub fn to_f32(self) -> f32 {
         self.0.to_f32()
     }
+
+    /// Reinterprets the raw 16-bit encoding, for pinning a specific bit pattern (a subnormal, a
+    /// NaN payload) that no `f32` literal names.
+    pub const fn from_bits(bits: u16) -> Self {
+        bf16(half::bf16::from_bits(bits))
+    }
+
+    /// The raw 16-bit encoding.
+    pub const fn to_bits(self) -> u16 {
+        self.0.to_bits()
+    }
+
+    /// The wrapped `half` value, so `crate::float` can state the hardware conversion rules once.
+    pub(crate) fn to_half(self) -> half::bf16 {
+        self.0
+    }
+
+    pub(crate) fn from_half(v: half::bf16) -> Self {
+        bf16(v)
+    }
 }
 
 impl From<bf16> for f32 {

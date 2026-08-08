@@ -114,6 +114,72 @@ pub fn ve_elementwise_neg_offset_f32(
     result.to_hbm(&mut ctx.tdma)
 }
 
+/// `|x|` on `f32` by bit masking: clear the sign bit, no float ALU involved.
+///
+/// `BitAnd` runs on an `f32` stream too, but its operand would then have to be an `f32`, so the mask
+/// would read as the NaN `f32::from_bits(0x7fff_ffff)`. Reading the stream as `i32` keeps the mask a
+/// plain integer literal, and the two `vector_reinterpret` calls cost nothing: no instruction, no ALU,
+/// no stage.
+#[device(chip = 1)]
+pub fn ve_elementwise_reinterpret_abs_f32(
+    ctx: &mut Context,
+    input: &HbmTensor<f32, Chip, m![A]>,
+) -> HbmTensor<f32, Chip, m![A]> {
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
+
+    let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![1], m![A % 2]>()
+        .fetch_cast::<f32>()
+        .collect::<m![1], m![A % 2 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_reinterpret::<i32>()
+        .vector_logic(LogicBinaryOpI32::BitAnd, 0x7fff_ffff)
+        .vector_reinterpret::<f32>()
+        .vector_final()
+        .commit_trim::<m![A % 2]>()
+        .commit();
+
+    result.to_hbm(&mut ctx.tdma)
+}
+
+/// `min(|x| * 2, 100.0)` with the doubling done as `exponent += 1` on the bit pattern, to exercise
+/// several reinterprets in one pass.
+///
+/// Four `vector_reinterpret` calls across three dtype-tagged clusters (Logic and Fxp read `i32`, Clip
+/// reads `f32`). The `f32` round trip in the middle is deliberately redundant: reinterprets carry no
+/// hardware, so consecutive ones must collapse rather than each cost something.
+#[device(chip = 1)]
+pub fn ve_elementwise_reinterpret_chain_f32(
+    ctx: &mut Context,
+    input: &HbmTensor<f32, Chip, m![A]>,
+) -> HbmTensor<f32, Chip, m![A]> {
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
+
+    let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![1], m![A % 2]>()
+        .fetch_cast::<f32>()
+        .collect::<m![1], m![A % 2 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_reinterpret::<i32>()
+        .vector_logic(LogicBinaryOpI32::BitAnd, 0x7fff_ffff)
+        .vector_reinterpret::<f32>()
+        .vector_reinterpret::<i32>()
+        .vector_fxp(FxpBinaryOp::AddFxp, 1 << 23)
+        .vector_reinterpret::<f32>()
+        .vector_clip(ClipBinaryOpF32::Min, 100.0f32)
+        .vector_final()
+        .commit_trim::<m![A % 2]>()
+        .commit();
+
+    result.to_hbm(&mut ctx.tdma)
+}
+
 #[device(chip = 1)]
 pub fn ve_elementwise_stash_f32(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -> HbmTensor<f32, Chip, m![A]> {
     let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
@@ -422,24 +488,35 @@ pub fn ve_stash_fxp_fxp(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) 
     result.to_hbm(&mut ctx.tdma)
 }
 
-// Stash at fxp stage, read at fp stage (i32 stash -> f32 read via fxp_to_fp)
-// input * 2 (fxp), convert to fp, then add stashed_input (reinterpreted as f32)
+/// `2|x|` on `f32`, with the stash written after a reinterpret.
+///
+/// The stash takes the scalar the stream carries at the write, so a `vector_reinterpret` in front of it
+/// decides what gets stashed: the mask runs on the `i32` view, the stream goes back to `f32`, and only
+/// then is the value stashed, so the `f32` clip can read it. Stashing before the reinterpret instead
+/// would leave an `i32` stash that no `f32` op can read.
+///
+/// The stash also reads with `Add` here rather than `max`, which is what makes the write's capture
+/// point observable at all: `max(|x|, x)` is `|x|` whichever of the two the cache holds.
 #[device(chip = 1)]
-pub fn ve_stash_fxp_fp(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -> HbmTensor<f32, Chip, m![A]> {
+pub fn ve_stash_after_reinterpret_f32(
+    ctx: &mut Context,
+    input: &HbmTensor<f32, Chip, m![A]>,
+) -> HbmTensor<f32, Chip, m![A]> {
     let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
         .main
         .begin(input_dm.view())
         .fetch::<m![1], m![A % 2]>()
-        .fetch_cast::<i32>()
+        .fetch_cast::<f32>()
         .collect::<m![1], m![A % 2 # 8]>()
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
-        .vector_stash()
-        .vector_fxp(FxpBinaryOp::MulInt, 2)
-        .vector_fxp_to_fp(8)
-        .vector_clip(ClipBinaryOpF32::Max, Stash)
+        .vector_reinterpret::<i32>()
+        .vector_logic(LogicBinaryOpI32::BitAnd, 0x7fff_ffff) // |x|, masked as an i32
+        .vector_reinterpret::<f32>()
+        .vector_stash() // the stash takes f32, the scalar the stream carries here
+        .vector_clip(ClipBinaryOpF32::Add, Stash) // |x| + |x|
         .vector_final()
         .commit_trim::<m![A % 2]>()
         .commit();
@@ -447,10 +524,11 @@ pub fn ve_stash_fxp_fp(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -
     result.to_hbm(&mut ctx.tdma)
 }
 
-// Stash at fp stage, read at clip stage (f32 -> f32)
-// input * 2.0, stash, then * 3.0, then max(result, stashed)
+// A value computed in the 4-way region reaches the stash by widening first: the widen itself
+// holds no write indexer, so the write rides the first clip op and the read the second, both
+// 8-way. `2 * max(2x, 0)`.
 #[device(chip = 1)]
-pub fn ve_stash_fp_fp(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -> HbmTensor<f32, Chip, m![A]> {
+pub fn ve_stash_after_widen_f32(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -> HbmTensor<f32, Chip, m![A]> {
     let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
 
     let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
@@ -463,37 +541,10 @@ pub fn ve_stash_fp_fp(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) ->
         .vector_intra_slice_tag(TagMode::Zero)
         .vector_narrow_trim::<m![A % 2 # 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), 2.0f32)
-        .vector_stash()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), 3.0f32)
         .vector_widen_pad::<m![A % 2 # 8]>()
-        .vector_clip(ClipBinaryOpF32::Max, Stash)
-        .vector_final()
-        .commit_trim::<m![A % 2]>()
-        .commit();
-
-    result.to_hbm(&mut ctx.tdma)
-}
-
-// Stash at fp stage, read at clip stage after fp_to_fxp (f32 stash -> i32 read)
-// input * 2.0 (fp), stash, convert to fxp, then max(result, stashed reinterpreted as i32)
-#[device(chip = 1)]
-pub fn ve_stash_fp_fxp(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
-
-    let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
-        .main
-        .begin(input_dm.view())
-        .fetch::<m![1], m![A % 2]>()
-        .fetch_cast::<f32>()
-        .collect::<m![1], m![A % 2 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_trim::<m![A % 2 # 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), 2.0f32)
+        .vector_clip(ClipBinaryOpF32::Max, 0.0f32)
         .vector_stash()
-        .vector_widen_pad::<m![A % 2 # 8]>()
-        .vector_fp_to_fxp(31)
-        .vector_clip(ClipBinaryOpI32::Max, Stash)
+        .vector_clip(ClipBinaryOpF32::Add, Stash)
         .vector_final()
         .commit_trim::<m![A % 2]>()
         .commit();

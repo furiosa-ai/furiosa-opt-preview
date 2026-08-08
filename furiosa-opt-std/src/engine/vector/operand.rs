@@ -1,28 +1,22 @@
-//! Operand types for Vector Engine operations.
+//! Operands for VE binary and ternary ops: [`VeRhs`] (constant, VRF or stash), [`Stash`] itself,
+//! [`BranchOperands`] for a per-branch list, the [`BinaryOperandTag`] / [`TernaryOperandTag`] pair
+//! and the [`IntoOperands`] conversions that let a call site pass a bare value.
 //!
-//! This module provides types for specifying operands in VE binary and ternary operations:
-//! - [`VeRhs`]: RHS operand (constant, VRF data, or stash) with type safety
-//! - [`Stash`]: read-once stash operand, passed to any VE binary/clip/ternary op
-//! - [`BranchOperands`]: per-branch operand list where any branch may read the stash, read-once
-//!   enforced per pass (allowed across mutually-exclusive branches, rejected on a second op)
-//! - [`StashOperand`]: stash read operand with branch validity (requires matching D type)
-//! - [`TernaryOperandTag`]: Operand for ternary operations
-//! - [`VeOperand`]: Unified operand type with automatic conversion
-//! - [`IntoOperands`]: Trait for converting operands to ArrayVec
-//! - [`StashTransition`]: how using an operand transitions the pipeline's stash typestate
+//! [`StashTransition`] is how the operand moves the pipeline's stash typestate.
 
 use std::marker::PhantomData;
 
 use furiosa_mapping::{M, Pair, m};
 use furiosa_opt_macro::primitive;
 
+use crate::engine::vector::stage::markers::Way;
 use crate::{
     array_vec::ArrayVec,
     engine::vector::{
         MAX_TAGS,
         scalar::VeScalar,
         stage::state::VeState,
-        stash_slot::{Occupied, Spent, StashSlot},
+        stash_slot::{Occupied, Spent, StashState},
     },
     prelude::{GroupId, TagFilter, VrfTensor},
     tensor::Tensor,
@@ -32,11 +26,8 @@ use crate::{
 // VeRhs - Constant or VRF operand (type-safe)
 // ============================================================================
 
-/// RHS operand for Vector Engine operations.
-///
-/// Generic over:
-/// - `D`: Data type (i32 or f32) - ensures type safety with tensor operations
-/// - `TargetMapping`: Target tensor shape for VRF transpose
+/// RHS operand for Vector Engine operations. `TargetMapping` is the shape a VRF operand is
+/// transposed to.
 #[primitive(op::VeRhs)]
 #[derive(Debug, Clone)]
 pub enum VeRhs<D: VeScalar, TargetMapping: M> {
@@ -108,65 +99,113 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// An operand that leaves the stash slot alone (everything but [`Stash`]). Only exists to exclude
-/// `Stash` from the identity [`StashTransition`] blanket below -- Rust has no negative bounds, so a
-/// catch-all `impl<T>` plus the `Stash` override would collide. Sealed: a new operand type must
-/// opt in with `impl Plain` (plus the paired `impl sealed::Sealed`) or an explicit
-/// [`StashTransition`], so forgetting the transition is a compile error rather than silent identity.
+/// An operand that leaves the stash slot alone (everything but [`Stash`]). Rust has no negative
+/// bounds, so the identity [`StashTransition`] blanket needs this marker to keep off `Stash`. Sealed,
+/// so a new operand type cannot take the identity by forgetting to say anything.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be used as an operand here",
+    label = "not usable as this op's operand",
+    note = "if this is `Stash`: a `vector_stash` has to come earlier, only one op may read it, and the \
+            stream has to carry the same scalar and way it carried at that write (see `StashTransition`)"
+)]
 pub trait Plain: sealed::Sealed {}
 
-/// How an operand transitions the stash slot: `S` -> [`Self::Next`]. [`Plain`] operands are the
-/// identity; [`Stash`] maps `Occupied` -> `Spent` and is impl'd *only* on `Occupied`, so an empty
-/// (`Fresh`), already-read (`Spent`), or repeated read has no impl -- that missing impl is the
-/// read-once compile error. See the stash-slot [module docs] for the full state machine.
+/// How an operand moves the stash slot: `S` -> [`Self::Next`], for a reader of scalar `RD` on a
+/// way-`W` pipeline. [`Plain`] operands are the identity; [`Stash`] is impl'd only on
+/// `Occupied<RD, _, W>`, so an empty, spent, repeated, cross-scalar or cross-way read has no impl.
+/// See the stash-slot [module docs] for the state machine.
 ///
 /// [module docs]: crate::engine::vector::stash_slot
 ///
+/// A live stash at the reader's scalar and way reads:
 /// ```
-/// use furiosa_opt_std::prelude::{StashTransition, Stash, Occupied, StashSlot, VeScalar};
-/// use furiosa_mapping::Broadcast;
-/// fn reads<SD: VeScalar, S: StashSlot<SD>, Op: StashTransition<SD, S>>() {}
-/// reads::<f32, Occupied<f32, Broadcast<1>>, Stash>(); // live stash: reads
+/// # #![feature(adt_const_params)]
+/// # use furiosa_opt_std::prelude::{stage::Way, Occupied, Stash, StashState, StashTransition, VeScalar};
+/// # use furiosa_mapping::Broadcast;
+/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Occupied<f32, Broadcast<1>, { Way::Way8 }>, f32, { Way::Way8 }, Stash>();
+/// ```
+/// A stash written as `i32` cannot be read by an `f32` op, so undo the conversion or reinterpret first:
+/// ```compile_fail,E0277
+/// # #![feature(adt_const_params)]
+/// # use furiosa_opt_std::prelude::{stage::Way, Occupied, Stash, StashState, StashTransition, VeScalar};
+/// # use furiosa_mapping::Broadcast;
+/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Occupied<i32, Broadcast<1>, { Way::Way8 }>, f32, { Way::Way8 }, Stash>();
+/// ```
+/// Nor 4-way by an 8-way op: the operand register is addressed per way, so the reader would get the
+/// wrong elements.
+/// ```compile_fail,E0277
+/// # #![feature(adt_const_params)]
+/// # use furiosa_opt_std::prelude::{stage::Way, Occupied, Stash, StashState, StashTransition, VeScalar};
+/// # use furiosa_mapping::Broadcast;
+/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Occupied<f32, Broadcast<1>, { Way::Way4 }>, f32, { Way::Way8 }, Stash>();
+/// ```
+/// Never written, and read twice, are the same missing impl:
+/// ```compile_fail,E0277
+/// # #![feature(adt_const_params)]
+/// # use furiosa_opt_std::prelude::{stage::Way, Fresh, Stash, StashState, StashTransition, VeScalar};
+/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Fresh, f32, { Way::Way8 }, Stash>();
 /// ```
 /// ```compile_fail,E0277
-/// use furiosa_opt_std::prelude::{StashTransition, Stash, Fresh, StashSlot, VeScalar};
-/// fn reads<SD: VeScalar, S: StashSlot<SD>, Op: StashTransition<SD, S>>() {}
-/// reads::<f32, Fresh, Stash>(); // never stashed: no impl -> won't compile
+/// # #![feature(adt_const_params)]
+/// # use furiosa_opt_std::prelude::{stage::Way, Spent, Stash, StashState, StashTransition, VeScalar};
+/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Spent, f32, { Way::Way8 }, Stash>();
 /// ```
-/// ```compile_fail,E0277
-/// use furiosa_opt_std::prelude::{StashTransition, Stash, Spent, StashSlot, VeScalar};
-/// fn reads<SD: VeScalar, S: StashSlot<SD>, Op: StashTransition<SD, S>>() {}
-/// reads::<f32, Spent, Stash>(); // second read after consuming: no impl -> won't compile
-/// ```
-pub trait StashTransition<SD: VeScalar, S: StashSlot<SD>> {
+#[diagnostic::on_unimplemented(
+    message = "the stash cannot be read here",
+    label = "this operand reads the stash",
+    note = "the stash keeps the scalar and the way the stream carried at the `vector_stash`, and only a \
+            stream carrying that same pair can read it: reinterpret (or narrow / widen) back first",
+    note = "it is written once and read once, so with no earlier `vector_stash` the slot is empty, and a \
+            second `Stash` operand finds it spent"
+)]
+pub trait StashTransition<S: StashState, RD: VeScalar, const W: Way> {
     /// Stash typestate after this operand.
-    type Next: StashSlot<SD>;
+    type Next: StashState;
 
     /// Runs the transition on the value (drops the stash tensor iff this operand read it). Needed
-    /// because [`VeState`] stores the stash by value, so `S` -> `Next` is a real move, not a retag.
-    fn transition(state: VeState<SD, S>) -> VeState<SD, Self::Next>;
+    /// because the state stores the stash by value, so `S` -> `Next` is a real move, not a retag.
+    fn transition(state: VeState<S>) -> VeState<Self::Next>;
+
+    /// The stashed tensor this operand reads, in the reader's mapping, or `None` for an operand that
+    /// does not read the stash. Which one it is follows from the operand type, so the emulation needs
+    /// no runtime look at the lowered operands.
+    fn stashed<Mapping: M>(state: &VeState<S>) -> Option<Tensor<RD, Mapping>>;
 }
 
-impl<SD: VeScalar, S: StashSlot<SD>, T: Plain> StashTransition<SD, S> for T {
+impl<S: StashState, RD: VeScalar, T: Plain, const W: Way> StashTransition<S, RD, W> for T {
     type Next = S;
-    fn transition(state: VeState<SD, S>) -> VeState<SD, S> {
+    fn transition(state: VeState<S>) -> VeState<S> {
         state
+    }
+    fn stashed<Mapping: M>(_state: &VeState<S>) -> Option<Tensor<RD, Mapping>> {
+        None
     }
 }
 
-impl<SD: VeScalar, StashMapping: M> StashTransition<SD, Occupied<SD, StashMapping>> for Stash {
+impl<D: VeScalar, StashMapping: M, const W: Way> StashTransition<Occupied<D, StashMapping, W>, D, W> for Stash {
     type Next = Spent;
-    fn transition(state: VeState<SD, Occupied<SD, StashMapping>>) -> VeState<SD, Spent> {
+    fn transition(state: VeState<Occupied<D, StashMapping, W>>) -> VeState<Spent> {
         state.consume_stash()
+    }
+    fn stashed<Mapping: M>(state: &VeState<Occupied<D, StashMapping, W>>) -> Option<Tensor<D, Mapping>> {
+        Some(state.stash_tensor())
     }
 }
 
 // Ternary `(Stash, c)`: same read-once rule; the stash is operand0. Delegates to the `Stash`
 // transition so the two share one body.
-impl<SD: VeScalar, StashMapping: M> StashTransition<SD, Occupied<SD, StashMapping>> for (Stash, f32) {
+impl<D: VeScalar, StashMapping: M, const W: Way> StashTransition<Occupied<D, StashMapping, W>, D, W> for (Stash, f32) {
     type Next = Spent;
-    fn transition(state: VeState<SD, Occupied<SD, StashMapping>>) -> VeState<SD, Spent> {
-        <Stash as StashTransition<SD, Occupied<SD, StashMapping>>>::transition(state)
+    fn transition(state: VeState<Occupied<D, StashMapping, W>>) -> VeState<Spent> {
+        <Stash as StashTransition<Occupied<D, StashMapping, W>, D, W>>::transition(state)
+    }
+    fn stashed<Mapping: M>(state: &VeState<Occupied<D, StashMapping, W>>) -> Option<Tensor<D, Mapping>> {
+        <Stash as StashTransition<Occupied<D, StashMapping, W>, D, W>>::stashed(state)
     }
 }
 
@@ -179,67 +218,43 @@ impl<SD: VeScalar, StashMapping: M> StashTransition<SD, Occupied<SD, StashMappin
 #[derive(Debug, Clone, Copy)]
 pub struct NoStash;
 
-/// Type-level marker: this multi-branch operand list has **at least one** branch that reads the
-/// stash. Mutually-exclusive branches all name the same physical stash, so the whole VE pass reads
-/// it *once* -- the marker collapses any number of stash branches to a single `Occupied` -> `Spent`
-/// transition. See [`BranchOperands`].
+/// Marks a [`BranchOperands`] list with at least one stash branch. The branches are mutually
+/// exclusive, so any number of them collapse to one `Occupied` -> `Spent`.
 #[derive(Debug, Clone, Copy)]
 pub struct WithStash;
 
-/// A multi-branch VE operand list where each branch chooses its own rhs, and any branch may read
-/// the stash.
+/// A multi-branch VE operand list where each branch picks its own rhs, and any branch may read the
+/// stash.
 ///
-/// A single VE op runs *one* pass over the tensor: every element takes the branch whose
-/// [`TagFilter`] matches its execution id, and the branches are mutually exclusive by construction
-/// (group ids partition the elements). So even if several branches name [`Stash`] as their rhs, the
-/// hardware reads the stash **once** for the pass. That is the branch-exclusivity model the
-/// read-once typestate needs: read-once holds *per pass*, not *per branch*.
+/// One VE op is one pass: every element takes the branch whose [`TagFilter`] matches its execution
+/// id, and the branches partition the elements. So several branches naming [`Stash`] still read the
+/// hardware stash once, which is why read-once holds per pass rather than per branch. `StashMark`
+/// records which case this list is ([`WithStash`] after a [`stash_branch`](Self::stash_branch),
+/// [`NoStash`] otherwise) and the [`StashTransition`] keys on it.
 ///
-/// The `StashMark` type parameter records at compile time whether the list contains a stash branch:
-/// [`WithStash`] after any [`stash_branch`](Self::stash_branch), [`NoStash`] otherwise. The
-/// [`StashTransition`] keys on it -- [`WithStash`] maps `Occupied` -> `Spent` (impl'd only on
-/// `Occupied`, so a *second* op reading the stash still finds no impl and fails to compile), and
-/// [`NoStash`] is the identity. This is how N-operands-per-branch stays read-once at compile time:
-///
-/// - **allowed** (positive): several mutually-exclusive branches each read the stash in one op --
-///   one dynamic read, one `Occupied` -> `Spent`.
-/// - **rejected** (negative): reading the stash again in a *later* op -- the slot is `Spent`, the
-///   [`WithStash`] transition has no impl on `Spent`, so it does not compile.
-///
-/// Positive: a two-branch list, both branches reading the stash, satisfies the exact op-method
-/// bound (`IntoOperands` + `StashTransition`) on a live (`Occupied`) slot -- one pass, one read.
+/// Two branches reading the stash in one op is one read:
 /// ```
-/// use furiosa_opt_std::prelude::{
-///     StashTransition, IntoOperands, BranchOperands, WithStash, Occupied, StashSlot, VeScalar,
-///     GroupId, M,
-/// };
-/// use furiosa_mapping::Broadcast;
-/// // The same bound `vector_fp_binary`/`vector_fxp` put on their operand `Op`.
-/// fn op_operand<SD, S, Map, Op>()
-/// where
-///     SD: VeScalar, S: StashSlot<SD>, Map: M,
-///     Op: IntoOperands<SD, Map> + StashTransition<SD, S>,
-/// {}
-/// // x < 0 -> read stash; x >= 0 -> read stash. Mutually exclusive, so one dynamic read.
-/// op_operand::<f32, Occupied<f32, Broadcast<1>>, Broadcast<1>, BranchOperands<f32, Broadcast<1>, WithStash>>();
-/// let _ = BranchOperands::<f32, Broadcast<1>, _>::new()
-///     .stash_branch(GroupId::Zero)
-///     .stash_branch(GroupId::One);
+/// # #![feature(adt_const_params)]
+/// # use furiosa_opt_std::prelude::{stage::Way, BranchOperands, GroupId, Occupied, StashState, StashTransition, VeScalar, WithStash};
+/// # use furiosa_mapping::Broadcast;
+/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Occupied<f32, Broadcast<1>, { Way::Way8 }>, f32, { Way::Way8 }, BranchOperands<f32, Broadcast<1>, WithStash>>();
+/// let _ = BranchOperands::<f32, Broadcast<1>, _>::new().stash_branch(GroupId::Zero).stash_branch(GroupId::One);
 /// ```
-/// Negative: the same list on a `Spent` slot -- the stash was already read by an earlier op, so a
-/// second read anywhere in the chain finds no impl.
+/// Reading it again in a later op is not, and neither is reading it before any write:
 /// ```compile_fail,E0277
-/// use furiosa_opt_std::prelude::{StashTransition, BranchOperands, WithStash, Spent, StashSlot, VeScalar};
-/// use furiosa_mapping::Broadcast;
-/// fn reads<SD: VeScalar, S: StashSlot<SD>, Op: StashTransition<SD, S>>() {}
-/// reads::<f32, Spent, BranchOperands<f32, Broadcast<1>, WithStash>>(); // second read: no impl
+/// # #![feature(adt_const_params)]
+/// # use furiosa_opt_std::prelude::{stage::Way, BranchOperands, Spent, StashState, StashTransition, VeScalar, WithStash};
+/// # use furiosa_mapping::Broadcast;
+/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Spent, f32, { Way::Way8 }, BranchOperands<f32, Broadcast<1>, WithStash>>();
 /// ```
-/// Negative: the same list on a `Fresh` (never-written) slot -- nothing to read.
 /// ```compile_fail,E0277
-/// use furiosa_opt_std::prelude::{StashTransition, BranchOperands, WithStash, Fresh, StashSlot, VeScalar};
-/// use furiosa_mapping::Broadcast;
-/// fn reads<SD: VeScalar, S: StashSlot<SD>, Op: StashTransition<SD, S>>() {}
-/// reads::<f32, Fresh, BranchOperands<f32, Broadcast<1>, WithStash>>(); // never stashed: no impl
+/// # #![feature(adt_const_params)]
+/// # use furiosa_opt_std::prelude::{stage::Way, BranchOperands, Fresh, StashState, StashTransition, VeScalar, WithStash};
+/// # use furiosa_mapping::Broadcast;
+/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Fresh, f32, { Way::Way8 }, BranchOperands<f32, Broadcast<1>, WithStash>>();
 /// ```
 #[derive(Debug, Clone)]
 pub struct BranchOperands<D: VeScalar, Mapping: M, StashMark> {
@@ -292,12 +307,15 @@ impl<D: VeScalar, Mapping: M> Plain for BranchOperands<D, Mapping, NoStash> {}
 
 // A `WithStash` list reads the stash once for the whole pass: `Occupied` -> `Spent`, impl'd only on
 // `Occupied` so a second stash read anywhere later in the chain has no impl (read-once).
-impl<SD: VeScalar, StashMapping: M, Mapping: M> StashTransition<SD, Occupied<SD, StashMapping>>
-    for BranchOperands<SD, Mapping, WithStash>
+impl<D: VeScalar, StashMapping: M, Mapping: M, const W: Way> StashTransition<Occupied<D, StashMapping, W>, D, W>
+    for BranchOperands<D, Mapping, WithStash>
 {
     type Next = Spent;
-    fn transition(state: VeState<SD, Occupied<SD, StashMapping>>) -> VeState<SD, Spent> {
+    fn transition(state: VeState<Occupied<D, StashMapping, W>>) -> VeState<Spent> {
         state.consume_stash()
+    }
+    fn stashed<TargetMapping: M>(state: &VeState<Occupied<D, StashMapping, W>>) -> Option<Tensor<D, TargetMapping>> {
+        <Stash as StashTransition<Occupied<D, StashMapping, W>, D, W>>::stashed(state)
     }
 }
 
@@ -374,23 +392,10 @@ impl<D: VeScalar> StashOperand<D> {
 // OperandTagValue - Operand carrying branch-gating predicate plus rhs values
 // ============================================================================
 
-/// Per-branch operand for VE binary / ternary operations.
-///
-/// VE operations can configure their **rhs operand(s) per branch id**: e.g.
-/// `x < 0 → add(x, 1)`, `x ≥ 0 → add(x, 2)`. Up to two rhs values are supported,
-/// stored as `operand0` and `operand1`:
-///
-/// - `operand0` is the primary rhs and is settable for *both* binary and ternary
-///   ops — even unary-shaped invocations may want to override mainstream with a
-///   custom rhs (e.g. `exp(0)` instead of `exp(mainstream)`).
-/// - `operand1` is only meaningful for ternary ops; the binary alias parameterizes
-///   it with `()` so the field carries no extra cost.
-///
-/// `tag_filter` gates which branch ids actually apply this operand at the
-/// position's execution id; positions whose execution id is `Uninit` skip entirely.
-///
-/// Type aliases [`BinaryOperandTag`] (binary, no `operand1`) and
-/// [`TernaryOperandTag`] (ternary, `operand1: f32`) name the two specializations.
+/// Per-branch operand for VE binary / ternary ops: `x < 0 -> add(x, 1)`, `x >= 0 -> add(x, 2)`.
+/// `operand0` is the primary rhs and applies to both shapes; `operand1` is the ternary's second one
+/// (`()` in the binary alias). `tag_filter` picks the branch ids this operand applies at, and an
+/// `Uninit` execution id skips it. See [`BinaryOperandTag`] / [`TernaryOperandTag`].
 #[derive(Debug, Clone)]
 pub struct OperandTagValue<D: VeScalar, TargetMapping: M, Operand1: Copy> {
     /// Primary rhs (always present). Replaces mainstream at this branch.
@@ -458,18 +463,10 @@ impl<Mapping: M> OperandTagValue<f32, Mapping, f32> {
     }
 }
 
-/// Shared view over VE operand types that carry a branch-gating predicate plus the rhs
-/// value(s) used at that branch. Implemented by [`BinaryOperandTag`] (one rhs) and
-/// [`TernaryOperandTag`] (two rhs) so VE apply helpers can iterate either kind through one
-/// code path.
-///
-/// **Mainstream is not part of this trait.** A ternary op takes three positional inputs
-/// (mainstream, operand0, operand1), but the trait only exposes the two rhs values that vary
-/// per branch — mainstream is a tensor-level input passed separately to the apply helper.
-///
-/// `Operand1` is the type of the secondary rhs: `()` for [`BinaryOperandTag`] and `f32` for
-/// [`TernaryOperandTag`], so callers that know the concrete type get a typed value without
-/// `Option`/`expect`.
+/// One view over [`BinaryOperandTag`] and [`TernaryOperandTag`] so the apply helpers iterate either
+/// through one path. Only the per-branch rhs values are here; the mainstream is a tensor-level input
+/// the helper takes separately. `Operand1` is `()` for the binary alias and `f32` for the ternary
+/// one, so a caller that knows the shape gets a typed value rather than an `Option`.
 pub trait OperandTag<D: VeScalar, Mapping: M> {
     /// Type of the secondary rhs scalar (`()` when the operand kind doesn't carry one).
     type Operand1: Copy;
@@ -524,13 +521,8 @@ where
 // IntoTernaryOperandTags trait (for ternary operations, f32 only)
 // ============================================================================
 
-/// Converts various operand types into an `ArrayVec` of `TernaryOperandTag`: anything
-/// `Into<TernaryOperandTag>` (`(f32, f32)`, `(VeRhs, f32)`, a single tag) or an array of tags
-/// for multi-branch ops.
-///
-/// ```ignore
-/// tensor.vector_fp_ternary(FpTernaryOp::FmaF, (2.0f32, 3.0f32))
-/// ```
+/// Lowers a ternary operand to `ArrayVec<TernaryOperandTag>`: anything `Into<TernaryOperandTag>`
+/// (`(f32, f32)`, `(VeRhs, f32)`, `(Stash, f32)`, a single tag), or an array of tags per branch.
 pub trait IntoTernaryOperandTags<TargetMapping: M> {
     /// Converts into an ArrayVec of TernaryOperandTag.
     fn into_ternary_operands(self) -> ArrayVec<TernaryOperandTag<TargetMapping>, MAX_TAGS>;
@@ -597,16 +589,9 @@ where
 // IntoOperands trait - Multiple operands conversion
 // ============================================================================
 
-/// Trait for converting various operand types into an `ArrayVec`.
-///
-/// A single operand (anything `Into<BinaryOperandTag>` — `i32`/`f32`/`&VrfTensor`/
-/// `BinaryOperandTag`) is auto-wrapped; `[BinaryOperandTag; N]` and `ArrayVec` pass through
-/// directly for multi-branch operations. The stash is not an operand here (see `vector_*_stash`).
-///
-/// ```ignore
-/// tensor.vector_fxp(op, 16384i32)          // single, auto-wrapped
-/// tensor.vector_fxp(op, [a.into(), b.into()]) // multiple, per-branch
-/// ```
+/// Lowers a binary operand to `ArrayVec<BinaryOperandTag>`. A single one (`i32`, `f32`,
+/// `&VrfTensor`, [`Stash`], a tag) is wrapped; `[BinaryOperandTag; N]` and `ArrayVec` pass through
+/// for the per-branch case.
 pub trait IntoOperands<D: VeScalar, TargetMapping: M> {
     /// Converts into an ArrayVec of operands.
     fn into_operands(self) -> ArrayVec<BinaryOperandTag<D, TargetMapping>, MAX_TAGS>;
@@ -651,15 +636,9 @@ impl<D: VeScalar, TargetMapping: M, const N: usize> IntoOperands<D, TargetMappin
 // VeOperand - Unified operand type with automatic conversion
 // ============================================================================
 
-/// Unified operand type for Vector Engine operations. Accepts `D` (constant) or `&VrfTensor`
-/// (read-many, by borrow) via `Into`, for an ergonomic `impl Into<VeOperand<D, ...>>` API:
-/// ```ignore
-/// .vector_fxp(op, 16384i32)   // constant
-/// .vector_fxp(op, &vrf)       // VRF (read-many, by borrow)
-/// ```
-/// The **stash** (read-once) is not an operand here — it is read by the dedicated consuming ops
-/// `vector_*_stash`, which take no operand and move the pipeline's `Occupied` stash state to
-/// [`Fresh`](crate::engine::vector::stash_slot::Fresh).
+/// One operand type behind `impl Into<VeOperand<D, ..>>`, so a call site writes the constant
+/// (`.vector_fxp(op, 16384i32)`), the borrowed VRF tensor (`&vrf`, read-many) or [`Stash`]
+/// (read-once) and the conversion happens here.
 #[derive(Debug)]
 pub enum VeOperand<'a, D: VeScalar, Chip: M, Cluster: M, Slice: M, VrfMapping: M> {
     /// Constant value (always valid).
@@ -764,11 +743,13 @@ impl<D: VeScalar, Mapping: M> IntoGroupOperand<D, Mapping> for Option<BinaryOper
     }
 }
 
-/// Blanket impl: any type that implements `Into<BinaryOperandTag>` automatically
-/// implements `IntoGroupOperand` by wrapping in `Some`.
+/// Blanket impl: any type that implements `Into<BinaryOperandTag>` automatically implements
+/// `IntoGroupOperand` by wrapping in `Some`. [`Plain`] is required because a pair group is always
+/// [`Fresh`](crate::engine::vector::stash_slot::Fresh): pair mode has no stash to read, so `Stash`
+/// here would lower to an operand nothing can fill.
 impl<T, D: VeScalar, Mapping: M> IntoGroupOperand<D, Mapping> for T
 where
-    T: Into<BinaryOperandTag<D, Mapping>>,
+    T: Into<BinaryOperandTag<D, Mapping>> + Plain,
 {
     fn into_group_operand(self) -> GroupOperand<D, Mapping> {
         Some(self.into())

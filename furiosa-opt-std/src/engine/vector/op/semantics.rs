@@ -4,7 +4,7 @@
 //! separated from type definitions in `op.rs`.
 
 use super::*;
-use crate::engine::vector::layer::{FpToFxp, FxpToFp};
+use crate::engine::vector::layer::{FpToFxp, FxpToFp, Reinterpret};
 use crate::prelude::VeScalar;
 
 // ============================================================================
@@ -178,6 +178,15 @@ impl HasConversionOp<i32, f32> for FxpToFp {
 impl HasConversionOp<f32, i32> for FpToFxp {
     fn conversion_op_fn(&self) -> impl Fn(f32) -> i32 + Sync {
         self.op_fn()
+    }
+}
+
+/// Unlike [`FxpToFp`] / [`FpToFxp`], this holds the bits and changes only how they are read, in
+/// either direction (including `D == D2`, where it is the identity). See
+/// [`VeScalar::reinterpret`](crate::prelude::VeScalar::reinterpret).
+impl<D: VeScalar, D2: VeScalar> HasConversionOp<D, D2> for Reinterpret {
+    fn conversion_op_fn(&self) -> impl Fn(D) -> D2 + Sync {
+        |x| x.reinterpret::<D2>()
     }
 }
 

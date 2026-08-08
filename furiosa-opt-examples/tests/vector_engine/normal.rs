@@ -1,9 +1,10 @@
-use crate::common::assert_f32_vec_eq;
+use crate::common::{assert_f32_bits_eq, assert_f32_vec_eq};
 use furiosa_opt_examples::vector_engine::{
     A, B, ve_elementwise_full_pipeline, ve_elementwise_fxp_chain, ve_elementwise_fxp_const, ve_elementwise_logic,
-    ve_elementwise_multi_vrf, ve_elementwise_stash_f32, ve_elementwise_stash_i32, ve_elementwise_ternary,
-    ve_elementwise_ternary_stash, ve_elementwise_vrf, ve_stash_fp_fp, ve_stash_fp_fxp, ve_stash_fxp_fp,
-    ve_stash_fxp_fxp, ve_vrf_read_twice_ok_f32,
+    ve_elementwise_multi_vrf, ve_elementwise_reinterpret_abs_f32, ve_elementwise_reinterpret_chain_f32,
+    ve_elementwise_stash_f32, ve_elementwise_stash_i32, ve_elementwise_ternary, ve_elementwise_ternary_stash,
+    ve_elementwise_vrf, ve_stash_after_reinterpret_f32, ve_stash_after_widen_f32, ve_stash_fxp_fxp,
+    ve_vrf_read_twice_ok_f32,
 };
 use furiosa_opt_examples::vrf_add::vrf_add;
 use furiosa_opt_std::prelude::*;
@@ -188,31 +189,85 @@ async fn test_ve_stash_fxp_fxp() {
     assert_eq!(expected.into_vec(), result.into_vec());
 }
 
-/// This test verifies that cross-type stash reads (i32 -> f32) are properly rejected.
-/// Stashing i32 data and trying to read it as f32 should panic with type mismatch.
-#[tokio::test]
-async fn test_ve_stash_fxp_fp() {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let mut ctx = Context::acquire();
+/// Corner cases for the reinterpret kernels: both signed zeros (the sign bit the mask must clear),
+/// the smallest normal (where an exponent bump is not a doubling of a normal value), values the
+/// clip cuts and values it does not.
+const REINTERPRET_CORNERS: [f32; 9] = [0.0, -0.0, -1.0, 1.0, -0.5, 3.25, -80.0, 120.0, f32::MIN_POSITIVE];
 
-            let mut rng = SmallRng::seed_from_u64(42);
-            let input = HostTensor::<i32, m![A]>::rand(&mut rng);
+/// `min(|x| with exponent + 1, 100.0)` per [`REINTERPRET_CORNERS`] entry, worked out from the bit
+/// layout rather than from the kernel's own arithmetic: on `±0.0` the exponent field goes 0 -> 1, so
+/// the result is `f32::MIN_POSITIVE` and not `0.0`, and the last entry doubles into
+/// `2 * f32::MIN_POSITIVE`.
+const REINTERPRET_CHAIN_EXPECTED: [f32; 9] = [
+    f32::MIN_POSITIVE,
+    f32::MIN_POSITIVE,
+    2.0,
+    2.0,
+    1.0,
+    6.5,
+    100.0,
+    100.0,
+    2.0 * f32::MIN_POSITIVE,
+];
 
-            let input_hbm = input.to_hbm(&mut ctx.pdma).await;
-
-            launch(ve_stash_fxp_fp, (&mut *ctx, &input_hbm)).await;
-        });
-    }));
-
-    assert!(
-        result.is_err(),
-        "Expected panic due to stash type mismatch (stashed i32, read as f32)"
-    );
+fn cycled(values: &[f32]) -> Vec<f32> {
+    (0..A::SIZE).map(|i| values[i % values.len()]).collect()
 }
 
 #[tokio::test]
-async fn test_ve_stash_fp_fp() {
+async fn test_ve_elementwise_reinterpret_abs_f32() {
+    let mut ctx = Context::acquire();
+
+    let input = HostTensor::<f32, m![A]>::from_vec(cycled(&REINTERPRET_CORNERS));
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
+
+    let out_hbm = launch(ve_elementwise_reinterpret_abs_f32, (&mut *ctx, &input_hbm)).await;
+
+    let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
+
+    // Clearing the sign bit is `abs`, reached here without a float ALU. Compared bitwise, so `-0.0`
+    // reaching the output would fail rather than compare equal to `0.0`.
+    let expected = input.into_inner().map(f32::abs);
+
+    assert_f32_bits_eq(&expected.into_vec(), &result.into_vec());
+}
+
+#[tokio::test]
+async fn test_ve_elementwise_reinterpret_chain_f32() {
+    let mut ctx = Context::acquire();
+
+    let input = HostTensor::<f32, m![A]>::from_vec(cycled(&REINTERPRET_CORNERS));
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
+
+    let out_hbm = launch(ve_elementwise_reinterpret_chain_f32, (&mut *ctx, &input_hbm)).await;
+
+    let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
+
+    assert_f32_bits_eq(&cycled(&REINTERPRET_CHAIN_EXPECTED), &result.into_vec());
+}
+
+/// The stash takes what the stream carries at the write, so the masked `|x|` is what the clip reads
+/// back: `2|x|`. Bitwise, so a `-0.0` surviving the mask would fail.
+#[tokio::test]
+async fn test_ve_stash_after_reinterpret_f32() {
+    let mut ctx = Context::acquire();
+
+    let input = HostTensor::<f32, m![A]>::from_vec(cycled(&REINTERPRET_CORNERS));
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
+
+    let out_hbm = launch(ve_stash_after_reinterpret_f32, (&mut *ctx, &input_hbm)).await;
+
+    let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
+
+    let expected = input.into_inner().map(|x| 2.0 * f32::abs(x));
+
+    assert_f32_bits_eq(&expected.into_vec(), &result.into_vec());
+}
+
+/// A 4-way result reaches the stash through the widen: the write rides the first clip op and the
+/// read the second, so both sit on 8-way ALUs.
+#[tokio::test]
+async fn test_ve_stash_after_widen_f32() {
     let mut ctx = Context::acquire();
 
     let mut rng = SmallRng::seed_from_u64(42);
@@ -220,38 +275,13 @@ async fn test_ve_stash_fp_fp() {
 
     let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
-    let out_hbm = launch(ve_stash_fp_fp, (&mut *ctx, &input_hbm)).await;
-
+    let out_hbm = launch(ve_stash_after_widen_f32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
-    // Verify: stash (input * 2.0), then * 3.0, then max with stashed
-    // output = max(input * 2.0 * 3.0, input * 2.0) = max(input * 6.0, input * 2.0)
-    let expected = input.into_inner().map(|x| f32::max(x * 6.0, x * 2.0));
+    // Verify: output = 2 * max(input * 2, 0)
+    let expected = input.into_inner().map(|x| 2.0 * f32::max(x * 2.0, 0.0));
 
     assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
-}
-
-/// This test verifies that cross-type stash reads (f32 -> i32) are properly rejected.
-/// Stashing f32 data and trying to read it as i32 should panic with type mismatch.
-#[tokio::test]
-async fn test_ve_stash_fp_fxp() {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let mut ctx = Context::acquire();
-
-            let mut rng = SmallRng::seed_from_u64(42);
-            let input = HostTensor::<f32, m![A]>::rand(&mut rng);
-
-            let input_hbm = input.to_hbm(&mut ctx.pdma).await;
-
-            launch(ve_stash_fp_fxp, (&mut *ctx, &input_hbm)).await;
-        });
-    }));
-
-    assert!(
-        result.is_err(),
-        "Expected panic due to stash type mismatch (stashed f32, read as i32)"
-    );
 }
 
 #[tokio::test]

@@ -74,6 +74,8 @@ Per-stage detail is in [Stages](#stages) below.
 | 11 | Clip | `vector_clip()` | Way8 | yes | yes |
 | 12 | Filter | `vector_filter()` | Way8 | – | – |
 
+`vector_reinterpret()` is deliberately absent from the table: it occupies no stage and can sit between any two of them (see [Reinterpret](#reinterpret)).
+
 Stages run either 8-way (8 elements per cycle) or 4-way (4 elements per cycle).
 The floating-point cluster runs 4-way to amortize its half-throughput ALUs against the rest of the chain.
 A chain that uses the float path therefore enters 8-way, calls `Narrow` (`vector_narrow_split` or `vector_narrow_trim`) before the float stages, and calls `Widen` (`vector_widen_concat` or `vector_widen_pad`) afterward to return to 8-way.
@@ -108,10 +110,13 @@ The same op method picks up different sources by the argument type:
 The `Stash` source comes from `vector_stash()`, which snapshots the running tensor so a later binary or ternary op can read it back as the `Stash` operand.
 The typical use is a residual or skip-connection like `max(f(x), x)`, where the original `x` must survive across intermediate stages.
 Call `vector_stash()` at any `Stashable` stage (`Branch`, `Logic`, `Fxp`, `Narrow`, `Fp`, `FpDiv`, `Clip`); the snapshot stays live until the Tensor Unit invocation ends and feeds any later binary or ternary call that takes `Stash`.
-The slot is single-use (a second `vector_stash()` is a compile-time error) and typed, so an `f32` stash only feeds `f32` ops.
+The slot is single-use (a second `vector_stash()` is a compile-time error) and typed, so an `f32` stash only feeds `f32` ops: a conversion or reinterpret between the write and the read has to be undone first.
 The stash is also read-once: it feeds exactly one later op (reading it moves the slot past `Occupied`, so a second `Stash` read is a compile-time error). A value that must be read more than once is not a stash - put it in a read-many VRF (`VeRhs::vrf`).
 The mapping follows the running tensor, so a stash taken before `Narrow` is still usable after `Widen`.
+Those seven stages are the seven chain steps that own a VRF write port, which is why `Widen` is not one of them: the operand register cannot be written from the widen's output at all.
+A value computed in the 4-way region therefore reaches the stash by widening first and stashing at a `Clip` op, which puts both the write and the read on the 8-way side.
 Stash is unavailable in [Pair Mode](#pair-mode), and the `IntraFirst` transition to the [inter-slice reducer](./inter-slice-reducer.md) drops it, so anything stashed before `vector_inter_slice_reduce()` is gone afterward.
+
 
 An **argument mode** then picks which slots hold the stream versus the operands so the same op can compute, e.g., `stream + operand` or `operand - stream`.
 For example, `BinaryArgMode::Mode10` swaps the slots so `SubFxp` computes `operand - stream`:
@@ -297,16 +302,16 @@ Shape semantics:
 axes![A = 512, B = 2, S = 64];
 
 fn vector_narrow_split_semantics<'l, const T: Tu>(
-    input: VectorBranchTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![S % 4], m![A % 8], i32, Fresh, { stage::VeOrder::IntraFirst }>,
-) -> VectorNarrowTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![S % 4, A / 4 % 2], m![A % 4], i32, Fresh, { stage::VeOrder::IntraFirst }>
+    input: VectorBranchTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![S % 4], m![A % 8], Fresh, { stage::VeOrder::IntraFirst }>,
+) -> VectorNarrowTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![S % 4, A / 4 % 2], m![A % 4], Fresh, { stage::VeOrder::IntraFirst }>
 {
     input.vector_narrow_split::<m![S % 4, A / 4 % 2], m![A % 4]>()
     // shape semantics: [T], [P] -> [T, P / 2], [P % 4]
 }
 
 fn vector_narrow_trim_semantics<'l, const T: Tu>(
-    input: VectorBranchTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, Fresh, { stage::VeOrder::IntraFirst }>,
-) -> VectorNarrowTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 4], f32, Fresh, { stage::VeOrder::IntraFirst }>
+    input: VectorBranchTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], Fresh, { stage::VeOrder::IntraFirst }>,
+) -> VectorNarrowTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 4], Fresh, { stage::VeOrder::IntraFirst }>
 {
     input.vector_narrow_trim::<m![A % 2 # 4]>()
     // shape semantics: [T], [P] -> [T], [P = 4]
@@ -314,10 +319,10 @@ fn vector_narrow_trim_semantics<'l, const T: Tu>(
 # 
 # let mut ctx = Context::acquire();
 # 
-# let i: VectorBranchTensor<'_, _, i32, m![1], m![B], m![S / 4 # 256], m![S % 4], m![A % 8], i32, Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let i: VectorBranchTensor<'_, _, i32, m![1], m![B], m![S / 4 # 256], m![S % 4], m![A % 8], Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
 # let _o = vector_narrow_split_semantics(i);
 # 
-# let i: VectorBranchTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let i: VectorBranchTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
 # let _o = vector_narrow_trim_semantics(i);
 ```
 
@@ -409,16 +414,16 @@ Shape semantics:
 axes![A = 512, B = 2, S = 64, R = 8];
 
 fn vector_widen_concat_semantics<'l, const T: Tu>(
-    input: VectorIntraSliceReduceTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![A / 4 % 2], m![A % 4], i32, Fresh, { stage::VeOrder::IntraFirst }>,
-) -> VectorWidenTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![1], m![A % 8], i32, Fresh, { stage::VeOrder::IntraFirst }>
+    input: VectorIntraSliceReduceTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![A / 4 % 2], m![A % 4], Fresh, { stage::VeOrder::IntraFirst }>,
+) -> VectorWidenTensor<'l, T, i32, m![1], m![B], m![S / 4 # 256], m![1], m![A % 8], Fresh, { stage::VeOrder::IntraFirst }>
 {
     input.vector_widen_concat::<m![1], m![A % 8]>()
     // shape semantics: [T, P / 2], [P % 4] -> [T], [P]
 }
 
 fn vector_widen_pad_semantics<'l, const T: Tu>(
-    input: VectorFpTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 4], f32, Fresh, { stage::VeOrder::IntraFirst }>,
-) -> VectorWidenTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, Fresh, { stage::VeOrder::IntraFirst }>
+    input: VectorFpTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 4], Fresh, { stage::VeOrder::IntraFirst }>,
+) -> VectorWidenTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], Fresh, { stage::VeOrder::IntraFirst }>
 {
     input.vector_widen_pad::<m![A % 2 # 8]>()
     // shape semantics: [T], [P] -> [T], [P # 8]
@@ -426,14 +431,14 @@ fn vector_widen_pad_semantics<'l, const T: Tu>(
 # 
 # let mut ctx = Context::acquire();
 # 
-# let i: VectorBranchTensor<'_, _, i32, m![1], m![B], m![S / 4 # 256], m![R, A / 4 % 2], m![A % 4 # 8], i32, Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let i: VectorBranchTensor<'_, _, i32, m![1], m![B], m![S / 4 # 256], m![R, A / 4 % 2], m![A % 4 # 8], Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
 # let i = i
 #     .vector_narrow_trim::<m![A % 4]>()
 #     .vector_intra_slice_reduce::<R, m![A / 4 % 2], m![A % 4]>(IntraSliceReduceOpI32::AddSat);
 # 
 # let _o = vector_widen_concat_semantics(i);
 # 
-# let i: VectorBranchTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], f32, Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
+# let i: VectorBranchTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8], Fresh, { stage::VeOrder::IntraFirst }> = VectorBranchTensor::new(&mut ctx.main, Tensor::zero(), TagMode::Zero);
 # let i = i.vector_narrow_trim::<m![A % 2 # 4]>().vector_fp_unary(FpUnaryOp::Exp);
 # let _o = vector_widen_pad_semantics(i);
 ```
@@ -486,6 +491,23 @@ The source `impl` lives on `VectorTensor` for any stage with `CanTransitionTo<Fi
 
 The Output stage exits the Vector Engine pipeline.
 The result can continue to the [Cast Engine](../cast-engine.md), [Transpose Engine](../transpose-engine.md), or [Commit Engine](../../moving-tensors/commit-engine.md).
+
+## Reinterpret
+
+`vector_reinterpret::<D2>()` rereads the stream as the other 32-bit scalar with the bits untouched, so `1.0f32` becomes `0x3f80_0000` and not `1`.
+Every element is 32 bits and every cluster takes its operand type from the op it runs, so a reinterpret emits no instruction, claims no ALU, and holds both the current stage and the way.
+It can therefore appear anywhere in the chain, any number of times, including between two ops of the same cluster.
+
+One possible use for a reinterpret is applying a bitwise operation to floating-point values, as in [Bitwise `abs` on `f32`](#bitwise-abs-on-f32).
+For the value-preserving conversions use [FxpToFp](#fxptofp-conversion) / [FpToFxp](#fptofxp-conversion) instead.
+
+| Method | Effect |
+|--------|--------|
+| `vector_reinterpret::<i32>()` | read the `f32` stream's bits as `i32` |
+| `vector_reinterpret::<f32>()` | read the `i32` stream's bits as `f32` |
+
+A reinterpret also decides what a following [`vector_stash()`](#operands) writes, since the stash takes the scalar the stream carries at the write.
+So a value reaches a reader of the other scalar by reinterpreting first and stashing after; a read at the other scalar does not compile.
 
 ## Examples
 
@@ -543,6 +565,35 @@ fn sigmoid<'l, const T: Tu>(
 #
 # let i: CollectTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
 # let _o = sigmoid(i);
+```
+
+### Bitwise `abs` on `f32`
+
+Clearing the sign bit is \\(|x|\\), reached with no float ALU: the mask is an ordinary `i32` literal because the stream is read as `i32` for the one op that needs it.
+Both reinterprets are free, so this costs exactly one `LogicAnd`.
+
+```rust
+# #![feature(adt_const_params)]
+# extern crate furiosa_opt_std;
+# use furiosa_opt_std::prelude::*;
+axes![A = 512, B = 2];
+
+fn abs<'l, const T: Tu>(
+    input: CollectTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8]>,
+) -> VectorFinalTensor<'l, T, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8]> {
+    input
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_reinterpret::<i32>() // read the bits as i32
+        .vector_logic(LogicBinaryOpI32::BitAnd, 0x7fff_ffff) // clear the sign bit
+        .vector_reinterpret::<f32>() // and back
+        .vector_final()
+}
+# 
+# let mut ctx = Context::acquire();
+#
+# let i: CollectTensor<'_, _, f32, m![1], m![B], m![A / 2], m![1], m![A % 2 # 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = abs(i);
 ```
 
 ### Single-Stream Argument Mode

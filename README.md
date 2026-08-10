@@ -29,10 +29,15 @@ furiosa-opt/
 
 #### Ubuntu (jammy / noble / resolute)
 
+22.04 is the oldest usable release: `cargo-furiosa-opt` and `furiosa-opt-driver` need `GLIBC_2.34`,
+and 20.04 ships 2.31, so they do not start there.
+
 ```bash
-sudo apt install libclang-dev gcc-aarch64-linux-gnu
+sudo apt install build-essential libclang-dev   # every backend
+sudo apt install gcc-aarch64-linux-gnu          # only for --backend npu
 ```
 
+- `build-essential` — rustc links host binaries with the system `cc`, which the Rust toolchain does not supply.
 - `libclang-dev` — `furiosa-opt-std/build.rs` runs `bindgen`, which loads `libclang.so`.
 - `gcc-aarch64-linux-gnu` — `aarch64-linux-gnu-{gcc,as,ld,objcopy}` are invoked when the compiler produces NPU device binaries (`*.bin`).
 

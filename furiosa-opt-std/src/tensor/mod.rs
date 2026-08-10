@@ -406,17 +406,37 @@ mod tests {
         assert_eq!(output.into_vec(), vec![10, 11, 30, 31, 20, 21, 10, 11]);
     }
 
-    /// Typecheck-backend smoke: gather should propagate mapping checks (via
-    /// `gather_params`) without iterating any buffer. The output tensor under Typecheck
-    /// has no values; we only verify that the call doesn't panic for a well-formed shape.
+    /// Typecheck-backend smoke: a gather resolves to its declared output layout without iterating any
+    /// buffer or deriving loop bounds. The output tensor under Typecheck has no values; we only verify
+    /// that the call goes through.
     #[test]
-    fn typecheck_write_gather_runs_assertion_only() {
+    fn typecheck_write_gather_moves_nothing() {
         axes![W = 3, V = 2, K = 4];
 
         let table = Tensor::<i32, m![W, V], Typecheck>::empty();
         let index = Tensor::<i32, m![K], Typecheck>::empty();
         let mut output = Tensor::<i32, m![K, V], Typecheck>::empty();
         table.gather::<_, _>(&mut output, &index, true);
+    }
+
+    /// Typecheck transpose accepts a split padded source and compact destination because it moves no
+    /// values. This pins that loop-bound preparation remains in value backends.
+    #[test]
+    fn typecheck_transpose_drops_padding() {
+        axes![W = 12];
+
+        let source = Tensor::<i32, m![W # 16 / 8, W # 16 % 8 # 16], Typecheck>::empty();
+        let _destination: Tensor<i32, m![W], Typecheck> = source.transpose(false);
+    }
+
+    /// Typecheck reduce accepts incompatible factors when source and destination share the symbol.
+    /// This pins the symbol-presence limit of `broadcast_axes`.
+    #[test]
+    fn typecheck_reduce_accepts_incompatible_factors() {
+        axes![A = 4];
+
+        let source = Tensor::<i32, m![A % 2], Typecheck>::empty();
+        let _destination: Tensor<i32, m![A / 2], Typecheck> = source.reduce(|a, b| a + b, 0, false);
     }
 
     #[test]

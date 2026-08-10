@@ -72,7 +72,7 @@ impl Backend for Typecheck {
         _dst_map: &MappingValue,
         allow_broadcast: bool,
     ) {
-        // `PhantomStorage` holds no buffer, so it ignores `*_map` and runs only the structural check.
+        // `PhantomStorage` holds no buffer, so it ignores `*_map` and moves nothing; see its doc.
         dst.transpose::<Src, Dst>(src, src_offset, dst_offset, allow_broadcast);
     }
 

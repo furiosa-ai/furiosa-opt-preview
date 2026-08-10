@@ -59,8 +59,8 @@ pub mod nested {
             .tile::<m![B = 264 # 528], 132, m![B = 132 # 528]>(0);
         let out_nested = output
             .view_mut()
-            .tile::<m![B], 264, m![B = 264 # 528]>(0)
-            .tile::<m![B = 264 # 528], 132, m![B = 132 # 528]>(0);
+            .tile::<m![B], 264, m![B = 264 #{!} 528]>(0)
+            .tile::<m![B = 264 #{!} 528], 132, m![B = 132 #{!} 528]>(0);
         in_nested.to_dm_view(&mut ctx.tdma, out_nested);
 
         output.to_hbm(&mut ctx.tdma)

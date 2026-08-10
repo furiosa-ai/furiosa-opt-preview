@@ -3,14 +3,31 @@ use std::marker::PhantomData;
 use furiosa_mapping::Mapping as MappingValue;
 use furiosa_mapping::*;
 
-use crate::backend::op_prep::{broadcast_axes, gather_params, scatter_params, transpose_broadcast};
+use crate::backend::op_prep::broadcast_axes;
 use crate::scalar::*;
 
 /// Typecheck tensor: metadata only (axes), no host buffer. All reads return `Opt::Uninit` and all
-/// writes are silently dropped.
+/// writes are silently dropped. Each op produces the (empty) phantom output of its declared layout,
+/// with no per-element iteration.
 ///
-/// Each op runs the relevant `op_prep` helper for its panic side (so mapping errors still surface
-/// under Typecheck) and then leaves the (empty) phantom output untouched, no per-element iteration.
+/// Mapping legality is deliberately NOT re-derived here. Two reasons:
+///
+/// 1. The engine primitives already ran the shared `furiosa_opt_lower::config_*` verifiers, the same
+///    single source of truth MIR→VISA translation calls (see `TuOperationBuilder::verify`), so
+///    re-deriving here would duplicate a check the verifier owns.
+/// 2. [`op_prep`]'s carve-based helpers are the VALUE backends' loop-bound prep, not a verifier: a
+///    carve asks "does `dst` contain `src`", which is the shape of `BufStorage`'s write loop. A TE
+///    transpose that drops padding (`W # 16 / 8 ⊗ W # 16 % 8` streamed out as `W = 12`) is a legal
+///    op that fails that question, so running the helpers here would reject kernels the verifiers
+///    and the compiler both accept.
+///
+/// What a Typecheck run rejects is therefore NARROWER than what the compiler rejects, and the gap is
+/// not yet closed. `reduce` keeps `broadcast_axes`, which compares symbol PRESENCE only: a
+/// destination factor whose symbol is present but whose stride, modulo, or extent does not line up
+/// passes here. The carves removed above were catching that class, so it is pinned by test rather
+/// than left undocumented.
+///
+/// [`op_prep`]: crate::backend::op_prep
 #[derive(Clone, Debug)]
 pub struct PhantomStorage<D: Scalar> {
     axes: Vec<AxisTerm>,
@@ -64,16 +81,15 @@ impl<D: Scalar> PhantomStorage<D> {
         PhantomStorage::new_from_axes(self.axes.clone())
     }
 
-    /// Typecheck no-op: runs only the structural check, leaving the empty phantom `self` untouched.
-    /// Backs [`crate::backend::Backend::transpose`].
+    /// Typecheck no-op: the phantom `self` already carries the destination layout, and there are no
+    /// values to move. Backs [`crate::backend::Backend::transpose`].
     pub(crate) fn transpose<Src: M, Mapping: M>(
         &mut self,
         _src: &PhantomStorage<D>,
         _src_offset: &Index,
         _dst_offset: &Index,
-        allow_broadcast: bool,
+        _allow_broadcast: bool,
     ) {
-        let _ = transpose_broadcast::<Src, Mapping>(allow_broadcast);
     }
 
     /// Backs [`crate::backend::Backend::reduce`].
@@ -83,19 +99,14 @@ impl<D: Scalar> PhantomStorage<D> {
         _identity: D,
         allow_broadcast: bool,
     ) -> Self {
-        // Structural parity check with the value backends (`BufStorage::reduce`): reject an
-        // unintended broadcast, then run the same containment carves so a non-contained / over-padded
-        // reduce is rejected at type-check time exactly as it is at runtime. The carves panic on
-        // a mismatch; their offsets are unused here since Typecheck moves no values.
-        let src = Src::to_value();
-        let dst = Dst::to_value();
-        let broadcast = broadcast_axes(&src, &dst);
+        // `allow_broadcast` is the caller's declared intent, so an unintended new axis is a mismatch
+        // between two type parameters, not a property of the value backends' loop: it stays checked
+        // here (see the type doc for what does not).
+        let broadcast = broadcast_axes(&Src::to_value(), &Dst::to_value());
         assert!(
             allow_broadcast || broadcast.axes().is_empty(),
             "reduce: Dst adds axes absent from the source; pass allow_broadcast=true for reduce-then-broadcast"
         );
-        let inter = dst.carve(&broadcast);
-        let _reduce_residue = src.carve(&inter);
         Self::new::<Dst>()
     }
 
@@ -106,30 +117,23 @@ impl<D: Scalar> PhantomStorage<D> {
         Self::new_from_axes(out.axes())
     }
 
-    /// Backs [`crate::backend::Backend::scatter`].
-    // `Idx` is unused here (Typecheck decodes no indices) but must match the `Backend::scatter`
-    // signature that `BufStorage` needs (`Idx::SIZE`).
-    #[expect(
-        clippy::extra_unused_type_parameters,
-        reason = "signature parity with Backend::scatter"
-    )]
+    /// Typecheck no-op: no indices to decode, no values to move. Backs
+    /// [`crate::backend::Backend::scatter`].
     pub(crate) fn scatter<Src: M, Key: M, Dst: M, Idx: M>(
         &self,
         _dst: &mut PhantomStorage<D>,
         _index: &PhantomStorage<i32>,
         _scaled: bool,
     ) {
-        let _ = scatter_params(&Src::to_value(), &Dst::to_value(), &Key::to_value());
     }
 
-    /// Backs [`crate::backend::Backend::gather`].
+    /// Typecheck no-op; see [`Self::scatter`]. Backs [`crate::backend::Backend::gather`].
     pub(crate) fn gather<Src: M, Dst: M, Idx: M>(
         &self,
         _dst: &mut PhantomStorage<D>,
         _index: &PhantomStorage<i32>,
         _scaled: bool,
     ) {
-        let _ = gather_params(&Src::to_value(), &Dst::to_value(), &Idx::to_value());
     }
 
     /// Backs [`crate::backend::Backend::reshape`].

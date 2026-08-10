@@ -125,21 +125,28 @@ pub(crate) fn assert_dm_to_dm_dimension_preserved<Chip: M, Chip2: M, Cluster: M,
     assert_slice_preserved::<Slice, Slice2>();
 }
 
-/// Asserts a `reshape` preserves its whole `Chip` / `Cluster` / `Slice` partition (it relabels the
-/// mapping, it moves no data). Shares the per-axis leaf checks with [`assert_dm_to_dm_dimension_preserved`].
-pub(crate) fn assert_reshape_dimension_preserved<Chip: M, Chip2: M, Cluster: M, Cluster2: M, Slice: M, Slice2: M>() {
+/// Asserts a `reshape` preserves every one of its `Chip` / `Cluster` / `Slice` / `Element` partitions
+/// (it relabels the mapping, it moves no data). Shares the per-axis leaf checks with
+/// [`assert_dm_to_dm_dimension_preserved`].
+pub(crate) fn assert_reshape_dimension_preserved<
+    Chip: M,
+    Chip2: M,
+    Cluster: M,
+    Cluster2: M,
+    Slice: M,
+    Slice2: M,
+    Element: M,
+    Element2: M,
+>() {
     assert_chip_preserved::<Chip, Chip2>();
     assert_cluster_preserved::<Cluster, Cluster2>();
     assert_slice_preserved::<Slice, Slice2>();
-    // TODO: also assert the `Element` size is preserved (add `Element` / `Element2` params and
-    // `assert_element_preserved`). Deferred because some current examples reshape with a
-    // mismatched `Element`; enable once those are fixed.
+    assert_element_preserved::<Element, Element2>();
 }
 
 /// Asserts a HBM `reshape` preserves its whole `Chip` / `Element` partition (it relabels the
-/// mapping, it moves no data). HBM has no `Cluster`/`Slice` axis, and (unlike
-/// [`assert_reshape_dimension_preserved`]'s DM case) no existing example reshapes a mismatched
-/// `Element`, so both axes are checked here.
+/// mapping, it moves no data). HBM has no `Cluster`/`Slice` axis, so those two are the whole
+/// partition here.
 pub(crate) fn assert_hbm_reshape_dimension_preserved<Chip: M, Chip2: M, Element: M, Element2: M>() {
     assert_chip_preserved::<Chip, Chip2>();
     assert_element_preserved::<Element, Element2>();

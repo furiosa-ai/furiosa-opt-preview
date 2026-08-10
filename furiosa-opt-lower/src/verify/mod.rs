@@ -83,13 +83,12 @@ pub(crate) fn padding_per_stride(m: &Mapping) -> BTreeMap<usize, usize> {
     map
 }
 
-/// Padded extent of a division term's axis: the `padding_per_stride` entry at the term's
-/// `dividend_stride`, falling back to the term's own `resize` when that stride is absent.
-pub(crate) fn padded_extent_at(padding_per_stride: &BTreeMap<usize, usize>, term: &DivideTerm) -> usize {
-    padding_per_stride
-        .get(&term.dividend_stride)
-        .copied()
-        .unwrap_or(term.resize)
+/// Padded extent of a division term's axis, or `None` when the term is not an axis boundary.
+///
+/// Only an axis carries a padded extent. Dividing can split a padded axis into intra-axis sub-terms
+/// when an axis between its digits is reduced, and such a sub-term owns no extent to report.
+pub(crate) fn padded_extent_at(padding_per_stride: &BTreeMap<usize, usize>, term: &DivideTerm) -> Option<usize> {
+    padding_per_stride.get(&term.dividend_stride).copied()
 }
 
 /// Pushes each axis's padded extent (`size()`), innermost (right) first, down the normalized `Pair`

@@ -1,22 +1,16 @@
 # Mapping Tensors
 
-Use this chapter when a logical tensor needs a physical layout, placement, padding, or tiling decision.
+This chapter teaches a debugging path: choose a physical position, inspect its `Cell`, then read the live `Index` terms and follow that value through each physical representation.
 
-Tensors have no intrinsic order of elements.
-A mapping assigns each tensor index to a buffer position, defining that order.
+## Mapping Order and Performance
 
-This chapter explains how layout choices affect memory access and how mapping expressions declare those choices.
+A tensor has values but no intrinsic storage order. A mapping chooses that order, and hardware accesses are most efficient when adjacent values occupy contiguous buffer positions.
+The outermost mapping dimension is major and changes slowest; the innermost is minor and changes fastest. For a height-by-width tensor, `m![H, W]` makes rows contiguous, while `m![W, H]` makes columns contiguous.
+Each order favors locality along a different axis: an H-major mapping makes a scan along W contiguous, while a W-major mapping makes a scan along H contiguous. A tiled mapping such as `m![H / 2, W / 2, H % 2, W % 2]` places small two-dimensional neighborhoods contiguously, so neither H nor W is globally the sole contiguous direction. This changes which access patterns map to nearby buffer positions, but does not inherently guarantee faster hardware access; the additional mapping state needed to represent the split dimensions is its main extra cost.
 
-## Layout and Performance
+For axes `H` (six rows) and `W` (eight columns), the same values can therefore have different physical access patterns:
 
-The mapping determines access efficiency: hardware reads memory in contiguous blocks, so elements stored far apart require more transfers.
-This choice affects programs too: programmers choose which axis is *major* (outermost, changes slowest) and which is *minor* (innermost, changes fastest, stored contiguously).
-Layout cannot change after allocation without copying and transposing data, so the choice at allocation time constrains all subsequent operations.
-
-Consider a tensor with axes H (height, 6 rows) and W (width, 8 columns).
-The same tensor admits different mappings, each with different performance characteristics.
-
-| H\W | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| H\\W | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | 0 | a | b | c | d | e | f | g | h |
 | 1 | i | j | k | l | m | n | o | p |
@@ -25,7 +19,7 @@ The same tensor admits different mappings, each with different performance chara
 | 4 | · | · | · | · | · | · | · | · |
 | 5 | · | · | · | · | · | · | · | · |
 
-- **H Major, W Minor**: A scan along W is contiguous; a scan along H accesses one element per cache line.
+- **H-major, W-minor: `m![H, W]`** — a scan along W is contiguous; a scan along H touches one value per cache line.
 
   <table>
     <tr>
@@ -40,7 +34,7 @@ The same tensor admits different mappings, each with different performance chara
     </tr>
   </table>
 
-- **W Major, H Minor**: A scan along H is contiguous; a scan along W accesses one element per cache line.
+- **W-major, H-minor: `m![W, H]`** — a scan along H is contiguous; a scan along W touches one value per cache line.
 
   <table>
     <tr>
@@ -57,8 +51,7 @@ The same tensor admits different mappings, each with different performance chara
     </tr>
   </table>
 
-- **2×2 Tiles**: Either choice sacrifices locality along one axis: H-major stores H-adjacent elements far apart, and W-major stores W-adjacent elements far apart.
-  To avoid this trade-off, tiling groups nearby H and W indices into 2D tiles, achieving good locality along both axes, at the cost of a non-trivial address formula.
+- **2×2 tiles: `m![H / 2, W / 2, H % 2, W % 2]`** — H-major and W-major each sacrifice locality along one axis. Tiling places small neighborhoods contiguously along both axes, changing the locality distribution without inherently guaranteeing faster hardware access; the split dimensions require a non-trivial address formula and additional mapping state.
 
   <table>
     <tr>
@@ -75,27 +68,43 @@ The same tensor admits different mappings, each with different performance chara
     </tr>
   </table>
 
-  Decompositions also determine hardware execution structure.
-  The outer dimension can become a hardware time loop, and the inner dimension becomes a parallel lane.
-  TCP names these hardware dimensions `Time` (the sequential loop counter) and `Packet` (the parallel data lane width), used throughout this book.
-  [Spatial and Temporal Dimensions](./spatial-temporal-dimensions.md) explains how decompositions map to them.
+The selected mapping also constrains later execution. Changing a representation's order after allocation generally requires copying or transposing its data, so allocation-time choices affect subsequent operations. Hardware geometry, alignment, and scheduling remain architectural constraints that compiler lowering must account for; the mapping expresses the logical order rather than a raw address calculation. Device-specific alignment checks apply, and misaligned accesses can require read-modify-write cycles with substantial performance cost (historically observed at roughly 50× for affected DM accesses).
 
+The mapping is the canonical technical description of this choice. A physical representation is the concrete buffer, device placement, and stream decomposition produced from that mapping. The same values can move between different physical representations without changing the logical tensor.
 
-## The Declarative Approach
+## Position Cell Results
 
-Choosing optimal layout combinations manually is complex: the programmer must account for hardware geometry, alignment constraints, and execution patterns simultaneously.
-The compiler derives physical placement, alignment, and hardware scheduling.
+Every mapping expression maps a physical position to a `Cell`. Start with the result category before interpreting any coordinates.
 
-Virtual ISA lets the programmer and compiler declare a mapping in terms of logical axes.
-For the H×W tensor from [Layout and Performance](#layout-and-performance), the leftmost axis is major and the rightmost is minor:
-- **H-major**: `m![H, W]`
-- **W-major**: `m![W, H]`
-- **2×2 Tiles**: `m![H / 2, W / 2, H % 2, W % 2]`, where the first two dimensions are tile indices and the last two are positions within the tile.
+```rust
+# extern crate furiosa_opt_std;
+# extern crate furiosa_mapping;
+# use furiosa_opt_std::prelude::*;
+axes![A = 4];
+type E = m![A];
 
-Declarative mappings offer two benefits:
-- **Expressiveness**: Layout is stated in terms of logical axes (`m![H, W]`), not raw strides or offsets.
-- **Correctness**: Mapping expressions are normalized to canonical form and verified symbolically, turning layout properties into compile-time invariants.
+assert_eq!(E::map(0), i![A: 0]);
+assert_eq!(E::map(4), Cell::OutOfBounds);
+```
 
-Mapping expressions describe a tensor at every stage of its life: the same tensor can be stored in HBM, loaded into DM with a different layout, and streamed through the pipeline as packets.
-Each stage holds the same mathematical values in a different physical representation.
-[Tensor Semantics](./tensor-semantics.md) formalizes this perspective and shows how it makes data movement composable with computation in the same pipeline.
+`Cell::Index` carries live `Index` terms. `Cell::OutOfBounds` identifies a position outside the mapping. `Cell::Padding` is introduced with padding in [Mapping Expressions](./mapping-expressions.md).
+
+After identifying the `Cell`, use [Mapping Expressions](./mapping-expressions.md) to read the `M` contract and constructors. That page presents position behavior before API syntax.
+
+## Physical Representations
+
+Storage and stream tensors split one mapping across hardware dimensions. An HBM representation may distribute channels across chips; a DM representation may repartition those channels across slices; a stream representation may put the remaining dimensions in `Time` and `Packet`. [Spatial and Temporal Dimensions](./spatial-temporal-dimensions.md) follows one NCHW tensor through those representations with a concrete coordinate trace.
+
+This representation path is the capstone for the chapter: choose a mapping, derive each physical representation, then verify that the value at a traced `Index` reaches the expected stream cell. The formal tensor-value definition is in [Tensor Semantics](./tensor-semantics.md); this chapter keeps the explanation operational.
+
+For a minimal computation over a representation, see the [Vector Engine](../computing-tensors/vector-engine/index.md). Elementwise operations belong with that execution API, while this chapter focuses on mapping and representation.
+
+## Distribution Across Space and Time
+
+Mapping dimensions are assigned explicitly to spatial hardware dimensions (`Chip`, `Cluster`, `Slice`, and `Packet`) or to the temporal `Time` loop. These names describe where a mapping is consumed, not a second representation vocabulary. See [Spatial and Temporal Dimensions](./spatial-temporal-dimensions.md) for the tensor declarations and constraints.
+
+## Declarative Mapping Context
+
+Declarative mappings state order in terms of logical axes instead of raw strides or offsets. The H×W examples above use `m![H, W]` for H-major order, `m![W, H]` for W-major order, and `m![H / 2, W / 2, H % 2, W % 2]` for 2×2 tiles; the first two tile dimensions identify a tile and the last two identify its position within that tile.
+
+Mapping expressions can be normalized to a canonical representation, which makes equivalent constructor forms easier to inspect. The tested normalization properties and their limits are documented with [Equivalent Mappings](./mapping-expressions.md#equivalent-mappings); this chapter does not claim a universal proof or unique representation.

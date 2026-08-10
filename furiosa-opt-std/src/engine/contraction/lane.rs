@@ -239,6 +239,24 @@ mod tests {
             );
         }
 
+        /// Reducing an axis that sits BETWEEN two digits of a padded axis splits that axis into
+        /// intra-axis sub-terms. A sub-term owns no padded extent, so reading one inflates InnerTime
+        /// and the accumulator check rejects a contraction that fits.
+        #[test]
+        fn valid_inner_time_across_a_split_padded_axis() {
+            axes![L1 = 192, Bat = 4096, W = 12];
+
+            verify_contract_lane(
+                <m![L1 # 256 % 8]>::to_value(),
+                <m![L1 # 256 / 32 % 4, Bat / 32 % 2, Bat / 64 % 2, L1 # 256 / 8 % 4]>::to_value(),
+                <m![Bat % 32]>::to_value(),
+                <m![L1 # 256 / 32 % 4, Bat / 32 % 2, Bat / 64 % 2, L1 # 256 / 8 % 4, Bat % 32]>::to_value(),
+                <m![L1 # 256 % 8]>::to_value(),
+                <m![L1 # 256 / 32 % 4, Bat / 32 % 2, Bat / 64 % 2, W % 6, W / 6, L1 # 256 / 8 % 4]>::to_value(),
+                LaneMode::Interleaved,
+            );
+        }
+
         #[test]
         fn valid_all_time_reduced() {
             verify_contract_lane(

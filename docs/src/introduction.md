@@ -29,6 +29,20 @@ Read [Mapping Tensors](./mapping-tensors/index.md), [Moving Tensors](./moving-te
 
 ## Installation
 
+### Host Requirements
+
+The host must be `x86_64-unknown-linux-gnu` on Ubuntu 22.04 or newer, since the published binaries need `GLIBC_2.34` and 20.04 ships 2.31.
+On macOS or arm64, run everything inside a `linux/amd64` container.
+
+```bash
+sudo apt install build-essential libclang-dev   # every backend
+sudo apt install gcc-aarch64-linux-gnu          # only for --backend npu
+```
+
+Install these before the toolchain below, which does not cover them: rustc links host binaries with the system `cc`, and `furiosa-opt-std`'s build script loads `libclang.so`.
+
+### Install
+
 Install three pieces:
 
 1. **Rust toolchain (pinned)**: the Furiosa optimizer is a rustc driver, ABI-locked to a specific nightly.

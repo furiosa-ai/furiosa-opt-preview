@@ -7,6 +7,7 @@ use std::fmt::{self, Display, Formatter};
 use std::marker::PhantomData;
 
 use furiosa_mapping::*;
+use furiosa_opt_lower::{config_pad, config_tile};
 use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
@@ -580,7 +581,15 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         &self,
         start: usize,
     ) -> HbmTensorView<'l, D, Chip2, Element, B> {
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Chip::to_value(),
+            &Chip2::to_value(),
+            LEN,
+            PaddingKind::Top,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         HbmTensorView {
             inner,
             address: self.address,
@@ -593,7 +602,15 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         &self,
         start: usize,
     ) -> HbmTensorView<'l, D, Chip, Element2, B> {
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Element::to_value(),
+            &Element2::to_value(),
+            LEN,
+            PaddingKind::Top,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         HbmTensorView {
             inner,
             address: self.address,
@@ -613,6 +630,20 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         constraints::assert_hbm_reshape_dimension_preserved::<Chip, Chip2, Element, Element2>();
         HbmTensorView {
             inner: unsafe { self.inner.reshape::<m![{ Chip2 }, { Element2 }]>() },
+            address: self.address,
+        }
+    }
+
+    /// Views the same cells inside the wider buffer they sit in, restating `Element` with one
+    /// outermost padding factor: `m![L1]` as `m![L1 # 256]`. See [`DmTensorView::pad`]; on an HBM
+    /// SOURCE this is how a DMA states the extent its destination is staged at, so the two sides carve
+    /// the same tail. The read over-reaches the live cells into declared don't-care, which is what a
+    /// read packet is allowed to do (`prepare_dma_shapes`: only a DRAM SINK trims to the common volume).
+    #[primitive(HbmTensorView::pad)]
+    pub fn pad<Element2: M>(self) -> HbmTensorView<'l, D, Chip, Element2, B> {
+        config_pad(&Element::to_value(), &Element2::to_value()).unwrap_or_else(|e| panic!("{e}"));
+        HbmTensorView {
+            inner: self.inner.redeclare::<m![{ Chip }, { Element2 }]>(),
             address: self.address,
         }
     }
@@ -729,7 +760,15 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
         self,
         start: usize,
     ) -> HbmTensorViewMut<'l, D, Chip2, Element, B> {
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Chip::to_value(),
+            &Chip2::to_value(),
+            LEN,
+            PaddingKind::Bottom,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         HbmTensorViewMut {
             inner,
             address: self.address,
@@ -742,7 +781,15 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
         self,
         start: usize,
     ) -> HbmTensorViewMut<'l, D, Chip, Element2, B> {
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Element::to_value(),
+            &Element2::to_value(),
+            LEN,
+            PaddingKind::Bottom,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         HbmTensorViewMut {
             inner,
             address: self.address,
@@ -981,7 +1028,16 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     pub unsafe fn reshape<Chip2: M, Cluster2: M, Slice2: M, Element2: M>(
         self,
     ) -> DmTensor<D, Chip2, Cluster2, Slice2, Element2, B> {
-        constraints::assert_reshape_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
+        constraints::assert_reshape_dimension_preserved::<
+            Chip,
+            Chip2,
+            Cluster,
+            Cluster2,
+            Slice,
+            Slice2,
+            Element,
+            Element2,
+        >();
         let reshaped = unsafe {
             self.inner
                 .reshape::<m![{ Chip2 }, { Cluster2 }, { Slice2 }, { Element2 }]>()
@@ -1071,7 +1127,15 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Chip2, Cluster, Slice, Element, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster, Slice, Slice>();
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Chip::to_value(),
+            &Chip2::to_value(),
+            LEN,
+            PaddingKind::Top,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         DmTensorView { inner }
     }
 
@@ -1082,7 +1146,15 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Cluster2, Slice, Element, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster2, Slice, Slice>();
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Cluster::to_value(),
+            &Cluster2::to_value(),
+            LEN,
+            PaddingKind::Top,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         DmTensorView { inner }
     }
 
@@ -1093,7 +1165,15 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Cluster, Slice2, Element, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Slice::to_value(),
+            &Slice2::to_value(),
+            LEN,
+            PaddingKind::Top,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         DmTensorView { inner }
     }
 
@@ -1103,7 +1183,15 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         &self,
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Cluster, Slice, Element2, B> {
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Element::to_value(),
+            &Element2::to_value(),
+            LEN,
+            PaddingKind::Top,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         DmTensorView { inner }
     }
 
@@ -1120,12 +1208,51 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     pub unsafe fn reshape<Chip2: M, Cluster2: M, Slice2: M, Element2: M>(
         self,
     ) -> DmTensorView<'l, D, Chip2, Cluster2, Slice2, Element2, B> {
-        constraints::assert_reshape_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
+        constraints::assert_reshape_dimension_preserved::<
+            Chip,
+            Chip2,
+            Cluster,
+            Cluster2,
+            Slice,
+            Slice2,
+            Element,
+            Element2,
+        >();
         DmTensorView {
             inner: unsafe {
                 self.inner
                     .reshape::<m![{ Chip2 }, { Cluster2 }, { Slice2 }, { Element2 }]>()
             },
+        }
+    }
+
+    /// Views the same cells inside the wider buffer they sit in, restating `Element` with one
+    /// outermost padding factor: `m![L4, B % 64]` as `m![L4 # 512, B % 64]`. The inverse of the
+    /// [`Self::tile`] that reads a padded tensor's live rows (see [`TensorView::pad`] for why it is
+    /// safe), and the way to give an interleave's two operands one `Element` without narrowing the
+    /// wider one and losing its extent.
+    #[primitive(DmTensorView::pad)]
+    pub fn pad<Element2: M>(self) -> DmTensorView<'l, D, Chip, Cluster, Slice, Element2, B> {
+        // `Element` alone: the buffer a pad re-declares is the per-slice region, so the padding is
+        // outermost within `Element`. The distribution classes ride through untouched.
+        config_pad(&Element::to_value(), &Element2::to_value()).unwrap_or_else(|e| panic!("{e}"));
+        DmTensorView {
+            inner: self
+                .inner
+                .redeclare::<m![{ Chip }, { Cluster }, { Slice }, { Element2 }]>(),
+        }
+    }
+
+    /// Views a wider-staged producer's live cells alone, dropping one outermost padding factor from
+    /// `Element`: `m![L1 # 256, B % 64]` as `m![L1, B % 64]`. The inverse of [`Self::pad`]; see
+    /// [`TensorView::unpad`] for why it is address-preserving and why a `tile` is not a substitute.
+    #[primitive(DmTensorView::unpad)]
+    pub fn unpad<Element2: M>(self) -> DmTensorView<'l, D, Chip, Cluster, Slice, Element2, B> {
+        config_pad(&Element2::to_value(), &Element::to_value()).unwrap_or_else(|e| panic!("{e}"));
+        DmTensorView {
+            inner: self
+                .inner
+                .redeclare::<m![{ Chip }, { Cluster }, { Slice }, { Element2 }]>(),
         }
     }
 
@@ -1188,7 +1315,15 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorViewMut<'l, D, Chip2, Cluster, Slice, Element, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster, Slice, Slice>();
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Chip::to_value(),
+            &Chip2::to_value(),
+            LEN,
+            PaddingKind::Bottom,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         DmTensorViewMut { inner }
     }
 
@@ -1199,7 +1334,15 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorViewMut<'l, D, Chip, Cluster2, Slice, Element, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster2, Slice, Slice>();
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Cluster::to_value(),
+            &Cluster2::to_value(),
+            LEN,
+            PaddingKind::Bottom,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         DmTensorViewMut { inner }
     }
 
@@ -1209,7 +1352,15 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         self,
         start: usize,
     ) -> DmTensorViewMut<'l, D, Chip, Cluster, Slice, Element2, B> {
-        let inner = self.inner.tile::<Index, _, LEN>(start);
+        config_tile(
+            &Index::to_value(),
+            &Element::to_value(),
+            &Element2::to_value(),
+            LEN,
+            PaddingKind::Bottom,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
         DmTensorViewMut { inner }
     }
 
@@ -1226,7 +1377,16 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     pub unsafe fn reshape<Chip2: M, Cluster2: M, Slice2: M, Element2: M>(
         self,
     ) -> DmTensorViewMut<'l, D, Chip2, Cluster2, Slice2, Element2, B> {
-        constraints::assert_reshape_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
+        constraints::assert_reshape_dimension_preserved::<
+            Chip,
+            Chip2,
+            Cluster,
+            Cluster2,
+            Slice,
+            Slice2,
+            Element,
+            Element2,
+        >();
         DmTensorViewMut {
             inner: unsafe {
                 self.inner

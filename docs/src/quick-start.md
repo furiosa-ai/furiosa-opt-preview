@@ -65,7 +65,7 @@ This book explains kernel decisions, while the published [`furiosa-opt-std` rust
 
 ### Goal
 
-Compute \(\text{out}[i] = \text{in}[i] + 1\) for every element of a vector.
+Compute \\(\text{out}[i] = \text{in}[i] + 1\\) for every element of a vector.
 Use this pattern for residual and bias addition.
 
 ### Dataflow
@@ -155,7 +155,7 @@ See [Mapping Tensors](./mapping-tensors/index.md) for the complete mapping model
 
 ### Goal
 
-Compute \(\text{out}[i] = \text{lhs}[i] \times \text{rhs}[i]\).
+Compute \\(\text{out}[i] = \text{lhs}[i] \times \text{rhs}[i]\\).
 Use this pattern for gate scaling, GLU, and attention scaling.
 
 ### Mapping and Dataflow
@@ -220,15 +220,15 @@ Every contraction consists of broadcast, multiply, and reduce steps.
 
 | Operation | Einsum | Broadcast | Multiply | Reduce |
 |-----------|--------|-----------|----------|--------|
-| Dot product | \(I, I \rightarrow 1\) | None. | \(x_i y_i\) | \(\sum_i x_i y_i\) |
-| GEMV | \(IJ, J \rightarrow I\) | \(x\) across \(I\). | \(A_{ij} x_j\) | \(y_i = \sum_j A_{ij} x_j\) |
-| GEMM | \(IK, KJ \rightarrow IJ\) | \(A\) across \(J\) and \(B\) across \(I\). | \(A_{ik} B_{kj}\) | \(C_{ij} = \sum_k A_{ik} B_{kj}\) |
+| Dot product | \\(I, I \rightarrow 1\\) | None. | \\(x_i y_i\\) | \\(\sum_i x_i y_i\\) |
+| GEMV | \\(IJ, J \rightarrow I\\) | \\(x\\) across \\(I\\). | \\(A_{ij} x_j\\) | \\(y_i = \sum_j A_{ij} x_j\\) |
+| GEMM | \\(IK, KJ \rightarrow IJ\\) | \\(A\\) across \\(J\\) and \\(B\\) across \\(I\\). | \\(A_{ik} B_{kj}\\) | \\(C_{ij} = \sum_k A_{ik} B_{kj}\\) |
 
 ## Dot Product
 
 ### Goal
 
-Compute \(\sum_i x_i y_i\).
+Compute \\(\sum_i x_i y_i\\).
 Use this pattern for attention scores and similarity.
 
 ### Mapping and Dataflow
@@ -268,7 +268,7 @@ Base-template host program and oracle: `src/dot_product.rs`.
 
 ### Goal
 
-Compute \(y_i = \sum_j A_{ij} x_j\).
+Compute \\(y_i = \sum_j A_{ij} x_j\\).
 Use this pattern for LLM decode.
 
 ### Mapping and Dataflow
@@ -297,7 +297,7 @@ Base-template host program and oracle: `src/gemv.rs`.
 
 ### Goal
 
-Compute \(C_{ij} = \sum_k A_{ik} B_{jk}\).
+Compute \\(C_{ij} = \sum_k A_{ik} B_{jk}\\).
 `A` broadcasts across `J`, and `B` broadcasts across `I`.
 
 ### Mapping and Dataflow

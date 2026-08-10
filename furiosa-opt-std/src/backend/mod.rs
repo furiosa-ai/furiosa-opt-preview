@@ -113,7 +113,7 @@ pub trait Backend: Sized + 'static {
     /// where a tiled axis the `Src` / `Dst` *type* carries as padding stays a live `Symbol`, needed
     /// to resolve a partial-view offset's physical wire base. Each backend applies its own per-storage
     /// strategy: Emulation/Npu resolve the offset bases against the maps and drive a
-    /// sequencer over the `BufStorage` buffer, Typecheck runs only the structural check.
+    /// sequencer over the `BufStorage` buffer, Typecheck is a no-op on the phantom.
     #[allow(clippy::too_many_arguments)]
     fn transpose<D: Scalar, Src: M, Dst: M>(
         dst: &mut Self::Storage<D>,

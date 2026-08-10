@@ -127,7 +127,7 @@ pub fn tile_view_in_nested_loop(
             // its receiver) but still references the enclosing `g` index tensor.
             let out_col = output
                 .view_mut()
-                .tile::<m![B / 16], 1, m![A, 1 # 2, B % 16]>(g)
+                .tile::<m![B / 16], 1, m![A, 1 #{!} 2, B % 16]>(g)
                 .tile::<m![B % 16], 1, m![A, 1 #{!} 32]>(h);
             in_col.to_hbm_view(&mut ctx.tdma, out_col);
         }
@@ -201,7 +201,7 @@ pub fn tile_with_larger_than_one_1(
 pub fn tile_with_larger_than_one_2(ctx: &mut Context, up_weight: &HbmTensor<bf16, Chip, m![L, A]>) {
     let up_weight = up_weight
         .view()
-        .tile::<m![L / 256], 2, m![L / 256 = 2 #{!} 3, L %  256, A]>(1);
+        .tile::<m![L / 256], 2, m![L / 256 = 2 # 3, L %  256, A]>(1);
 }
 
 /// Swaps the disjoint 256-wide `L`-chunks `[0, 256)` and `[256, 512)` via a tile window > 1,

@@ -4,7 +4,7 @@
 > **WIP**: This chapter is currently in progress. Content will be added in a future release.
 
 Tiling breaks large tensors into smaller tiles that fit in on-chip memory.
-On-chip capacity is the governing constraint: when a tensor exceeds [VRF capacity](../quick-start.md#vector-register-file-vrf) (8KB per slice) or [DM capacity](../moving-tensors/memory-performance.md), it must be processed in multiple iterations.
+On-chip capacity is the governing constraint: when a tensor exceeds [VRF capacity](../quick-start.md#mapping-and-memory) (8KB per slice) or [DM capacity](../moving-tensors/memory-performance.md), it must be processed in multiple iterations.
 
 ## When to Use Tiling
 

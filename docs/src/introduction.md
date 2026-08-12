@@ -15,7 +15,7 @@ See [the language manual](https://doc.rust-lang.org/book/) if needed.
 ## Read This Book by Task
 
 Start with [Quick Start](./quick-start.md) to understand a base-template kernel pattern.
-Read [Mapping Tensors](./mapping-tensors/index.md), [Moving Tensors](./moving-tensors/index.md), [Computing Tensors](./computing-tensors/index.md), and [Scheduling](./scheduling.md) when a pattern needs a new capability.
+Read [Mapping Tensors](./mapping-tensors/index.md), [Moving Tensors](./moving-tensors/index.md), [Computing Tensors](./computing-tensors/index.md), and [Scheduling and Tuning](./scheduling/index.md) when a pattern needs a new capability.
 
 > [!WARNING]
 > **Alpha Test Build: Experimental Software**

@@ -9,7 +9,6 @@ Each memory type has a peak bandwidth per chip:
 | Memory | Peak Bandwidth |
 |--------|---------------|
 | DM | 2 TB/s per chip |
-| SPM | 2 TB/s per chip |
 | HBM | 1.5 TB/s per chip |
 
 Reaching these peaks requires specific access patterns.
@@ -136,34 +135,6 @@ The DMA request stalls, and if this exceeds 4,096 cycles, a NoC timeout forces a
 See [Schedule Viewer](../appendix/schedule-viewer.md) for a scheduling visualization utility that shows which operations run in parallel and verifies actual context assignments.
 
 
-## Scratchpad Memory (SPM)
-
-
-DM and SPM are both on-chip SRAM.
-They are distinguished by *intended use* (and corresponding compiler allocation policy) rather than by any documented latency or capacity difference.
-
-**DM (Data Memory)** is the main working memory for tensor data flowing through the Tensor Unit pipeline.
-The DMA Engine populates DM from HBM (or other tiers), the Fetch Engine streams data from DM into the Tensor Unit, and the Commit Engine writes the pipeline's results back to DM.
-DM allocation follows general-purpose policies driven by the program's tensor lifetimes.
-
-**SPM (Scratchpad Memory)** is a compiler-managed staging tier.
-The compiler explicitly chooses what lives in SPM, reserving it for small, frequently reused values that should not have to be refetched from DM on every access:
-
-- scalar constants and configuration data,
-- activation function lookup tables,
-- small per-DMN working sets that are read many times.
-
-SPM is most useful for per-DMN state that would otherwise force repeated DM reads through the Fetch or DMA Engines.
-
-DM and SPM are both distinct from the per-slice **register files** that feed the Tensor Unit's compute engines directly (see [Computing Tensors](../computing-tensors/index.md)):
-
-- **TRF (Tensor Register File)** is a per-slice register file populated via [`.to_trf()`](../computing-tensors/collect-engine.md#to-trf); the Contraction Engine reads it each cycle.
-- **VRF (Vector Register File)** is a per-slice register file populated via [`.to_vrf()`](../computing-tensors/collect-engine.md#to-vrf); the Vector Engine reads it each cycle.
-
-The pipeline's data flow is therefore: DMA populates **DM** from HBM → Fetch streams data from DM into the Tensor Unit → Collect writes the stream into **TRF / VRF** → Contraction / Vector read directly from TRF / VRF → Commit writes results back into DM.
-**SPM** sits to the side as a compiler-controlled staging area for the small, high-locality data the kernel needs but does not want to refetch.
-
-Each DMN contains SPM with a bandwidth of 128 B/cycle, and because each DMN has dedicated SPM there are no inter-DMN contention issues.
 
 
 ## High-Bandwidth Memory (HBM)

@@ -26,7 +26,3 @@ workspace = true
 [[bench]]
 name = "storage"
 harness = false
-
-[[bench]]
-name = "kernel_sim"
-harness = false

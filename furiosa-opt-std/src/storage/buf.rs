@@ -757,7 +757,7 @@ impl ReadPlan {
 /// mapping, so a tiled offset axis the relayout's `Src` / `Dst` *type* carries as padding is still a
 /// live `Symbol` here and matches; the view shares the base's wire layout, so this position is also the
 /// partial view's start in the buffer.
-fn window_base(base_map: &MappingValue, offset: &Index) -> usize {
+pub(crate) fn window_base(base_map: &MappingValue, offset: &Index) -> usize {
     if *offset == Index::new() {
         return 0;
     }

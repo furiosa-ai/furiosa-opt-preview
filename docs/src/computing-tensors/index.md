@@ -43,14 +43,14 @@ flowchart TB
 | Engine | Function | Key Constraint |
 |--------|----------|----------------|
 | [Fetch](../moving-tensors/fetch-engine.md) | Load data from DM into the pipeline | Packet must be 8-byte aligned; `Slice` is unchanged |
-| [Fetch Adapter](./fetch-adapter.md) | Per-element transforms after fetch (mask, table lookup, cast) | Optional; identity if skipped |
+| [Fetch Adapter](./fetch-adapter.md) | Per-element transforms after fetch (table lookup, cast) | Optional; identity if skipped |
 | [Switching](./switch-engine.md) | Move data across slices | Ring network, `Slice` can change |
 | [Collect](./collect-engine.md) | Normalize packets to 32-byte flits | Output = exactly one flit |
 | [Contraction](./contraction-engine/index.md) | Einsum: matmul, convolution, attention | One operand resident in TRF; the other streams |
 | [Vector](./vector-engine/index.md) | Elementwise, binary, reduce operations | Only i32/f32 input |
 | [Cast](./cast-engine.md) | Precision lowering with batching | Output = exactly one flit |
 | [Transpose](./transpose-engine.md) | Reorder elements within a flit | Within-flit only |
-| [Commit Adapter](./commit-adapter.md) | Per-element transforms before commit (cast, ReLU, valid count packing, trim) plus the [Generate Mode](./commit-adapter.md#generate-mode) sub-context bypass | Optional; chained before `.commit()` |
+| [Commit Adapter](./commit-adapter.md) | Per-element transforms before commit (cast, ReLU, trim) | Optional; chained before `.commit()` |
 | [Commit](../moving-tensors/commit-engine.md) | Write results back to DM | Flit-aligned writes |
 
 Each tensor stream inside the Tensor Unit carries five dimensions, `[Chip, Cluster, Slice, Time, Packet]`, that split into two groups.
@@ -69,19 +69,20 @@ Their detailed sequencer behavior is documented in [Moving Tensors](../moving-te
 
 ## Execution Context
 
-The [scheduler](../scheduling.md) treats each *execution context* as an independent stream of operations.
+The [scheduler](../scheduling/schedule.md#execution-contexts) treats each *execution context* as an independent stream of operations.
 The hardware exposes three:
 
 - **Main** drives the Tensor Unit pipeline for the kernel's primary computation.
 - **Sub** drives a subset of the same pipeline, typically prefetching operands into TRF / VRF while main computes.
-- **DMA** drives the DMA Engine alone, external to the Tensor Unit (HBM ↔ DM, HBM ↔ SPM, DM ↔ SPM).
+- **DMA** drives the DMA Engine alone, external to the Tensor Unit.
 
 The main context can drive every Tensor Unit engine.
 The sub context drops the Contraction Engine and a handful of other features; everything else carries over from main.
 
 
 Operations serialize within a single context but run in parallel across different contexts.
-For example, sub prefetches the next operand batch into TRF / VRF while main computes the current one (*double-buffering*), and the DMA Engine moves bulk data between HBM and DM / SPM independently of either Tensor Unit context (*overlap*).
+For example, sub prefetches the next operand batch into TRF / VRF while main computes the current one (*double-buffering*), and the DMA Engine moves bulk data between memory tiers independently of either Tensor Unit context (*overlap*).
+
 
 Some Tensor Unit engines form a single unit of scheduling that can be driven by only one context at a time.
 For example, the Vector Engine and the Cast Engine form one such unit of scheduling.

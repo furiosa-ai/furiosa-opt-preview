@@ -201,8 +201,6 @@ The `TagMode` selects how the 4 bits are computed for each element:
 | `Zero` | All four bits are 0. Every element has tag = 0. |
 | `AxisToggle { axis }` | Bit 3 (`GroupId`) = `axis_index % 2` along `axis`. Bits 0..2 stay 0. |
 | `Comparison([cmp0, cmp1, cmp2, cmp3])` | For each element `x`, bit `i` = `1` iff `cmp_i(x)` holds. The four comparisons see the same `x` and must match its dtype (all `InputCmpI32` or all `InputCmpF32`). Each `cmp_i` independently picks (op, boundary) from `InputCmp` (`Less`, `Greater`, `Equal`, `LessUnsigned`, `GreaterUnsigned`, `True`, `False`). |
-| `ValidCount` | Bits derived from the [Valid Count Generator](./vcg.md) output. |
-| `Vrf` | Bits loaded from VRF, previously written by an earlier TuExec (enables tag reuse across invocations). |
 
 For example, with `i32` data and `Comparison([Less{0}, Equal{5}, Greater{100}, True])`, an element `x = 7` yields bits `0/0/0/1` (LSB first), so its tag is `0b1000 = 8`.
 
@@ -567,7 +565,7 @@ fn sigmoid<'l, const T: Tu>(
 # let _o = sigmoid(i);
 ```
 
-### Bitwise `abs` on `f32`
+### Bitwise `Abs` on `f32`
 
 Clearing the sign bit is \\(|x|\\), reached with no float ALU: the mask is an ordinary `i32` literal because the stream is read as `i32` for the one op that needs it.
 Both reinterprets are free, so this costs exactly one `LogicAnd`.

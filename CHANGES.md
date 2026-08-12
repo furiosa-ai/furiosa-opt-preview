@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Changed
+
+- `furiosa-opt-examples` now holds only kernels that compile end to end, plus a `negative` module of
+  fixtures that must be refused. Legal programs the compiler cannot lower to an EDF yet (`matmul`,
+  `attention`, `vrf_add`, the value-form `runtime_if`, and the parallel-copy and shuffle transfers)
+  moved out of the crate, so an example you find here compiles unless it is under `negative`.
+
 ## [v0.5.1]
 
 ### Changed

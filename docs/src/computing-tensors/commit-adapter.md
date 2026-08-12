@@ -3,18 +3,16 @@
 The Commit Adapter applies element-wise transformations to the packet stream before the [Commit Engine](../moving-tensors/commit-engine.md) writes it to DM.
 It mirrors the [Fetch Adapter](./fetch-adapter.md) on the output side of the Tensor Unit.
 
-The adapter's stages chain as dedicated `.commit_xxx(...)` methods on the upstream tensor, and the chain always ends in `.commit(...)` for the actual DM write. [Trimming](#trimming) is the mandatory first stage: `.commit()` / `.commit_view()` are reachable only after `.commit_trim(...)`, so every commit is trimmed first (it is how flit padding is dropped). The other stages are rare and chain after trimming. Main and sub contexts then diverge. A separate operation, [Generate Mode](#generate-mode), is conceptually part of the Commit Adapter but stands alone (it does not chain off a `TuTensor`).
+The adapter's stages chain as dedicated `.commit_xxx(...)` methods on the upstream tensor, and the chain always ends in `.commit(...)` for the actual DM write. [Trimming](#trimming) is the mandatory first stage: `.commit()` / `.commit_view()` are reachable only after `.commit_trim(...)`, so every commit is trimmed first (it is how flit padding is dropped). The other public stage is optional type casting, and main and sub contexts then diverge. Generate Mode is a separate sub-context path used internally by `memset` for immediate fills; it does not chain off a `TuTensor`.
 
 - Main pipeline: [Trimming](#trimming) → [Type Casting](#type-casting) (optionally fusing ReLU) → `.commit()`.
-- Sub pipeline: [Trimming](#trimming) → [Valid Count Packing](#valid-count-packing) → `.commit()`.
-- Sub bypass: [Generate Mode](#generate-mode) writes a single 32-bit constant to DM directly via a standalone API, skipping the Tensor Unit pipeline entirely.
+- Sub bypass: Generate Mode writes a constant directly for `memset`, without consuming an upstream Tensor Unit stream.
 
 | Operation | Main | Sub |
 | --- | --- | --- |
 | [Trimming](#trimming) | ✅ | ✅ |
 | [Type Casting](#type-casting) (optional fused ReLU) | ✅ | ❌ |
-| [Valid Count Packing](#valid-count-packing) | ❌ | ✅ |
-| [Generate Mode](#generate-mode) | ❌ | ✅ (UC, see [§Generate Mode](#generate-mode)) |
+| Generate Mode (internal `memset` path) | ❌ | ✅ |
 
 ## Trimming
 
@@ -28,7 +26,7 @@ Users do not set it directly.
 Trimming adds nearly zero latency.
 
 Trimming is the mandatory first stage of the Commit Adapter, even though not every commit has padding to drop: when `valid_size` is already 32 bytes the flit is fully valid and the trim is a no-op.
-It is mandatory because `.commit()` is reachable only after `.commit_trim(...)`, so it anchors the chain and runs ahead of [Type Casting](#type-casting) (main) and [Valid Count Packing](#valid-count-packing) (sub).
+It is mandatory because `.commit()` is reachable only after `.commit_trim(...)`, so it anchors the chain and runs ahead of [Type Casting](#type-casting) (main).
 
 ```rust,ignore
 {{#include ../../../furiosa-opt-std/src/engine/commit_adapter.rs:commit_trim_impl}}
@@ -120,20 +118,4 @@ fn commit_cast_relu_example<'l, const T: Tu>(
     input.commit_cast_relu::<bf16>()
 }
 ```
-
-## Valid Count Packing
-
-Valid Count Packing is a sub-context-only stage that commits a variable number of valid elements per packet, excluding padding from the output.
-
-
-```rust,ignore
-{{#include ../../../furiosa-opt-std/src/engine/commit_adapter.rs:commit_valid_count_pack_impl}}
-```
-
-## Generate Mode
-
-Generate Mode is used for sub-context-only ITOS (immediate-to-SRAM) writes. The sequencer hands the hardware a constant `u32` value and a sub-context-derived DM address, and the runtime writes the constant directly to that address.
-
-It does not fetch from DM and does not consume any upstream Tensor Unit stream.
-The constant `value` and the destination are the only inputs; the rest of the Tensor Unit pipeline (Fetch / Switch / Collect / Contraction / Vector / Cast / Transpose / Commit Adapter stages) is bypassed entirely.
 

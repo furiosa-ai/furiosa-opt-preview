@@ -2,17 +2,21 @@
 
 Use this chapter when a kernel must stage data between memory tiers or turn a buffer into a Tensor Unit stream.
 
-This chapter covers movement between HBM, DM, and SPM through three dedicated engines:
+This chapter covers movement between HBM and DM through three dedicated engines:
 - **[Fetch](./fetch-engine.md)**: DM → Tensor Unit stream
 - **[Commit](./commit-engine.md)**: Tensor Unit stream → DM
-- **[DMA](./dma-engine.md)**: any pair among DM, SPM, HBM
+- **[DMA](./dma-engine.md)**: HBM ↔ HBM, HBM ↔ DM, or DM ↔ DM
+
+The public `dma_gather_unscaled` contract accepts a `DmTensor` index, reads raw row positions
+rather than scaled byte offsets, and uses `to_dm` staging in the example. Its scatter counterpart
+is not yet implemented. See the [DMA gather example](./dma-engine.md#scatter-and-gather).
+
 
 TRF and VRF are populated by Tensor Unit primitives rather than dedicated move engines, and are covered in [Computing Tensors](../computing-tensors/index.md).
 
 ```mermaid
 flowchart TB
     HBM[(HBM)] <--> DMA[DMA]
-    SPM[(SPM)] <--> DMA[DMA]
     DMA <--> DM[(DM)]
 
     subgraph TU[Tensor Unit]

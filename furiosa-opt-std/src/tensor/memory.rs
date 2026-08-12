@@ -314,9 +314,12 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
         self.address
     }
 
-    /// Size in bytes.
+    /// Size of the packed device image in bytes, the measure [`Self::to_buf`] produces.
+    ///
+    /// The wire width, not the staging width: the types staged wider (`i5` / `i9`) are not
+    /// `MaterializableScalar`, so no host-facing buffer ever holds one.
     pub fn size() -> usize {
-        Pair::<Chip, Element>::SIZE * std::mem::size_of::<D>()
+        D::size_in_bytes_from_length(Pair::<Chip, Element>::SIZE)
     }
 
     /// Converts to host tensor.
@@ -533,7 +536,9 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
 #[derive(Debug, Clone)]
 pub struct HbmTensorView<'l, D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend> {
     inner: TensorView<'l, D, Pair<Chip, Element>, B>,
-    // Inherits the HBM tensor's concrete address (always present), so `Address`, not `Option`.
+    // The BASE tensor's concrete address (always present, so `Address`, not `Option`). A tile is
+    // recorded in `inner`'s offset, not here; `address()` adds it back. Keeping the base means
+    // repeated tiles cannot double-count their offsets.
     address: Address,
 }
 
@@ -541,9 +546,21 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
     /// Logical shape (mapping) of this tensor.
     pub type Mapping = m![{ Chip }, { Element }];
 
-    /// Returns the base HBM address of this view.
+    /// The HBM address this view's data starts at, the base tensor's address advanced by the window
+    /// [`Self::tile`] selected. It is the whole of what a view tells the Npu backend.
     pub fn address(&self) -> Address {
-        self.address
+        self.address + D::size_in_bytes_from_length(self.inner.window_base()) as Address
+    }
+
+    /// Bytes from [`Self::address`] to the end of the base tensor, the most a device buffer built
+    /// from this view may cover.
+    pub(crate) fn addressable_len(&self) -> usize {
+        let elements = self
+            .inner
+            .base_len()
+            .checked_sub(self.inner.window_base())
+            .expect("a tile's window starts inside the base tensor it indexes");
+        D::size_in_bytes_from_length(elements)
     }
 
     /// Writes to HBM tensor view. The destination's `Chip2` is free of the
@@ -744,14 +761,35 @@ impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensorView
 #[derive(Debug)]
 pub struct HbmTensorViewMut<'l, D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend> {
     inner: TensorViewMut<'l, D, Pair<Chip, Element>, B>,
-    // Inherits the HBM tensor's concrete address (always present), so `Address`, not `Option`.
+    // The BASE tensor's address; see [`HbmTensorView`]'s field of the same name.
     address: Address,
 }
 
 impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chip, Element, B> {
-    /// Returns the base HBM address of this view.
+    /// Returns the HBM address where this view's data starts; see [`HbmTensorView::address`].
     pub fn address(&self) -> Address {
-        self.address
+        self.address + D::size_in_bytes_from_length(self.inner.window_base()) as Address
+    }
+
+    /// See [`HbmTensorView::addressable_len`].
+    pub(crate) fn addressable_len(&self) -> usize {
+        let elements = self
+            .inner
+            .base_len()
+            .checked_sub(self.inner.window_base())
+            .expect("a tile's window starts inside the base tensor it indexes");
+        D::size_in_bytes_from_length(elements)
+    }
+
+    /// Returns a dense packed byte snapshot of the view without consuming its mutable handle.
+    ///
+    /// In-place execution harnesses use this to give their reference executors the same
+    /// pre-launch contents that the device kernel receives.
+    pub fn to_buf(&self) -> Vec<u8>
+    where
+        D: MaterializableScalar,
+    {
+        self.inner.read().into_buf()
     }
 
     /// Creates mutable views by splitting along a tile expression over Chip.
@@ -1595,6 +1633,61 @@ mod tests {
     fn emulation_dma_gather_unscaled_roundtrip() {
         let (got, expected) = run_dma_gather_unscaled::<Emulation>();
         assert_eq!(got, expected);
+    }
+
+    /// A mutable HBM view borrows the owner's storage rather than a detached buffer. Once the view
+    /// is released, reading the whole owning tensor must therefore observe the view's writes.
+    #[test]
+    fn emulation_hbm_view_mut_updates_owning_tensor() {
+        axes![A = 8];
+
+        let expected: Vec<i32> = (0..A::SIZE as i32).map(|x| x * 3 + 1).collect();
+        let source = HbmTensor::<i32, m![1], m![A], Emulation>::new(Tensor::from_vec(expected.clone()), 0x1000);
+        let mut destination =
+            HbmTensor::<i32, m![1], m![A], Emulation>::new(Tensor::from_vec(std::iter::repeat_n(-1, A::SIZE)), 0x2000);
+
+        {
+            let source = source.view();
+            let mut destination_view = destination.view_mut();
+            destination_view.inner.transpose(source.inner, false);
+        }
+
+        assert_eq!(destination.into_vec(), expected);
+    }
+
+    #[test]
+    fn hbm_tile_spans_end_at_the_allocation_boundary() {
+        axes![A = 8, H = 4];
+        type Row = m![1 # 8, H];
+        type RowMut = m![1 #{!} 8, H];
+
+        const IMMUTABLE_BASE: u64 = 0x1000;
+        const MUTABLE_BASE: u64 = 0x2000;
+        let row_bytes = H::SIZE * std::mem::size_of::<i32>();
+        let allocation_bytes = A::SIZE * row_bytes;
+        let starts = [0, A::SIZE / 2, A::SIZE - 1];
+
+        let table = unsafe { HbmTensor::<i32, m![1], m![A, H], Emulation>::from_addr(IMMUTABLE_BASE) };
+        for start in starts {
+            let row = table.view().tile::<m![A], 1, Row>(start);
+            assert_eq!(row.address(), IMMUTABLE_BASE + (start * row_bytes) as u64);
+            assert_eq!(row.addressable_len(), allocation_bytes - start * row_bytes);
+            assert_eq!(
+                row.address() + row.addressable_len() as u64,
+                IMMUTABLE_BASE + allocation_bytes as u64
+            );
+        }
+
+        let mut table = unsafe { HbmTensor::<i32, m![1], m![A, H], Emulation>::from_addr(MUTABLE_BASE) };
+        for start in starts {
+            let row = table.view_mut().tile::<m![A], 1, RowMut>(start);
+            assert_eq!(row.address(), MUTABLE_BASE + (start * row_bytes) as u64);
+            assert_eq!(row.addressable_len(), allocation_bytes - start * row_bytes);
+            assert_eq!(
+                row.address() + row.addressable_len() as u64,
+                MUTABLE_BASE + allocation_bytes as u64
+            );
+        }
     }
 
     /// Typecheck backend: `dma_gather_unscaled` propagates the same shape assertions

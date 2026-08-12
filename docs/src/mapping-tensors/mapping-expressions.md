@@ -206,7 +206,7 @@ Three kinds are tracked.
   Raw DM tensors carry this. `#` is the shorthand; `#{*}` spells the kind out explicitly.
 - `m![A #{0} m]` is zero-filled padding to size `m`.
   These positions are accessible and known to hold zero.
-  The Fetch Adapter's [masking](../computing-tensors/fetch-adapter.md#masking) stage produces this from `# m`.
+  The mapping records that value property; the expression itself does not perform the fill.
 - `m![A #{!} m]` is bottom padding to size `m`.
   These positions are inaccessible and reads/writes are undefined behavior.
   This models addresses the compiler must avoid.
@@ -421,35 +421,6 @@ fn test_escape() {
 This escape syntax breaks down complex mappings into named, reusable components.
 
 
-### Advanced Constructors
-
-
-#### Skewed Axis
-
-A skewed axis creates a diagonal access pattern across two dimensions.
-Skewed axes introduce derived axis labels defined by arithmetic differences between existing axes; for example, `B' = B - A` defines a new axis `B'` whose coordinate at any point equals `B` minus `A`.
-Algorithms that process data along diagonals use this pattern, such as certain wavefront computations.
-
-The expression `m![A, B' = 4]` with `B' = B - A` creates a mapping where each row is shifted relative to the previous one.
-The `=` operator specifies the logical size after skewing.
-The result wraps around using modular arithmetic.
-
-For example, with `axes![A = 4, B = 4]` and `B' = B - A`:
-
-| (A, B') | (A, B) |
-|---------|--------|
-| (0, 0)  | (0, 0) |
-| (0, 1)  | (0, 1) |
-| (0, 2)  | (0, 2) |
-| (0, 3)  | (0, 3) |
-| (1, 0)  | (1, 1) |
-| (1, 1)  | (1, 2) |
-| (1, 2)  | (1, 3) |
-| (1, 3)  | (1, 0) |
-
-When `A = 1` and `B' = 3`, the original `B` coordinate wraps to `0` via modular arithmetic since `B = (B' + A) % 4 = (3 + 1) % 4 = 0`.
-
-The formal linear-combination definitions and sliding example are in [Linear Combination Semantics](./tensor-semantics.md#linear-combination-semantics).
 
 ## Equivalent Mappings
 

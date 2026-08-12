@@ -20,34 +20,6 @@ pub fn ve_elementwise_fxp_const(ctx: &mut Context, input: &HbmTensor<i32, Chip, 
     result.to_hbm(&mut ctx.tdma)
 }
 
-/// **NOTE**: This example demonstrates an ALU conflict and should PANIC:
-/// - AddFxp uses FxpAdd ALU
-/// - MulInt uses FxpMul ALU
-/// - SubFxp uses FxpAdd ALU (conflict with first AddFxp!)
-///
-/// Expected panic: "FxpAdd is already in use"
-#[device(chip = 1)]
-pub fn ve_elementwise_fxp_chain(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -> HbmTensor<i32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
-
-    let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
-        .main
-        .begin(input_dm.view())
-        .fetch::<m![1], m![A % 2]>()
-        .fetch_cast::<i32>()
-        .collect::<m![1], m![A % 2 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_fxp(FxpBinaryOp::AddFxp, 10)
-        .vector_fxp(FxpBinaryOp::MulInt, 2)
-        .vector_fxp(FxpBinaryOp::SubFxp, 5)
-        .vector_final()
-        .commit_trim::<m![A % 2]>()
-        .commit();
-
-    result.to_hbm(&mut ctx.tdma)
-}
-
 #[device(chip = 1)]
 pub fn ve_elementwise_full_pipeline(
     ctx: &mut Context,
@@ -197,50 +169,6 @@ pub fn ve_elementwise_stash_f32(ctx: &mut Context, input: &HbmTensor<f32, Chip, 
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), 2.0f32)
         .vector_widen_pad::<m![A % 2 # 8]>()
         .vector_clip(ClipBinaryOpF32::Max, Stash)
-        .vector_final()
-        .commit_trim::<m![A % 2]>()
-        .commit();
-
-    result.to_hbm(&mut ctx.tdma)
-}
-
-/// The ALLOWED read-many case: reading one VRF register twice compiles and lowers to VISA. Reading
-/// a VRF more than once is fine — only the *stash* is read-once, so this is a success case, the
-/// positive counterpart to the double-*stash* read the typestate rejects. (Its VISA-vs-LIR
-/// comparison test is `#[ignore]`d for the same VRF-input LIR limitation as `ve_elementwise_vrf`.)
-///
-/// Computes `z³` by reading the SAME value twice in one VE chain — the gelu-tanh pass-1 shape
-/// (`z²` then `z·(…)` both recover `z`). Because RNGD's stash is write-once/**read-once**, a value
-/// read more than once cannot be a stash: it lives in a read-many VRF register, read by borrow
-/// (`&z_vrf`) as often as needed. Contrast the stash, which forbids a second read at compile time:
-/// a second `vector_*_stash` on one `vector_stash()`, or a second `Stash` operand, no longer
-/// compiles.
-#[device(chip = 1)]
-pub fn ve_vrf_read_twice_ok_f32(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![A]>) -> HbmTensor<f32, Chip, m![A]> {
-    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
-    let vrf_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);
-
-    // `z` lives in a VRF register — the read-many construct — so it can be read twice below.
-    let z_vrf: VrfTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
-        .sub
-        .begin(vrf_dm.view())
-        .fetch::<m![1], m![A % 2]>()
-        .fetch_cast::<f32>()
-        .collect::<m![1], m![A % 2 # 8]>()
-        .to_vrf();
-
-    let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = ctx
-        .main
-        .begin(input_dm.view())
-        .fetch::<m![1], m![A % 2]>()
-        .fetch_cast::<f32>()
-        .collect::<m![1], m![A % 2 # 8]>()
-        .vector_init()
-        .vector_intra_slice_tag(TagMode::Zero)
-        .vector_narrow_trim::<m![A % 2 # 4]>()
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &z_vrf) // z·z
-        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &z_vrf) // (z·z)·z = z³
-        .vector_widen_pad::<m![A % 2 # 8]>()
         .vector_final()
         .commit_trim::<m![A % 2]>()
         .commit();

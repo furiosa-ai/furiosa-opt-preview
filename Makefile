@@ -42,7 +42,8 @@ fmt:
 
 .PHONY: mdbook-install
 mdbook-install:
-	cargo install mdbook mdbook-mermaid mdbook-pdf
+	# lychee checks the rendered book's links; see the mdbook-build target.
+	cargo install mdbook mdbook-mermaid mdbook-pdf lychee
 	mdbook-mermaid install $(DOCS_DIR)
 
 .PHONY: mdbook-serve
@@ -52,6 +53,7 @@ mdbook-serve:
 .PHONY: mdbook-build
 mdbook-build:
 	mdbook build $(DOCS_DIR)
+	lychee --offline --include-fragments --root-dir $(CURDIR)/$(DOCS_DIR)/book $(DOCS_DIR)/book
 
 .PHONY: test-no-run
 test-no-run:

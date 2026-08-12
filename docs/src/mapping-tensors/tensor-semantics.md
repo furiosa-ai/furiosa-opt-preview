@@ -56,17 +56,19 @@ For example, the function `elementwise_add` specifies the mathematical operation
 - if `lhs` holds \\(T_1\\) and `rhs` holds \\(T_2\\),
 - then the return value holds \\(T_1 + T_2\\).
 
-```rust
+```rust,ignore
 # extern crate furiosa_opt_std;
 # use furiosa_opt_std::prelude::*;
 axes![A = 8, B = 512];
 
+// This signature specifies the mathematical contract; the engine pipeline
+// implementation is shown in the Computing Tensors chapter.
 fn elementwise_add(
     lhs: &HbmTensor<bf16, m![A], m![B]>,
     rhs: &HbmTensor<bf16, m![A], m![B]>,
 ) -> HbmTensor<bf16, m![A], m![B]> {
-    // ... computes elementwise add ...
-    # todo!("elementwise add lhs and rhs")
+    // The implementation is intentionally omitted; this example states only
+    // the function's tensor-level contract.
 }
 ```
 

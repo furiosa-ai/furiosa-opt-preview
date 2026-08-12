@@ -98,7 +98,7 @@ The TRF enables double-buffering by splitting each bank into two halves: the [TR
 Three address modes select the region, fixed at store time: `Full` uses all 128 rows per bank, `FirstHalf` uses rows 0–63, and `SecondHalf` uses rows 64–127.
 The half modes cap per-slice capacity at 40 KB.
 
-See [Scheduling: Double-Buffering Pattern](../scheduling.md#double-buffering-pattern) for the kernel pattern that uses these halves across the main and sub contexts.
+See [Scheduling and Tuning: Double Buffering](../scheduling/tuning.md#double-buffering) for the tuning pattern that uses these halves across the main and sub contexts.
 
 Both halves share the same banks, so reads and writes contend at the bank level even though they target different rows.
 When both target the same bank in a cycle, the read takes priority because the contraction pipeline needs the data this cycle while the store can wait.

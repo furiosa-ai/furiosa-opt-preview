@@ -198,7 +198,7 @@ Two strategies handle padding exclusion.
   See [Valid Count Generator](./vcg.md) for details.
 
 - **Identity-element padding**: Fill pad positions with the identity element of the reduce operation before data reaches the [Intra-Slice Chain](./intra-slice-chain.md).
-  The [Fetch Engine's masking](../../moving-tensors/fetch-engine.md#masking) writes the identity value into pad positions during fetch:
+  The book does not document a usable public masking operation; use a verified identity-producing path before reduction.
 
   | Operation | Identity Element |
   |-----------|-----------------|

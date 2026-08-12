@@ -14,6 +14,7 @@ mod phantom;
 
 pub(crate) use buf::Buf;
 pub use buf::BufStorage;
+pub(crate) use buf::window_base;
 pub use phantom::PhantomStorage;
 
 /// Minimum work per parallel job, in scalar operations (multiply-adds / fold steps), for the storages'

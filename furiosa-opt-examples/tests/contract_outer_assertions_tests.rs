@@ -8,59 +8,6 @@ mod lane_size {
     use furiosa_opt_examples::contract_outer_assertions::lane_size::*;
 
     #[tokio::test]
-    async fn test_valid_size_1() {
-        let mut ctx = Context::acquire();
-
-        let input = HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>())
-            .to_hbm::<Chip, m![A, B]>(&mut ctx.pdma)
-            .await;
-
-        let input_trf = HostTensor::<i8, m![B]>::from_vec((0..<m![B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>())
-            .to_hbm::<Chip, m![B]>(&mut ctx.pdma)
-            .await;
-
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, 1 # 8]>::from_addr(0x1000) };
-
-        launch(valid_size_1, (&mut *ctx, &input, &input_trf, &mut output)).await;
-    }
-
-    #[tokio::test]
-    async fn test_valid_size_2() {
-        let mut ctx = Context::acquire();
-
-        let input = HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>())
-            .to_hbm::<Chip, m![A, B]>(&mut ctx.pdma)
-            .await;
-
-        let input_trf =
-            HostTensor::<i8, m![R / 4, B]>::from_vec((0..<m![R / 4, B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>())
-                .to_hbm::<Chip, m![R / 4, B]>(&mut ctx.pdma)
-                .await;
-
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, R / 4 # 8]>::from_addr(0x1000) };
-
-        launch(valid_size_2, (&mut *ctx, &input, &input_trf, &mut output)).await;
-    }
-
-    #[tokio::test]
-    async fn test_valid_size_4() {
-        let mut ctx = Context::acquire();
-
-        let input = HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>())
-            .to_hbm::<Chip, m![A, B]>(&mut ctx.pdma)
-            .await;
-
-        let input_trf =
-            HostTensor::<i8, m![R / 2, B]>::from_vec((0..<m![R / 2, B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>())
-                .to_hbm::<Chip, m![R / 2, B]>(&mut ctx.pdma)
-                .await;
-
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, R / 2 # 8]>::from_addr(0x1000) };
-
-        launch(valid_size_4, (&mut *ctx, &input, &input_trf, &mut output)).await;
-    }
-
-    #[tokio::test]
     async fn test_valid_size_8() {
         let mut ctx = Context::acquire();
 

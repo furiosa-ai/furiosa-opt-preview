@@ -113,11 +113,6 @@ fn transpose_with_trimming<'l, const T: Tu>(
 # let _o = transpose_with_trimming(c);
 ```
 
-## Slice Bitmap
-
-The slice bitmap is a 256-bit mask covering one full cluster (one bit per slice, 256 slices per cluster) that gates which slices receive commit data.
-For example, `bitmap = 00000000...01` enables commit only to slice `0`, and `bitmap = 11111111...10` enables commit to all slices except slice `0`.
-
 
 ## Optimizations
 

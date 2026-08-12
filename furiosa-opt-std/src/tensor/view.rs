@@ -152,6 +152,27 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
         }
     }
 
+    /// See [`TensorView::window_base`].
+    pub(crate) fn window_base(&self) -> usize {
+        crate::storage::window_base(&self.base_map, &self.offset)
+    }
+
+    /// See [`TensorView::base_len`].
+    pub(crate) fn base_len(&self) -> usize {
+        self.base_map.size()
+    }
+
+    /// Reads the mutable view without consuming it.
+    pub(crate) fn read(&self) -> Tensor<D, E, B> {
+        TensorView {
+            inner: &*self.inner,
+            offset: self.offset.clone(),
+            base_map: self.base_map.clone(),
+            _marker: PhantomData,
+        }
+        .read()
+    }
+
     /// Transposes from a tensor. Delegates to [`Backend::transpose`], passing both storages and their
     /// live-axis maps (`base_map`) so a partial-view relayout can resolve each offset's wire base.
     pub fn transpose<'lsrc, Src: M>(&mut self, src: TensorView<'lsrc, D, Src, B>, allow_broadcast: bool) {
@@ -260,6 +281,17 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
 }
 
 impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
+    /// Element position where this view's window starts in the base tensor's wire layout, 0 for an
+    /// untiled view. Walks the base mapping, so it is computed on demand rather than carried.
+    pub(crate) fn window_base(&self) -> usize {
+        crate::storage::window_base(&self.base_map, &self.offset)
+    }
+
+    /// Element count of the base tensor this view borrows.
+    pub(crate) fn base_len(&self) -> usize {
+        self.base_map.size()
+    }
+
     /// Reads the tensor view into a new tensor. Delegates to [`Backend::transpose`], so the read is a
     /// no-op on the value-free Typecheck phantom.
     pub fn read(self) -> Tensor<D, E, B> {

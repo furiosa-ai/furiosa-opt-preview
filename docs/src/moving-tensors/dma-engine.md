@@ -95,54 +95,6 @@ Any DMA Engine handles any transfer.
 By default the compiler picks the source DM's local DMA Engine, since local DMN access is faster than cross-DMN access.
 The kernel writer can also specify an engine explicitly.
 
-### Sequencer Representation
-
-
-The compiler represents each DMA Engine's work as a `DmaSequencer` paired with source and destination addressing:
-
-```rust,ignore
-struct DmaSequencer {
-    entries: Vec<DmaEntry>,
-    stride0: u16,        // 1..=4096, per-iteration packet size in bytes
-    source_base: usize,
-    dest_base: usize,
-}
-
-struct DmaEntry {
-    axis: AxisName,
-    size: usize,
-    source_stride: isize,
-    dest_stride: isize,
-}
-```
-
-Each entry specifies a loop with a shared `size` but separate `source_stride` and `dest_stride`, since the layout transformation reorders the same logical elements between source and destination memory.
-The innermost-loop stride `stride0` (1 to 4,096 bytes) sets the per-iteration packet size.
-A full DMA command bundles the sequencer with the engine's location and media:
-
-```rust,ignore
-struct DmaDescriptor {
-    sequencer: DmaSequencer,
-    source_media: Media,
-    dest_media: Media,
-}
-
-struct DmnIndex {
-    chip: ChipIndex,
-    cluster_in_chip: ClusterInChipIndex,
-    slice_in_cluster: SliceInClusterIndex,
-}
-
-enum Media {
-    Hbm(ChipIndex),
-    Dm(DmnIndex),
-    Spm(DmnIndex),
-}
-
-enum Dtype {
-    I4, I8, F8E4M3, F8E5M2, I16, Bf16, I32, F32,
-}
-```
 
 A homogeneous aggregate uses one descriptor template parameterized across all participating DMA Engines.
 A heterogeneous aggregate uses a `HashMap<DmnIndex, DmaDescriptor>` that pairs each DMN with its specific descriptor.
@@ -250,7 +202,6 @@ Each tier has a peak bandwidth that bounds achievable throughput, and the actual
 |------|----------------|
 | HBM | 1.5 TB/s per chip (32 channels × 48 GB/s per channel at 0.75 GHz) |
 | DM | 256 B/cycle per cluster (with DMN interleaving, 128 B/cycle per DMN) |
-| SPM | 128 B/cycle per cluster (same-chip only, not yet exposed in the API) |
 | PCIe | 30 B/cycle for both reads and writes (see [PCIe DMA](#pcie-dma)) |
 
 Each DMA Engine moves up to 256 B/cycle on its own.
@@ -586,8 +537,8 @@ fn gather_minimal(
 fn gather_unscaled(
     ctx: &mut Context,
     table: &HbmTensor<bf16, m![1], m![K, D]>,
-    // Raw row positions per cluster. The gather reads the index off SPM, so the kernel first
-    // stages it on-chip with `to_dm`; a real per-cluster (`CL`) partition avoids broadcast padding.
+    // Raw row positions per cluster. The kernel stages the index on-chip with `to_dm`;
+    // a real per-cluster (`CL`) partition avoids broadcast padding.
     index: &HbmTensor<i32, m![1], m![CL, G]>,
 ) -> DmTensor<bf16, m![1], m![CL], m![G / 2], m![G % 2, D]> {
     let index_dm: DmTensor<i32, m![1], m![CL], m![G / 2], m![G % 2]> =
@@ -610,10 +561,9 @@ fn gather_unscaled(
 # }
 ```
 
+
 The scaled variants (`dma_gather_scaled`, `dma_scatter`) take the index from an `HbmTensor` in DRAM and read its values as byte offsets along the gather/scatter axis: to address row `r`, pass `r` times one row's byte size (its element count times the element's byte size; e.g. `128 * 2 = 256` for a 128-wide `bf16` row).
 `dma_gather_unscaled` instead takes an on-chip `DmTensor` index, staged from DRAM with `to_dm`, and reads its values as raw row positions, for indices computed on-chip such as paged-attention block tables.
-Note a side effect: the seed reads the index off SPM, so the compiler emits an extra DM to SPM DMA to stage the index (SPM is the on-chip tier noted above, not yet a user-facing type).
-Its scatter counterpart `dma_scatter_unscaled` is not yet implemented.
 
 ## PCIe DMA
 

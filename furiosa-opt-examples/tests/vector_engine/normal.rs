@@ -1,49 +1,15 @@
 use crate::common::{assert_f32_bits_eq, assert_f32_vec_eq};
+use furiosa_opt_examples::negative::vector_engine::ve_elementwise_fxp_chain;
 use furiosa_opt_examples::vector_engine::{
-    A, B, ve_elementwise_full_pipeline, ve_elementwise_fxp_chain, ve_elementwise_fxp_const, ve_elementwise_logic,
-    ve_elementwise_multi_vrf, ve_elementwise_reinterpret_abs_f32, ve_elementwise_reinterpret_chain_f32,
-    ve_elementwise_stash_f32, ve_elementwise_stash_i32, ve_elementwise_ternary, ve_elementwise_ternary_stash,
-    ve_elementwise_vrf, ve_stash_after_reinterpret_f32, ve_stash_after_widen_f32, ve_stash_fxp_fxp,
-    ve_vrf_read_twice_ok_f32,
+    A, B, ve_elementwise_full_pipeline, ve_elementwise_fxp_const, ve_elementwise_logic, ve_elementwise_multi_vrf,
+    ve_elementwise_reinterpret_abs_f32, ve_elementwise_reinterpret_chain_f32, ve_elementwise_stash_f32,
+    ve_elementwise_stash_i32, ve_elementwise_ternary, ve_elementwise_ternary_stash, ve_elementwise_vrf,
+    ve_stash_after_reinterpret_f32, ve_stash_after_widen_f32, ve_stash_fxp_fxp,
 };
-use furiosa_opt_examples::vrf_add::vrf_add;
 use furiosa_opt_std::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-
-// =============================================================================
-// VRF Add Tests (uses A=1024, B=512 from vrf_add.rs)
-// =============================================================================
-
-#[tokio::test]
-#[ignore = "Failing on cpu"]
-async fn test_vrf_add() {
-    use furiosa_opt_examples::vrf_add::{A, B};
-
-    let mut ctx = Context::acquire();
-
-    let mut rng = SmallRng::seed_from_u64(42);
-    let lhs = HostTensor::<i32, m![A, B]>::rand(&mut rng);
-    let rhs = HostTensor::<i32, m![B]>::rand(&mut rng);
-
-    // Transfer to HBM
-    let lhs_hbm = lhs.to_hbm(&mut ctx.pdma).await;
-    let rhs_hbm = rhs.to_hbm(&mut ctx.pdma).await;
-
-    // Execute the operation
-    let out_hbm = launch(vrf_add, (&mut *ctx, &lhs_hbm, &rhs_hbm)).await;
-
-    // copy results into host
-    let result = out_hbm.to_host::<m![A, B]>(&mut ctx.pdma).await;
-
-    // Verify: each element should be lhs[i] + rhs[i]
-    let expected = lhs
-        .into_inner()
-        .zip_with(&rhs.into_inner().transpose(true), |x, y| x + y);
-
-    assert_eq!(expected.into_vec(), result.into_vec());
-}
 
 // =============================================================================
 // VE Elementwise Tests (uses A=512, B=256 from vector_engine.rs)
@@ -128,25 +94,6 @@ async fn test_ve_elementwise_stash_f32() {
 
     // Verify: output = max(input * 2.0, input)
     let expected = input.into_inner().map(|x| f32::max(x * 2.0, x));
-
-    assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
-}
-
-#[tokio::test]
-async fn test_ve_vrf_read_twice_ok_f32() {
-    let mut ctx = Context::acquire();
-
-    let mut rng = SmallRng::seed_from_u64(42);
-    let input = HostTensor::<f32, m![A]>::rand(&mut rng);
-
-    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
-
-    let out_hbm = launch(ve_vrf_read_twice_ok_f32, (&mut *ctx, &input_hbm)).await;
-
-    let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
-
-    // Two VRF reads of `z`: Mul0 (z·z) then Mul1 ((z·z)·z) => z³.
-    let expected = input.into_inner().map(|x| x * x * x);
 
     assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
 }

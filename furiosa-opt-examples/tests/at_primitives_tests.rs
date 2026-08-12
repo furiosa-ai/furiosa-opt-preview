@@ -89,20 +89,3 @@ async fn test_dm_relayout_at() {
         vals
     );
 }
-
-// `DmTensor::to_dm_pcopy_at`. pcopy is an identity copy, so the output must equal the input.
-#[tokio::test]
-async fn test_dm_pcopy_at() {
-    use furiosa_opt_examples::at_primitives::pcopy::{A, B, dm_pcopy_at};
-
-    let mut ctx = Context::acquire();
-
-    let vals: Vec<i32> = (0..<m![A, B]>::SIZE as i32).collect();
-    let input = HostTensor::<i32, m![A, B]>::from_vec(vals.clone())
-        .to_hbm::<m![1], m![A, B]>(&mut ctx.pdma)
-        .await;
-
-    let output = launch(dm_pcopy_at, (&mut *ctx, &input)).await;
-
-    assert_eq!(output.to_host::<m![A, B]>(&mut ctx.pdma).await.into_vec(), vals);
-}

@@ -7,7 +7,7 @@ Recall from [Quick Start](../../quick-start.md):
   Dot product, GEMV, and GEMM are the canonical examples.
 - A contraction decomposes into three steps: Broadcast, Multiply, Reduce.
 - One operand streams from the [Collect Engine](../collect-engine.md), and the other sits in the TRF (Tensor Register File).
-- Contraction runs in the [main context](../../scheduling.md).
+- Contraction runs in the [main context](../../scheduling/schedule.md#execution-contexts).
   TRF preparation runs in the sub context via `.to_trf()`.
 
 ## Architecture
@@ -79,9 +79,6 @@ They share these axes:
 # use furiosa_opt_std::prelude::*;
 axes![V = 32, M = 32, N = 8, K = 32];   // V batch, M×N output, K contraction
 ```
-
-(See [2D Convolution](./2d-convolution.md) for another example, which uses a separate set of Stream Adapter machinery.)
-
 
 ### K in Time
 

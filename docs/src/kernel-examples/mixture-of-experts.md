@@ -276,7 +276,7 @@ In the worst case where all Experts include a grid containing only one token, `(
 #### 3.3. Index and Expert ID Generation (`Cumsum`-based Address Calculation)
 
 Each token's destination block address (`Scatter_Idx`) and the expert assignment per block (`Expert_IDs`) are computed in parallel using cumsum over the token-to-expert assignment masks.
-(`Cumsum` is implemented in the Vector Engine using branch logging; see [Section 4](#4-cumsum-implementation-on-npu) for the hardware implementation.)
+(`Cumsum` is implemented in the Vector Engine using branch logging; see [Section 4](#4-cumsum-implementation-on-tcp) for the hardware implementation.)
 This approach avoids loops and enables efficient parallel execution:
 - **Inputs**
   - `TopK_Indices: T x K`
@@ -316,9 +316,9 @@ This approach avoids loops and enables efficient parallel execution:
     - `Expert_IDs: G = filter_compaction(Grid, condition=(Grid >= 0))`
     - e.g.)
       - expert 0: 2 blocks, expert 1: 3 blocks, expert 3: 3 blocks
-      - Diff[0] = [2, 1, 0, -1, -2, ...], Diff[1] = [3, 2, 1, 0, -1, ...]: has positive terms equal to the number of allocated blocks per expert.
-      - Grid[0] = [0, 0, -1,-1, ...], Grid[1] = [1, 1, 1, -1, -1, ...]: has expert id equal to the number of allocated blocks per expert.
-      - Expert_IDs = [0, 0, 1, 1, 1, 3, 3, 3]: Filter only values >= 0 (expert id) from Grid.
+      - `Diff[0] = [2, 1, 0, -1, -2, ...]`, `Diff[1] = [3, 2, 1, 0, -1, ...]`: has positive terms equal to the number of allocated blocks per expert.
+      - `Grid[0] = [0, 0, -1,-1, ...]`, `Grid[1] = [1, 1, 1, -1, -1, ...]`: has expert id equal to the number of allocated blocks per expert.
+      - `Expert_IDs = [0, 0, 1, 1, 1, 3, 3, 3]`: Filter only values >= 0 (expert id) from Grid.
   - **Address Synthesis**
     - `Scatter_Idx = (Global_Offset * B) + Local_Offset`
     - Calculate which block and which position within the block each of the `T` tokens corresponds to. `Scatter_Idx in [0, G * B)`

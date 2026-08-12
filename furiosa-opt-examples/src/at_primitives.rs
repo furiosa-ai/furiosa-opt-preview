@@ -7,6 +7,9 @@
 //! They mirror the address-free examples, swapping the on-chip call for its `*_at` form
 //! with an explicit address. (`to_hbm` is not split: an HBM tensor always takes an
 //! address, so every `to_hbm` call already exercises that path.)
+//!
+//! `to_dm_pcopy_at` and `dma_gather_scaled_at` are not here: like their address-free twins they stop
+//! short of EDF, so they live in `npu-opt-examples::unsupported::at_primitives`.
 
 #![expect(clippy::type_complexity)]
 
@@ -121,23 +124,6 @@ pub mod trf {
     }
 }
 
-/// `DmTensor::to_dm_pcopy_at` (mirrors `memory_op::dm_pcopy`, which uses the address-free form).
-///
-/// `to_dm_pcopy` reaches MIR only (no VISA/LIR translation yet), so this twin is exercised at the
-/// emulation level in `at_primitives_tests`, not in the VISA-vs-LIR suite.
-pub mod pcopy {
-    use super::*;
-
-    axes![A = 256, B = 4096];
-
-    #[device(chip = 1)]
-    pub fn dm_pcopy_at(ctx: &mut Context, hbm: &HbmTensor<i32, m![1], m![A, B]>) -> HbmTensor<i32, m![1], m![A, B]> {
-        let src: DmTensor<i32, m![1], m![1], m![A], m![B]> = hbm.to_dm(&mut ctx.tdma);
-        let dst: DmTensor<i32, m![1], m![1], m![A], m![B]> = src.to_dm_pcopy_at(&mut ctx.sub, 0x10_0000);
-        dst.to_hbm(&mut ctx.tdma)
-    }
-}
-
 /// `DmTensor::to_dm_at` (mirrors `memory_op::dm_relayout`). The DM → DM `to_dm` reaches MIR only,
 /// so this twin is exercised at the emulation level in `at_primitives_tests`.
 pub mod relayout {
@@ -154,26 +140,5 @@ pub mod relayout {
         let relaid: DmTensor<i32, m![1], m![1 # 2], m![1 # 2, A / 2], m![A % 2, B]> =
             dm.to_dm_at(&mut ctx.tdma, 0x10_0000);
         relaid.to_hbm(&mut ctx.tdma)
-    }
-}
-
-/// `HbmTensor::dma_gather_scaled_at` (mirrors `scatter_gather::gather_minimal`, which uses the address-free
-/// form). Like that example it reaches the VISA stage only, so this is codegen coverage.
-pub mod gather {
-    use super::*;
-
-    type Cluster = m![1];
-    axes![K = 512, D = 128, C = 612];
-
-    // Runs at a 2-PE device (1 cluster x 128 slices), which matches the gather output's
-    // `Cluster = m![1]` x slice `m![D]` (D = 128).
-    #[device(chip = 1, pe = 2)]
-    pub fn gather_at(
-        ctx: &mut Context,
-        table: &HbmTensor<bf16, Chip, m![K, D]>,
-        index: &HbmTensor<i32, Chip, m![C]>,
-    ) -> HbmTensor<bf16, Chip, m![C, D]> {
-        let values_dm: DmTensor<bf16, Chip, Cluster, m![D], m![C]> = table.dma_gather_scaled_at(index, 0x0);
-        values_dm.to_hbm(&mut ctx.tdma)
     }
 }

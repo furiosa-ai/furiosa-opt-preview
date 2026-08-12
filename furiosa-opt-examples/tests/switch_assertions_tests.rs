@@ -5,34 +5,6 @@ mod alignment {
     use super::*;
     use furiosa_opt_examples::switch_assertions::alignment::*;
 
-    /// Input mapping `m![A, B # 64]` has real padding (`B=32`, padded to `64`). Live cells get a
-    /// deterministic value; padding cells get a `0` filler. This test never asserts on `output`
-    /// (it only checks that the kernel runs to completion over a padded fetch/commit), so the
-    /// filler's exact value doesn't matter, unlike the tests further down that do compare `output`.
-    #[tokio::test]
-    async fn test_aligned_fetch_packet_i4() {
-        let mut ctx = Context::acquire();
-
-        let input = HostTensor::<i4, m![A, B # 64]>::from_vec(
-            (0..<m![A, B # 64]>::SIZE)
-                .map(|i| {
-                    if i % 64 < <B>::SIZE {
-                        let real = (i / 64) * <B>::SIZE + (i % 64);
-                        i4::from_i32((real % 16) as i32)
-                    } else {
-                        i4::from_i32(0)
-                    }
-                })
-                .collect::<Vec<_>>(),
-        )
-        .to_hbm::<m![1], m![A, B # 64]>(&mut ctx.pdma)
-        .await;
-
-        let mut output = unsafe { HbmTensor::<i4, m![1], m![A, B # 64]>::from_addr(0x1000) };
-
-        launch(aligned_fetch_packet_i4, (&mut *ctx, &input, &mut output)).await;
-    }
-
     #[tokio::test]
     async fn test_aligned_fetch_packet_i8() {
         let mut ctx = Context::acquire();

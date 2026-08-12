@@ -30,6 +30,12 @@ jobs:
         with:
           tool: mdbook-mermaid
 
+      # `make mdbook-build` runs lychee over the rendered HTML.
+      - name: Install lychee
+        uses: taiki-e/install-action@v2
+        with:
+          tool: lychee
+
       - name: Build Book
         run: |
           mdbook-mermaid install docs

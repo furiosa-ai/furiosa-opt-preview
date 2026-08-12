@@ -275,7 +275,7 @@ The within-`Slice` and within-`Time` ordering rules and the power-of-2 size/stri
 `TimeMajor` adds one extra constraint on top of these inherited rules.
 Recall that `PADDED_SIZE` decomposes as `slice_span × time_span`, where `slice_span` and `time_span` are the products of sizes of `R`'s sub-expressions in `Slice` and `Time` respectively.
 `TimeMajor` requires `PADDED_SIZE - R::SIZE ≤ slice_span`, meaning at most `slice_span` `R` positions may be over-padded.
-This constraint is essential, and placements that violate it are not supported by the VCG (see [`R` in `Time` and `Slice`, Over-padded](#r-in-time-and-slice-over-padded)).
+This constraint is essential, and placements that violate it are not supported by the VCG (see [`R` in `Time` and `Slice`](#r-in-time-and-slice)).
 
 ```rust,should_panic
 # #![feature(adt_const_params)]
@@ -809,7 +809,7 @@ At `t = 0`, `slice = 255`:
 | flit position | 0    | 1    | 2    | 3    | 4    | 5     | 6     | 7     |
 |---------------|------|------|------|------|------|-------|-------|-------|
 | `R` index     | 2040 | 2041 | 2042 | 2043 | 2044 | 2045  | 2046  | 2047  |
-| valid?        | yes  | yes  | yes  | yes  | yes  | [pad] | [pad] | [pad] |
+| valid?        | yes  | yes  | yes  | yes  | yes  | `[pad]` | `[pad]` | `[pad]` |
 
 Slices 0–254 legitimately need `valid_size = 8`, but slice 255 needs `valid_size = 5`.
 `fn valid_size(t)` can only return one value for a given `t`, so no single configuration works.

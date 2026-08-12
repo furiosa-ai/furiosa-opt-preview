@@ -148,7 +148,6 @@ The Switch Engine connects slices while most stages operate independently within
 | `TrfTensor` | On-chip SRAM | 8 KB per lane and eight lanes per slice | Contraction Engine register file. |
 | `VrfTensor` | On-chip SRAM | 8 KB per slice | Vector Engine operand register file. |
 
-The current public API does not expose `SpmTensor`.
 See [Mapping Tensors](./mapping-tensors/index.md) for the complete mapping model, [Moving Tensors](./moving-tensors/index.md) for memory movement, and [Computing Tensors](./computing-tensors/index.md) for the pipeline APIs.
 
 ## Elementwise Multiplication

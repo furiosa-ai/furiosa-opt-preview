@@ -17,7 +17,7 @@ pub fn runtime_panic(
     ctx: &mut Context,
     input: HbmTensorView<'_, i8, m![1], m![A, B]>,
 ) -> HbmTensor<i8, m![1], m![B, A]> {
-    let mut output = unsafe { HbmTensor::<i8, m![1], m![B, A]>::from_addr(0x3000) };
+    let mut output = HbmTensor::<i8, m![1], m![B, A]>::new();
     for b in 0..<m![B]>::SIZE {
         assert!(b < 1000, "runtime guard that must be rejected");
         let input_slice = input.tile::<m![B], 1, m![A, 1 # 32]>(b);

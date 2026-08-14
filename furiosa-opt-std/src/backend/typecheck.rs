@@ -34,6 +34,11 @@ impl Backend for Typecheck {
         PhantomStorage::from_vec(mapping, data)
     }
 
+    /// This backend has no values, so an HBM tensor is its shape and nothing else.
+    fn alloc_hbm<D: Scalar, Chip: M, Element: M>() -> HbmTensor<D, Chip, Element, Self> {
+        HbmTensor::from_parts(Tensor::empty(), None)
+    }
+
     fn zeroed<D: Scalar>(mapping: &MappingValue) -> Self::Storage<D> {
         PhantomStorage::zeroed(mapping)
     }
@@ -142,7 +147,7 @@ impl Backend for Typecheck {
     async fn to_hbm<D: MaterializableScalar, Element: M, Chip: M, Element2: M>(
         _host: &HostTensor<D, Element, Self>,
     ) -> HbmTensor<D, Chip, Element2, Self> {
-        HbmTensor::new(Tensor::empty(), 0)
+        Self::alloc_hbm()
     }
 
     async fn from_hbm<D: MaterializableScalar, Chip: M, Element: M, Element2: M>(

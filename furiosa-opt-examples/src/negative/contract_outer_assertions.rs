@@ -390,23 +390,6 @@ pub mod trf_size {
             .fetch::<m![A], m![B]>()
             .fetch_cast::<i8>()
             .collect::<m![A, B / 32], m![B % 32]>()
-            .to_trf_at(TrfAddress::Full);
-    }
-
-    #[device(chip = 1)]
-    pub fn invalid_to_trf_half(
-        ctx: &mut Context,
-        input: &HbmTensor<i8, Chip, m![A, B]>,
-        _output: &mut HbmTensor<i8, Chip, m![A, B]>,
-    ) {
-        let trf_dm = input.to_dm::<Cluster, Slice, m![A, B]>(&mut ctx.tdma);
-
-        let _trf: TrfTensor<i8, Chip, Cluster, Slice, m![A], m![B, C]> = ctx
-            .sub
-            .begin(trf_dm.view())
-            .fetch::<m![A], m![B]>()
-            .fetch_cast::<i8>()
-            .collect::<m![A, B / 32], m![B % 32]>()
-            .to_trf_at(TrfAddress::FirstHalf);
+            .to_trf();
     }
 }

@@ -111,7 +111,8 @@ The `Stash` source comes from `vector_stash()`, which snapshots the running tens
 The typical use is a residual or skip-connection like `max(f(x), x)`, where the original `x` must survive across intermediate stages.
 Call `vector_stash()` at any `Stashable` stage (`Branch`, `Logic`, `Fxp`, `Narrow`, `Fp`, `FpDiv`, `Clip`); the snapshot stays live until the Tensor Unit invocation ends and feeds any later binary or ternary call that takes `Stash`.
 The slot is single-use (a second `vector_stash()` is a compile-time error) and typed, so an `f32` stash only feeds `f32` ops: a conversion or reinterpret between the write and the read has to be undone first.
-The stash is also read-once: it feeds exactly one later op (reading it moves the slot past `Occupied`, so a second `Stash` read is a compile-time error). A value that must be read more than once is not a stash - put it in a read-many VRF (`VeRhs::vrf`).
+The stash is also read-once: it feeds exactly one later op (reading it moves the slot past `Occupied`, so a second `Stash` read is a compile-time error).
+A value that must be read more than once is not a stash - put it in a read-many VRF (`VeRhs::vrf`).
 The mapping follows the running tensor, so a stash taken before `Narrow` is still usable after `Widen`.
 Those seven stages are the seven chain steps that own a VRF write port, which is why `Widen` is not one of them: the operand register cannot be written from the widen's output at all.
 A value computed in the 4-way region therefore reaches the stash by widening first and stashing at a `Clip` op, which puts both the write and the read on the 8-way side.
@@ -179,7 +180,8 @@ Pair mode reinterprets [`BinaryArgMode`](#argument-modes) depending on the op: p
 
 Pair-mode constraints:
 - `stash()` and `filter()` are unavailable throughout pair mode (both paired and merged phases).
-- Before `_zip` (the paired phase), the chain cannot transition to the [inter-slice reducer](./inter-slice-reducer.md), since `vector_inter_slice_reduce()` is not available on per-group tensors. After `_zip` (the merged phase), the result is `Commitable` again and can call `vector_inter_slice_reduce()` if the current stage supports the transition.
+- Before `_zip` (the paired phase), the chain cannot transition to the [inter-slice reducer](./inter-slice-reducer.md), since `vector_inter_slice_reduce()` is not available on per-group tensors.
+  After `_zip` (the merged phase), the result is `Commitable` again and can call `vector_inter_slice_reduce()` if the current stage supports the transition.
 - ALU usage is shared across the two groups: an ALU used in either group counts as consumed for both.
 
 ## Stages
@@ -644,7 +646,7 @@ fn vrf_add<'l, const T: Tu>(
 # let mut ctx = Context::acquire();
 #
 # let i: CollectTensor<'_, _, i32, m![1], m![B], m![A / 8], m![N], m![A % 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
-# let v: VrfTensor<i32, m![1], m![B], m![A / 8], m![A % 8]> = unsafe { VrfTensor::from_addr(0) };
+# let v: VrfTensor<i32, m![1], m![B], m![A / 8], m![A % 8]> = VrfTensor::new();
 # let _o = vrf_add(i, &v);
 ```
 

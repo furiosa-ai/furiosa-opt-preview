@@ -1,8 +1,10 @@
 # Language Server
 
-Use this page when configuring IDE navigation, diagnostics, or readable mapping-expression types.
+The language-server proxy provides IDE navigation, diagnostics, and readable mapping-expression types.
+Editor rendering does not change type checking.
 
-This appendix details the installation and configuration of `furiosa-rust-analyzer-proxy`, a proxy for `rust-analyzer` that provides IDE support for mapping expressions.
+This tool reference details the installation and configuration of `furiosa-rust-analyzer-proxy`, a proxy for `rust-analyzer` that provides IDE support for mapping expressions.
+Quick Start introduces this tool alongside the other development tools; this section gives the installation and configuration steps.
 The proxy runs `rust-analyzer` underneath, forwards normal Rust language-server traffic to it, and rewrites editor-facing results so mapping types are displayed in `m![...]` notation.
 
 ## Installation

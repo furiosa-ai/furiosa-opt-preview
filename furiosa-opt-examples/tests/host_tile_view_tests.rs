@@ -75,21 +75,3 @@ async fn test_host_tile_offsets_may_be_runtime_values() {
         );
     }
 }
-
-#[test]
-fn test_host_tile_advances_the_view_address() {
-    const BASE: u64 = 0x1000;
-    let table = unsafe { HbmTensor::<bf16, Chip, m![C, H]>::from_addr(BASE) };
-    let row = table.view().tile::<m![C], 1, SmallRow>(3);
-
-    assert_eq!(row.address(), BASE + (3 * H::SIZE * std::mem::size_of::<bf16>()) as u64);
-}
-
-#[test]
-fn test_host_tile_advances_the_mut_view_address() {
-    const BASE: u64 = 0x2000;
-    let mut table = unsafe { HbmTensor::<bf16, Chip, m![C, H]>::from_addr(BASE) };
-    let row = table.view_mut().tile::<m![C], 1, SmallRowMut>(3);
-
-    assert_eq!(row.address(), BASE + (3 * H::SIZE * std::mem::size_of::<bf16>()) as u64);
-}

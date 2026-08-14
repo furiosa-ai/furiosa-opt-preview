@@ -3,6 +3,7 @@ use furiosa_mapping::*;
 
 use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::BufStorage;
+use crate::tensor::Tensor;
 use crate::tensor::memory::{HbmTensor, HostTensor};
 
 use crate::backend::Backend;
@@ -25,6 +26,12 @@ impl Backend for Emulation {
 
     fn from_buf<D: MaterializableScalar>(_mapping: &MappingValue, buf: Vec<u8>) -> Self::Storage<D> {
         BufStorage::from_buf(buf)
+    }
+
+    /// No device behind this backend, so the tensor is just its bytes; the address stays the
+    /// placeholder every host-side handle carries.
+    fn alloc_hbm<D: Scalar, Chip: M, Element: M>() -> HbmTensor<D, Chip, Element, Self> {
+        HbmTensor::from_parts(Tensor::zeroed(), None)
     }
 
     fn zeroed<D: Scalar>(mapping: &MappingValue) -> Self::Storage<D> {
@@ -140,7 +147,7 @@ impl Backend for Emulation {
     async fn to_hbm<D: MaterializableScalar, Element: M, Chip: M, Element2: M>(
         host: &HostTensor<D, Element, Self>,
     ) -> HbmTensor<D, Chip, Element2, Self> {
-        HbmTensor::new(host.inner().transpose(true), 0)
+        HbmTensor::from_parts(host.inner().transpose(true), None)
     }
 
     async fn from_hbm<D: MaterializableScalar, Chip: M, Element: M, Element2: M>(

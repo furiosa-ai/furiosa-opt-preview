@@ -26,6 +26,12 @@ impl Backend for Npu {
         BufStorage::from_buf(buf)
     }
 
+    /// Takes a device allocation and hands its ownership to the tensor, so the handle names real HBM
+    /// from the moment it exists and frees it on drop.
+    fn alloc_hbm<D: Scalar, Chip: M, Element: M>() -> HbmTensor<D, Chip, Element, Self> {
+        Kernel::alloc_hbm()
+    }
+
     fn zeroed<D: Scalar>(mapping: &MappingValue) -> Self::Storage<D> {
         BufStorage::zeroed(mapping.size())
     }

@@ -150,9 +150,11 @@ The stage runs separate machinery for the `Time` and `Packet` axes.
 
 The stage applies the [temporal accumulator](../contraction-engine/time-reducer.md#constraints) model with slot capacity 8 (so `InnerTime::SIZE ≤ 8`).
 
-For `reduce_time` above, `Time = m![R]` and `OutTime = m![1]`, so `R` is the outermost reduce dimension and `InnerTime = m![1]` (`InnerTime::SIZE = 1`). A single slot accumulates all `R` values into the output.
+For `reduce_time` above, `Time = m![R]` and `OutTime = m![1]`, so `R` is the outermost reduce dimension and `InnerTime = m![1]` (`InnerTime::SIZE = 1`).
+A single slot accumulates all `R` values into the output.
 
-If `InnerTime::SIZE` exceeds 8, the API rejects the call. For example:
+If `InnerTime::SIZE` exceeds 8, the API rejects the call.
+For example:
 
 ```rust
 # #![feature(adt_const_params)]
@@ -207,7 +209,8 @@ Two strategies handle padding exclusion.
   | `Min` | `i32::MAX` / `f32::INFINITY` |
 
   This strategy applies only when no non-invertible transformation precedes the reduce operation.
-  For example, with `exp(x) + exp(y) + ...` (sum of exponentials), no value `p` satisfies `exp(p) = 0` (the additive identity), so identity padding does not apply.
+  For example, with `exp(x) + exp(y) + ...` (sum of exponentials), no value `p` satisfies `exp(p) = 0` (the additive identity).
+  Identity padding does not apply.
 
 
 ## Performance

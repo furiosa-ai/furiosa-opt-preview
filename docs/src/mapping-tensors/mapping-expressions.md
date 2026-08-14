@@ -1,7 +1,8 @@
 # Mapping Expressions
 
 A mapping expression is a Rust type that encodes a mapping.
-Read a position's `Cell` first; then use the `Index` terms, padding kind, or out-of-bounds result to debug the access. This page defines the constructors and public contract that produce those results.
+Read a position's `Cell` first; then use the `Index` terms, padding kind, or out-of-bounds result to debug the access.
+This section defines the constructors and supported behavior that produce those results.
 
 ## Axis Sizes
 
@@ -16,7 +17,8 @@ axes![A = 8, B = 512];
 
 ## Position Results
 
-A mapping expression like `m![H, W]` maps each physical position to a `Cell`. See the result before reading its terms:
+A mapping expression like `m![H, W]` maps each physical position to a `Cell`.
+See the result before reading its terms:
 
 ```rust
 # extern crate furiosa_opt_std;
@@ -27,11 +29,12 @@ type E = m![A];
 assert_eq!(E::map(0), i![A: 0]);
 ```
 
-`Cell::Index` is a structural live result: it preserves the mapping terms, while `Index::finalize()` validates their scalar coordinates and can return an error for a modulo overshoot. Padding and out-of-bounds positions do not contain live terms.
+`Cell::Index` is a structural live result: it preserves the mapping terms, while `Index::finalize()` validates their scalar coordinates and can return an error for a modulo overshoot.
+Padding and out-of-bounds positions do not contain live terms.
 `Cell::Index(Index::new())` is a valid live result with no axis terms; it is distinct from `Cell::Padding` and `Cell::OutOfBounds`, so an empty `Index` never stands for a non-live position.
 The `i!` macro combines assignments in the order written, which is the major-to-minor order for a composed mapping; because `Cell::combine` is non-commutative for padding, reorder assignments only when that order is intended.
 
-## `M` Contract
+## `M` Constructor Rules
 
 Every mapping expression implements the `M` trait, which provides the buffer size and position mapping:
 
@@ -62,7 +65,10 @@ macro_rules! i {
 The simplest concrete type built on the `M` trait is `HostTensor<D, E>`: a host memory buffer of element type `D` whose representation is fully determined by mapping `E`.
 `E` determines both the buffer size (`E::SIZE`) and the correspondence from buffer positions to cells (`E::map`).
 `HostTensor<bf16, m![A, B]>` contains 4,096 elements of `bf16` data.
-For a host tensor, each `Cell::Index(index)` returned by `E::map` identifies the structural `Index` stored at that physical position. Call `Index::finalize()` to validate its scalar coordinates before treating it as a tensor index; an overshoot can fail there. Convert `Cell::OutOfBounds` with `CellExt::finalize(PaddingKind::Top)` for reads or `CellExt::finalize(PaddingKind::Bottom)` for writes. The formal definition of *holds* appears in [Tensor Semantics](./tensor-semantics.md).
+For a host tensor, each `Cell::Index(index)` returned by `E::map` identifies the structural `Index` stored at that physical position.
+Call `Index::finalize()` to validate its scalar coordinates before treating it as a tensor index; an overshoot can fail there.
+Convert `Cell::OutOfBounds` with `CellExt::finalize(PaddingKind::Top)` for reads or `CellExt::finalize(PaddingKind::Bottom)` for writes.
+The formal definition of *holds* appears in [Tensor Semantics](./tensor-semantics.md).
 
 Device tensors such as `HbmTensor` and `DmTensor` have more complex representations spanning multiple mapping expressions; see [Spatial and Temporal Dimensions](./spatial-temporal-dimensions.md) for details.
 
@@ -203,7 +209,8 @@ Three kinds are tracked.
 
 - `m![A # m]` (or `m![A #{*} m]`) is top padding to size `m`.
   These positions are accessible but hold arbitrary values.
-  Raw DM tensors carry this. `#` is the shorthand; `#{*}` spells the kind out explicitly.
+  Raw DM tensors carry this.
+`#` is the shorthand; `#{*}` spells the kind out explicitly.
 - `m![A #{0} m]` is zero-filled padding to size `m`.
   These positions are accessible and known to hold zero.
   The mapping records that value property; the expression itself does not perform the fill.
@@ -215,7 +222,9 @@ Three kinds are tracked.
 The Rust type level mirrors this via a const generic of `PaddingKind` on `Padding<L, SIZE, KIND>`.
 `Padding<L, N>` is `KIND = PaddingKind::Top`, `Padding<L, N, { PaddingKind::Zero }>` is the zero-filled variant, and `Padding<L, N, { PaddingKind::Bottom }>` is inaccessible.
 
-`Cell::Padding(kind)` reports a position inside the padded extent but outside the inner mapping. The `kind` is `Top`, `Zero`, or `Bottom`; positions beyond the padded extent remain `Cell::OutOfBounds`. The complete `Cell` result definition appears in [Position Results](#position-results).
+`Cell::Padding(kind)` reports a position inside the padded extent but outside the inner mapping.
+The `kind` is `Top`, `Zero`, or `Bottom`; positions beyond the padded extent remain `Cell::OutOfBounds`.
+The complete `Cell` result definition appears in [Position Results](#position-results).
 
 ### Resize
 
@@ -249,7 +258,8 @@ fn test_resize() {
 ### Tiling
 
 Tiling is implemented through indexed views: `tile` validates a mapping split, then creates a metadata view without copying data.
-The generic view API is `TensorView::tile<I, E2, LEN>(start)`. `I` is the mapping used to locate the tile, `E2` is the requested view mapping, `LEN` is the number of `I` cells in the tile, and `start` is the logical starting coordinate along `I`.
+The generic view API is `TensorView::tile<I, E2, LEN>(start)`.
+`I` is the mapping used to locate the tile, `E2` is the requested view mapping, `LEN` is the number of `I` cells in the tile, and `start` is the logical starting coordinate along `I`.
 
 ```rust
 # extern crate furiosa_opt_std;
@@ -257,7 +267,7 @@ The generic view API is `TensorView::tile<I, E2, LEN>(start)`. `I` is the mappin
 #
 # axes![A = 8, B = 512];
 #
-let tensor = unsafe { HbmTensor::<bf16, m![1], m![A, B]>::from_addr(0) };
+let tensor = HbmTensor::<bf16, m![1], m![A, B]>::new();
 let view = tensor.view(); // HbmTensorView::<'_, bf16, m![1], m![A, B]>
 let tile01 = view.tile::<m![B], 2, m![A, B = 2 # 512]>(0); // HbmTensorView::<'_, bf16, m![1], m![A, B = 2 # 512]>
 let tile23 = view.tile::<m![B], 2, m![A, B = 2 # 512]>(2); // HbmTensorView::<'_, bf16, m![1], m![A, B = 2 # 512]>
@@ -265,9 +275,11 @@ let tile23 = view.tile::<m![B], 2, m![A, B = 2 # 512]>(2); // HbmTensorView::<'_
 
 The HBM example uses `I = m![B]`, `LEN = 2`, and `E2 = m![A, B = 2 # 512]`.
 The `B = 2 # 512` mapping gives the view two live `B` positions inside a 512-cell physical extent; without that footprint, the split does not validate against the source mapping.
-`start = 0` and `start = 2` are logical `B` coordinates, so these views cover ranges `0..2` and `2..4`. They are starts, not a separate tile-number API.
+`start = 0` and `start = 2` are logical `B` coordinates, so these views cover ranges `0..2` and `2..4`.
+They are starts, not a separate tile-number API.
 
-Read views fill cells outside the tile with `PaddingKind::Top`; mutable views require `PaddingKind::Bottom` there so writes cannot escape the tile. HBM and DM expose tier-specific tile wrappers, while TRF, VRF, and DPE use the generic view; `HostTensor` has no view/tile API.
+Read views fill cells outside the tile with `PaddingKind::Top`; mutable views require `PaddingKind::Bottom` there so writes cannot escape the tile.
+HBM and DM expose tier-specific tile wrappers, while TRF, VRF, and DPE use the generic view; `HostTensor` has no view/tile API.
 
 ### Stride and Modulo
 
@@ -382,7 +394,7 @@ The following example tiles by block using `m![B / 32]` and creates overlapping 
 # extern crate furiosa_opt_std;
 # use furiosa_opt_std::prelude::*;
 # axes![A = 8, B = 512];
-let tensor = unsafe { HbmTensor::<bf16, m![1], m![A, B]>::from_addr(0) };
+let tensor = HbmTensor::<bf16, m![1], m![A, B]>::new();
 for i in 0..15 {
     let tile = tensor.view().tile::<m![B / 32], 2, m![A, B / 32 = 2 # 16, B % 32]>(i);
 }
@@ -424,13 +436,17 @@ This escape syntax breaks down complex mappings into named, reusable components.
 
 ## Equivalent Mappings
 
-Different constructor combinations can produce the same position behavior. This behavioral relation is distinct from structural equality of Rust mapping values. Mappings `E1` and `E2` are *equivalent* when:
+Different constructor combinations can produce the same position behavior.
+This behavioral relation is distinct from structural equality of Rust mapping values.
+Mappings `E1` and `E2` are *equivalent* when:
 - `E1::SIZE == E2::SIZE`, and
 - For every `i`, `E1::map(i) == E2::map(i)`.
 
-The equivalence relation is reflexive, symmetric, and transitive. The identities below describe useful behavior; they do not assert that normalization gives a unique structural representative for every equivalent input.
+The equivalence relation is reflexive, symmetric, and transitive.
+The identities below describe useful behavior; they do not assert that normalization gives a unique structural representative for every equivalent input.
 
-Normalization has a narrower tested contract: applying it twice is idempotent; generated mapping corpora preserve their tested position and padding behavior; and canonical mappings round-trip through the mapping representation. These tests do not prove equivalence, guarantee a unique representation, or establish universal semantic preservation.
+Normalization has a narrower tested behavior: applying it twice is idempotent; generated mapping corpora preserve their tested position and padding behavior; and normalized mappings round-trip through the mapping representation.
+These tests do not prove equivalence, guarantee a unique representation, or establish universal semantic preservation.
 The following identities capture common equivalences:
 
 - **Identity of pairs**: for every `E`, `E` is equivalent both to `m![{ E }, 1]` and `m![1, { E }]`.

@@ -3,7 +3,10 @@
 The Commit Adapter applies element-wise transformations to the packet stream before the [Commit Engine](../moving-tensors/commit-engine.md) writes it to DM.
 It mirrors the [Fetch Adapter](./fetch-adapter.md) on the output side of the Tensor Unit.
 
-The adapter's stages chain as dedicated `.commit_xxx(...)` methods on the upstream tensor, and the chain always ends in `.commit(...)` for the actual DM write. [Trimming](#trimming) is the mandatory first stage: `.commit()` / `.commit_view()` are reachable only after `.commit_trim(...)`, so every commit is trimmed first (it is how flit padding is dropped). The other public stage is optional type casting, and main and sub contexts then diverge. Generate Mode is a separate sub-context path used internally by `memset` for immediate fills; it does not chain off a `TuTensor`.
+The adapter's stages chain as dedicated `.commit_xxx(...)` methods on the upstream tensor, and the chain always ends in `.commit(...)` for the actual DM write.
+[Trimming](#trimming) is the mandatory first stage: `.commit()` / `.commit_view()` are reachable only after `.commit_trim(...)`, so every commit is trimmed first (it is how flit padding is dropped).
+The other public stage is optional type casting, and main and sub contexts then diverge.
+Generate Mode is a separate sub-context path used internally by `memset` for immediate fills; it does not chain off a `TuTensor`.
 
 - Main pipeline: [Trimming](#trimming) → [Type Casting](#type-casting) (optionally fusing ReLU) → `.commit()`.
 - Sub bypass: Generate Mode writes a constant directly for `memset`, without consuming an upstream Tensor Unit stream.
@@ -32,7 +35,8 @@ It is mandatory because `.commit()` is reachable only after `.commit_trim(...)`,
 {{#include ../../../furiosa-opt-std/src/engine/commit_adapter.rs:commit_trim_impl}}
 ```
 
-`.commit_trim::<OutPacket>()` declares the post-trim packet, and the chained `.commit(...)` then performs the DM write on the trimmed stream. The two are fully separate.
+`.commit_trim::<OutPacket>()` declares the post-trim packet, and the chained `.commit(...)` then performs the DM write on the trimmed stream.
+The two are fully separate.
 
 ```rust,ignore
 # #![feature(adt_const_params)]

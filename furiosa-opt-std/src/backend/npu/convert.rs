@@ -3,11 +3,16 @@ use furiosa_mapping::M;
 use super::ffi::{furiosa_npu_buffer_from, furiosa_npu_buffer_offset, rt};
 use super::{Buffer, Kernel};
 use crate::scalar::Scalar;
+use crate::tensor::Tensor;
 use crate::tensor::memory::{HbmTensor, HbmTensorView, HbmTensorViewMut};
 
 /// Registers `[addr, addr + len)` as a device buffer. The caller states `len` because a tensor and a
 /// view of it measure it differently, and the runtime rejects a span past the allocation.
-fn to_buffer(addr: u64, len: usize) -> Buffer {
+fn to_buffer(addr: Option<u64>, len: usize) -> Buffer {
+    // An unplaced handle belongs inside a kernel, where the compiled program owns the placement.
+    // Reaching this conversion means one was passed to `launch`, where only a real allocation (a host
+    // `to_hbm` upload, or a previous launch's result) can be registered.
+    let addr = addr.expect("a kernel argument must name a device allocation, not an unplaced handle");
     Buffer::from_raw(unsafe { furiosa_npu_buffer_from(rt(), addr, len) })
 }
 
@@ -32,7 +37,7 @@ impl<D: Scalar, Chip: M, Element: M> From<&HbmTensorViewMut<'_, D, Chip, Element
 impl<D: Scalar, Chip: M, Element: M> From<Buffer> for HbmTensor<D, Chip, Element> {
     fn from(buf: Buffer) -> Self {
         let addr = unsafe { furiosa_npu_buffer_offset(buf.as_ptr()) };
-        unsafe { Self::from_addr(addr) }.owns(buf)
+        Self::from_parts(Tensor::zeroed(), Some(addr)).owns(buf)
     }
 }
 

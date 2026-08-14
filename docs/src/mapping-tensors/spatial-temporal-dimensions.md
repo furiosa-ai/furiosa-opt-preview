@@ -3,7 +3,8 @@
 `HostTensor<D, E>` uses a single mapping to fully capture its physical representation.
 Device tensors split their mapping across multiple dedicated dimensions:
 
-- **Spatial dimensions**: `Chip`, `Cluster`, and `Slice` distribute data across the hardware hierarchy. In stream tensors, `Packet` additionally sizes parallel delivery within each temporal iteration.
+- **Spatial dimensions**: `Chip`, `Cluster`, and `Slice` distribute data across the hardware hierarchy.
+  In stream tensors, `Packet` additionally sizes parallel delivery within each temporal iteration.
 - **Temporal dimension**: `Time` sequences the delivery iterations in stream tensors.
 
 ## Spatial Dimensions
@@ -11,7 +12,8 @@ Device tensors split their mapping across multiple dedicated dimensions:
 Each spatial level in the hardware hierarchy gets its own type parameter in the tensor type, enabling spatial parallelism.
 All units at each level are assumed to share the same mapping.
 
-The following non-executable notation shows how mapping parameters name physical dimensions; it is neither a public type declaration nor a constructor signature. The public tensor APIs and their views are documented in the storage modules.
+The notation below names physical dimensions but is not a public type or constructor.
+The storage modules document the public tensor APIs and views.
 
 ```rust,ignore
 # extern crate furiosa_opt_std;
@@ -50,7 +52,10 @@ SRAM tensor types add `Cluster` and `Slice` dimensions for finer-grained paralle
 `TrfTensor` additionally has a `Lane` dimension that distributes TRF data across the 8 lanes per slice.
 See [Contraction Engine](../computing-tensors/contraction-engine/index.md) for details.
 
-HBM tensors carry a concrete address. DM, TRF, and VRF tensors may have an address assigned by their backend, while host tensors are host-side values rather than addressed device allocations. The mapping parameters still determine each tensor's physical representation; address ownership is a separate storage concern.
+HBM tensors carry concrete addresses.
+DM, TRF, and VRF tensors may receive addresses from the backend.
+Host tensors remain host-side values.
+Mapping parameters determine physical representation; storage owns addresses separately.
 
 ### Constraints
 
@@ -143,9 +148,9 @@ The `Time` dimension (`m![N, H, W]`) has size `4 * 32 * 32 = 4096`, which means 
 For each temporal iteration, the `Packet` dimension `m![C % 2]` delivers 2 channels to each slice.
 Since 32 slices operate in parallel, each temporal iteration processes `32 * 2 = 64` channels total.
 
-## NCHW Representation Path
+## NCHW Representation Trace
 
-The NCHW example makes the representation changes traceable. Start with an HBM representation that distributes batches across four chips:
+The NCHW example makes the representation changes traceable from an HBM representation that distributes batches across four chips:
 
 ```rust
 # extern crate furiosa_opt_std;
@@ -171,4 +176,6 @@ Trace `Index (N=1, C=17, H=3, W=5)`:
 - DM selects slice `17 / 2 = 8`; the element mapping selects `N=1, H=3, W=5` and packet position `17 % 2 = 1`.
 - The stream selects `Time = 1 * 32 * 32 + 3 * 32 + 5 = 1,125` and `Packet = 1` on slice `8`.
 
-The value therefore changes physical coordinates at each stage while its `Index` remains `(1, 17, 3, 5)`. This is the concrete mapping-to-representation path; the formal definition of what it means for a tensor to hold values is in [Tensor Semantics](./tensor-semantics.md).
+The value changes physical coordinates at each stage, but its `Index` remains `(1, 17, 3, 5)`.
+This traces the mapping-to-representation path.
+[Tensor Semantics](./tensor-semantics.md) defines what it means for a tensor to hold values.

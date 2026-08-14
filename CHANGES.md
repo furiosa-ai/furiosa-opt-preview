@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Removed
+
+- Every API that took a raw address is gone: `HbmTensor::from_addr`, `TrfTensor::from_addr`,
+  `VrfTensor::from_addr`, the `TrfAddress` enum, and the `*_at` variants (`to_dm_at`,
+  `to_dm_pcopy_at`, `dma_gather_scaled_at`, `to_trf_at`, `to_vrf_at`, `commit_at`). An address was
+  never the caller's to pick: the compiler places a kernel's own tensors, the scheduler assigns the
+  register-file regions, and the runtime allocates what the host uploads. Write the address-free
+  call instead, and where a device function needs an output, `HbmTensor::new()` (the HBM peer of
+  `DmTensor::new()`) takes an allocation from whichever of the two is in charge.
+
 ### Changed
 
 - `furiosa-opt-examples` now holds only kernels that compile end to end, plus a `negative` module of

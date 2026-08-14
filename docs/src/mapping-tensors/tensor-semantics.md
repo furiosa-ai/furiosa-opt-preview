@@ -30,7 +30,8 @@ The mapping `S, $(e1:n1, ..., ed:nd) |- si ~ ti` is valid if there exist `si1...
 Linear combinations can encode outer sum: `e1 * e2` is equivalent to `$(e1 : size_S(e2), e2 : 1)`.
 Outer sum is preferred when axis reordering matters because changing `e1 * e2` to `e2 * e1` does not require manual stride updates.
 
-Sliding operations access overlapping data blocks. Consider a buffer of 9 elements representing a tensor with shape \\(\\{N=5, F=3\\}\\), where each row is a 3-element slice that slides one element at a time.
+Sliding operations access overlapping data blocks.
+Consider a buffer of 9 elements representing a tensor with shape \\(\\{N=5, F=3\\}\\), where each row is a 3-element slice that slides one element at a time.
 The tensor element at \\(N, F\\) maps to buffer index \\(N + 2F\\):
 
 $$
@@ -45,7 +46,8 @@ N=4 & 4 & 6 & 8 \\\\
 \\end{array}
 $$
 
-In this sliding pattern, a single space index can map to multiple tensor indices. For example, space index `4` maps to `{4_N}`, `{2_N, 1_F}`, and `{2_F}` simultaneously, illustrating the non-one-to-one nature of `(S, e).maps(si, ti)`.
+In this sliding pattern, a single space index can map to multiple tensor indices.
+For example, space index `4` maps to `{4_N}`, `{2_N, 1_F}`, and `{2_F}` simultaneously, illustrating the non-one-to-one nature of `(S, e).maps(si, ti)`.
 The linear combination uses stride `1` for `N` and stride `2` for `F`, yielding `1 + (5-1)*1 + (3-1)*2 = 9`.
 
 ## Function Specification

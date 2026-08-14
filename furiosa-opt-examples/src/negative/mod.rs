@@ -30,5 +30,6 @@ pub mod memset;
 pub mod runtime_if_scalar;
 pub mod runtime_panic;
 pub mod scalar_cast_diag;
+pub mod scatter_gather;
 pub mod switch_assertions;
 pub mod vector_engine;

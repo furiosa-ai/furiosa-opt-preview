@@ -3,7 +3,6 @@
 use rand::Rng;
 use rand::distr::StandardUniform;
 use std::any::Any;
-use std::fmt::{self, Display, Formatter};
 use std::marker::PhantomData;
 
 use furiosa_mapping::*;
@@ -99,40 +98,6 @@ fn check_dma_address_stride<D: Scalar>(src: &Mapping, dst: &Mapping, min_align: 
                  src mapping = {src:?}\n  \
                  dst mapping = {dst:?}",
             );
-        }
-    }
-}
-
-/// Address in the tensor register file.
-#[primitive(TrfAddress)]
-#[derive(Copy, Clone, Debug)]
-pub enum TrfAddress {
-    /// Address in the first half of TRF.
-    FirstHalf,
-    /// Address in the second half of TRF.
-    SecondHalf,
-    /// Address in the full TRF.
-    Full,
-}
-
-impl TrfAddress {
-    /// Total TRF capacity in bytes for this address mode.
-    /// - `Full`: 65,536 bytes (8 lanes × 2 banks × 128 rows × 32 bytes)
-    /// - `FirstHalf` / `SecondHalf`: 32,768 bytes (half of Full)
-    pub fn capacity(&self) -> usize {
-        match self {
-            Self::Full => 65_536,
-            Self::FirstHalf | Self::SecondHalf => 32_768,
-        }
-    }
-}
-
-impl Display for TrfAddress {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FirstHalf => write!(f, "TrfAddress::FirstHalf"),
-            Self::SecondHalf => write!(f, "TrfAddress::SecondHalf"),
-            Self::Full => write!(f, "TrfAddress::Full"),
         }
     }
 }
@@ -261,12 +226,11 @@ impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> 
 #[primitive(HbmTensor)]
 pub struct HbmTensor<D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend> {
     inner: Tensor<D, Pair<Chip, Element>, B>,
-    // An HBM tensor always carries a concrete address (every producer supplies one and
-    // `to_host` reads through it), so this is `Address`, not `Option<Address>`, unlike the
-    // on-chip DM/VRF/TRF tensors.
-    address: Address,
+    // `None` until something places it: a device function's own tensors are placed by the compiled
+    // program, so only a host-side allocation (`Npu`'s `alloc_hbm` / `Kernel::write`) fills this in.
+    address: Option<Address>,
     // Owns a backend resource (e.g. the Npu device allocation) so it is freed when this tensor
-    // drops, not before `launch` reads it. `None` for compiler-managed / `from_addr` tensors.
+    // drops, not before `launch` reads it. `None` for a tensor the compiled program places.
     owner: Option<Box<dyn Any + Send + Sync>>,
 }
 
@@ -292,12 +256,25 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     /// Logical shape (mapping) of this tensor.
     pub type Mapping = m![{ Chip }, { Element }];
 
-    pub(crate) fn new(inner: Tensor<D, Self::Mapping, B>, address: Address) -> Self {
+    pub(crate) fn from_parts(inner: Tensor<D, Self::Mapping, B>, address: Option<Address>) -> Self {
         Self {
             inner,
             address,
             owner: None,
         }
+    }
+
+    /// A fresh HBM tensor, for a device function's output.
+    ///
+    /// The backend allocates it: `Npu` takes a device allocation, which the handle owns and frees on
+    /// drop, and `Emulation` holds the bytes on the host. A kernel compiled for `Npu` never runs this,
+    /// because the compiled program places its own buffers.
+    // `new()` builds an uninitialized handle, so a `Default` impl (which would look zero-cost and
+    // safe) is deliberately not provided, matching `DmTensor::new`.
+    #[allow(clippy::new_without_default)]
+    #[primitive(HbmTensor::new)]
+    pub fn new() -> Self {
+        B::alloc_hbm::<D, Chip, Element>()
     }
 
     pub(crate) fn owns(mut self, owner: impl Any + Send + Sync) -> Self {
@@ -309,8 +286,9 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
         &self.inner
     }
 
-    /// Returns the HBM address of this tensor.
-    pub fn address(&self) -> Address {
+    /// Where this tensor is placed, or `None` while the compiled program owns its placement.
+    /// Crate-internal: the address is the backend's channel to the device, not a caller's value.
+    pub(crate) fn address(&self) -> Option<Address> {
         self.address
     }
 
@@ -358,19 +336,6 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     }
 }
 
-impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> {
-    /// Creates an HBM tensor handle at the given raw address.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the underlying data layout is compatible
-    /// with the tensor mapping.
-    #[primitive(HbmTensor::from_addr)]
-    pub unsafe fn from_addr(address: Address) -> Self {
-        Self::new(Tensor::zeroed(), address)
-    }
-}
-
 impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> {
     /// Creates an immutable view of the tensor.
     #[primitive(HbmTensor::view)]
@@ -397,7 +362,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
         &self,
         _dma: &mut DmaContext<{ DMA }>,
     ) -> HbmTensor<D, Chip, Element2, B> {
-        HbmTensor::new(self.inner.transpose(true), 0)
+        HbmTensor::from_parts(self.inner.transpose(true), None)
     }
 
     /// Gather DRAM rows into SRAM at positions given by index tensor.
@@ -417,19 +382,6 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
         index: &HbmTensor<i32, Chip, Element3, B>,
     ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
         let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::from_parts(Tensor::zeroed(), None);
-        self.inner.gather::<_, _>(&mut output.inner, &index.inner, true);
-        output
-    }
-
-    /// Gather DRAM rows into SRAM at `address`. See [`Self::dma_gather_scaled`].
-    #[primitive(HbmTensor::dma_gather_scaled_at)]
-    pub fn dma_gather_scaled_at<Cluster2: M, Slice2: M, Element2: M, Element3: M>(
-        &self,
-        index: &HbmTensor<i32, Chip, Element3, B>,
-        address: Address,
-    ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
-        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> =
-            DmTensor::from_parts(Tensor::zeroed(), Some(address));
         self.inner.gather::<_, _>(&mut output.inner, &index.inner, true);
         output
     }
@@ -468,23 +420,6 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
             Element2,
         >(DMA_SRAM_WRITE_WIDTH);
         DmTensor::from_parts(self.inner.transpose(true), None)
-    }
-
-    /// Converts to data memory tensor at `address`.
-    #[primitive(HbmTensor::to_dm_at)]
-    pub fn to_dm_at<Cluster: M, Slice: M, Element2: M>(
-        &self,
-        _dma: &mut DmaContext<{ Dma::Tensor }>,
-        address: Address,
-    ) -> DmTensor<D, Chip, Cluster, Slice, Element2, B> {
-        assert_dma_layout::<
-            D,
-            m![{ Chip }, { Element }],
-            Element,
-            m![{ Chip }, { Cluster }, { Slice }, { Element2 }],
-            Element2,
-        >(DMA_SRAM_WRITE_WIDTH);
-        DmTensor::from_parts(self.inner.transpose(true), Some(address))
     }
 
     /// Reshapes the tensor to a different mapping at the same HBM address, consuming `self`.
@@ -539,7 +474,7 @@ pub struct HbmTensorView<'l, D: Scalar, Chip: M, Element: M, B: Backend = Curren
     // The BASE tensor's concrete address (always present, so `Address`, not `Option`). A tile is
     // recorded in `inner`'s offset, not here; `address()` adds it back. Keeping the base means
     // repeated tiles cannot double-count their offsets.
-    address: Address,
+    address: Option<Address>,
 }
 
 impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, Element, B> {
@@ -548,8 +483,9 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
 
     /// The HBM address this view's data starts at, the base tensor's address advanced by the window
     /// [`Self::tile`] selected. It is the whole of what a view tells the Npu backend.
-    pub fn address(&self) -> Address {
-        self.address + D::size_in_bytes_from_length(self.inner.window_base()) as Address
+    pub(crate) fn address(&self) -> Option<Address> {
+        self.address
+            .map(|base| base + D::size_in_bytes_from_length(self.inner.window_base()) as Address)
     }
 
     /// Bytes from [`Self::address`] to the end of the base tensor, the most a device buffer built
@@ -711,23 +647,6 @@ impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensorView
         DmTensor::from_parts(self.inner.read().transpose(true), None)
     }
 
-    /// Converts to data memory tensor at `address`.
-    #[primitive(HbmTensorView::to_dm_at)]
-    pub fn to_dm_at<Cluster: M, Slice: M, Element2: M>(
-        self,
-        _dma: &mut DmaContext<{ Dma::Tensor }>,
-        address: Address,
-    ) -> DmTensor<D, Chip, Cluster, Slice, Element2, B> {
-        assert_dma_layout::<
-            D,
-            m![{ Chip }, { Element }],
-            Element,
-            m![{ Chip }, { Cluster }, { Slice }, { Element2 }],
-            Element2,
-        >(DMA_SRAM_WRITE_WIDTH);
-        DmTensor::from_parts(self.inner.read().transpose(true), Some(address))
-    }
-
     /// Perform chip shuffle using DMA commands (HBM <-> HBM transfer across chips).
     /// This operation redistributes data across chips according to the shuffle pattern.
     ///
@@ -740,7 +659,7 @@ impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensorView
         dma: &mut DmaContext<{ DMA }>,
         shuffle_pattern: &[usize; CHIP_DIM],
     ) -> HbmTensor<D, Chip, Element, B> {
-        let mut shuffled: HbmTensor<D, Chip, Element, B> = unsafe { HbmTensor::from_addr(0) };
+        let mut shuffled: HbmTensor<D, Chip, Element, B> = HbmTensor::new();
 
         for (target_chip_idx, source_chip_idx) in shuffle_pattern.iter().enumerate() {
             self.chip_tile::<Chip, 1, Padding<Identity, CHIP_DIM>>(*source_chip_idx)
@@ -762,13 +681,14 @@ impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensorView
 pub struct HbmTensorViewMut<'l, D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend> {
     inner: TensorViewMut<'l, D, Pair<Chip, Element>, B>,
     // The BASE tensor's address; see [`HbmTensorView`]'s field of the same name.
-    address: Address,
+    address: Option<Address>,
 }
 
 impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chip, Element, B> {
     /// Returns the HBM address where this view's data starts; see [`HbmTensorView::address`].
-    pub fn address(&self) -> Address {
-        self.address + D::size_in_bytes_from_length(self.inner.window_base()) as Address
+    pub(crate) fn address(&self) -> Option<Address> {
+        self.address
+            .map(|base| base + D::size_in_bytes_from_length(self.inner.window_base()) as Address)
     }
 
     /// See [`HbmTensorView::addressable_len`].
@@ -905,11 +825,6 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     pub fn new() -> Self {
         Self::from_parts(Tensor::zeroed(), None)
     }
-
-    /// Returns the SRAM (DM) address of this tensor, if one was assigned.
-    pub fn address(&self) -> Option<Address> {
-        self.address
-    }
 }
 
 impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<D, Chip, Cluster, Slice, Element, B> {
@@ -933,7 +848,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     /// caller.
     #[primitive(DmTensor::to_hbm)]
     pub fn to_hbm<Element2: M>(&self, _dma: &mut DmaContext<{ Dma::Tensor }>) -> HbmTensor<D, Chip, Element2, B> {
-        HbmTensor::new(self.inner.transpose(true), 0)
+        HbmTensor::from_parts(self.inner.transpose(true), None)
     }
 
     /// Scatter SRAM values to DRAM at positions given by index tensor.
@@ -1011,24 +926,6 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
         DmTensor::from_parts(self.inner.transpose(true), None)
     }
 
-    /// Converts to data memory tensor at `address`. See [`Self::to_dm`].
-    #[primitive(DmTensor::to_dm_at)]
-    pub fn to_dm_at<Slice2: M, Element2: M>(
-        &self,
-        _dma: &mut DmaContext<{ Dma::Tensor }>,
-        address: Address,
-    ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
-        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
-        assert_dma_layout::<
-            D,
-            m![{ Cluster }, { Slice }, { Element }],
-            Element,
-            m![{ Cluster }, { Slice2 }, { Element2 }],
-            Element2,
-        >(DMA_SRAM_WRITE_WIDTH);
-        DmTensor::from_parts(self.inner.transpose(true), Some(address))
-    }
-
     /// Copies into a fresh DM tensor via parallel copy. Like [`Self::to_dm`], the `Slice` size is
     /// preserved (`Slice::SIZE == Slice2::SIZE`).
     #[primitive(DmTensor::to_dm_pcopy)]
@@ -1038,17 +935,6 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
         DmTensor::from_parts(self.inner.transpose(true), None)
-    }
-
-    /// Copies into a fresh DM tensor at `address` via parallel copy. See [`Self::to_dm_pcopy`].
-    #[primitive(DmTensor::to_dm_pcopy_at)]
-    pub fn to_dm_pcopy_at<Slice2: M, Element2: M>(
-        &self,
-        _sub: &mut TuContext<{ Tu::Sub }>,
-        address: Address,
-    ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
-        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
-        DmTensor::from_parts(self.inner.transpose(true), Some(address))
     }
 
     /// Reshapes the tensor to a different mapping at the same address, consuming `self`. Delegates to
@@ -1462,8 +1348,6 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
 #[derive(Debug)]
 pub struct TrfTensor<D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Element: M, B: Backend = CurrentBackend> {
     pub(crate) inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Pair<Lane, Element>>>>, B>,
-    #[expect(dead_code)]
-    address: Option<TrfAddress>,
     _marker: PhantomData<(D, Chip, Cluster, Slice, Lane, Element)>,
 }
 // ANCHOR_END: trf_tensor_def
@@ -1474,27 +1358,25 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Element: M, B: Backend>
     /// Logical shape (mapping) of this tensor.
     pub type Mapping = m![{ Chip }, { Cluster }, { Slice }, { Lane }, { Element }];
 
-    pub(crate) fn new(inner: Tensor<D, Self::Mapping, B>, address: Option<TrfAddress>) -> Self {
+    pub(crate) fn from_parts(inner: Tensor<D, Self::Mapping, B>) -> Self {
         Self {
             inner,
-            address,
             _marker: PhantomData,
         }
+    }
+
+    /// A fresh TRF tensor. Where in the register file it lands is the compiler's to decide, so
+    /// the handle carries no address of its own.
+    // `new()` builds an uninitialized handle, so no `Default`, matching `DmTensor::new`.
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self::from_parts(Tensor::zeroed())
     }
 }
 
 impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Element: M, B: Backend>
     TrfTensor<D, Chip, Cluster, Slice, Lane, Element, B>
 {
-    /// Creates a TRF tensor handle at the given raw address.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the underlying data layout is compatible
-    /// with the tensor mapping.
-    pub unsafe fn from_addr(address: TrfAddress) -> Self {
-        Self::new(Tensor::zeroed(), Some(address))
-    }
 }
 
 impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Element: M, B: Backend>
@@ -1517,8 +1399,6 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Element: M, B: Backend>
 #[derive(Debug, Clone)]
 pub struct VrfTensor<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend = CurrentBackend> {
     pub(crate) inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Element>>>, B>,
-    #[expect(dead_code)]
-    address: Option<Address>,
     _marker: PhantomData<(D, Chip, Cluster, Slice, Element)>,
 }
 // ANCHOR_END: vrf_tensor_def
@@ -1529,27 +1409,25 @@ impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     /// Logical shape (mapping) of this tensor.
     pub type Mapping = m![{ Chip }, { Cluster }, { Slice }, { Element }];
 
-    pub(crate) fn new(inner: Tensor<D, Self::Mapping, B>, address: Option<Address>) -> Self {
+    pub(crate) fn from_parts(inner: Tensor<D, Self::Mapping, B>) -> Self {
         Self {
             inner,
-            address,
             _marker: PhantomData,
         }
+    }
+
+    /// A fresh VRF tensor. Where in the register file it lands is the compiler's to decide, so
+    /// the handle carries no address of its own.
+    // `new()` builds an uninitialized handle, so no `Default`, matching `DmTensor::new`.
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self::from_parts(Tensor::zeroed())
     }
 }
 
 impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     VrfTensor<D, Chip, Cluster, Slice, Element, B>
 {
-    /// Creates a VRF tensor handle at the given raw address.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the underlying data layout is compatible
-    /// with the tensor mapping.
-    pub unsafe fn from_addr(address: Address) -> Self {
-        Self::new(Tensor::zeroed(), Some(address))
-    }
 }
 
 impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
@@ -1618,7 +1496,7 @@ mod tests {
         let idx_buf: Vec<i32> = (0..K::SIZE).map(row).collect();
         let expected: Vec<i32> = (0..K::SIZE).flat_map(|k| [10 * row(k), 10 * row(k) + 1]).collect();
 
-        let table = HbmTensor::<i32, m![1], m![W, V], B>::new(Tensor::from_vec(table_buf), 0);
+        let table = HbmTensor::<i32, m![1], m![W, V], B>::from_parts(Tensor::from_vec(table_buf), None);
         // The index lives in DM (SPM): `Slice = K`, the residue axis the gather iterates.
         let index = DmTensor::<i32, m![1], m![1], m![K], m![1], B>::from_parts(Tensor::from_vec(idx_buf), None);
 
@@ -1642,9 +1520,12 @@ mod tests {
         axes![A = 8];
 
         let expected: Vec<i32> = (0..A::SIZE as i32).map(|x| x * 3 + 1).collect();
-        let source = HbmTensor::<i32, m![1], m![A], Emulation>::new(Tensor::from_vec(expected.clone()), 0x1000);
-        let mut destination =
-            HbmTensor::<i32, m![1], m![A], Emulation>::new(Tensor::from_vec(std::iter::repeat_n(-1, A::SIZE)), 0x2000);
+        let source =
+            HbmTensor::<i32, m![1], m![A], Emulation>::from_parts(Tensor::from_vec(expected.clone()), Some(0x1000));
+        let mut destination = HbmTensor::<i32, m![1], m![A], Emulation>::from_parts(
+            Tensor::from_vec(std::iter::repeat_n(-1, A::SIZE)),
+            Some(0x2000),
+        );
 
         {
             let source = source.view();
@@ -1661,33 +1542,57 @@ mod tests {
         type Row = m![1 # 8, H];
         type RowMut = m![1 #{!} 8, H];
 
-        const IMMUTABLE_BASE: u64 = 0x1000;
-        const MUTABLE_BASE: u64 = 0x2000;
         let row_bytes = H::SIZE * std::mem::size_of::<i32>();
         let allocation_bytes = A::SIZE * row_bytes;
         let starts = [0, A::SIZE / 2, A::SIZE - 1];
 
-        let table = unsafe { HbmTensor::<i32, m![1], m![A, H], Emulation>::from_addr(IMMUTABLE_BASE) };
+        // A placed table: the window arithmetic below is what a `launch` argument hands the device.
+        const BASE: u64 = 0x1000;
+        let table = HbmTensor::<i32, m![1], m![A, H], Emulation>::from_parts(Tensor::zeroed(), Some(BASE));
         for start in starts {
             let row = table.view().tile::<m![A], 1, Row>(start);
-            assert_eq!(row.address(), IMMUTABLE_BASE + (start * row_bytes) as u64);
+            assert_eq!(row.address(), Some(BASE + (start * row_bytes) as u64));
             assert_eq!(row.addressable_len(), allocation_bytes - start * row_bytes);
             assert_eq!(
-                row.address() + row.addressable_len() as u64,
-                IMMUTABLE_BASE + allocation_bytes as u64
+                row.address().unwrap() + row.addressable_len() as u64,
+                BASE + allocation_bytes as u64
             );
         }
 
-        let mut table = unsafe { HbmTensor::<i32, m![1], m![A, H], Emulation>::from_addr(MUTABLE_BASE) };
+        let mut table = HbmTensor::<i32, m![1], m![A, H], Emulation>::from_parts(Tensor::zeroed(), Some(BASE));
         for start in starts {
             let row = table.view_mut().tile::<m![A], 1, RowMut>(start);
-            assert_eq!(row.address(), MUTABLE_BASE + (start * row_bytes) as u64);
+            assert_eq!(row.address(), Some(BASE + (start * row_bytes) as u64));
             assert_eq!(row.addressable_len(), allocation_bytes - start * row_bytes);
             assert_eq!(
-                row.address() + row.addressable_len() as u64,
-                MUTABLE_BASE + allocation_bytes as u64
+                row.address().unwrap() + row.addressable_len() as u64,
+                BASE + allocation_bytes as u64
             );
         }
+    }
+
+    /// A view of a view accumulates one offset per tile: each `tile` adds its own start, so the second
+    /// start is relative to the first. Checked by reading the elements the nested view selects, since
+    /// which cells a view names is what the accumulation decides.
+    #[test]
+    fn hbm_nested_tiles_accumulate_one_offset_each() {
+        axes![A = 8, H = 4];
+
+        // Element `a * H + h` holds that flat position, so one value names the cell a view reached.
+        let values: Vec<i32> = (0..(A::SIZE * H::SIZE) as i32).collect();
+        let table = HbmTensor::<i32, m![1], m![A, H], Emulation>::from_parts(Tensor::from_vec(values), None);
+
+        let row = table.view().tile::<m![A], 1, m![1 # 8, H]>(3);
+        let half = row.tile::<m![H], 2, m![1 # 8, H = 2 # 4]>(2);
+
+        // The tile states its out-of-window cells as padding, so the read spans the declared mapping
+        // and the two live cells come first.
+        let read = half.inner.read().into_vec();
+        assert_eq!(
+            read[..2],
+            [3 * H::SIZE as i32 + 2, 3 * H::SIZE as i32 + 3],
+            "row 3, then 2 columns in"
+        );
     }
 
     /// Typecheck backend: `dma_gather_unscaled` propagates the same shape assertions
@@ -1698,7 +1603,7 @@ mod tests {
     fn typecheck_dma_gather_unscaled_runs_assertion_only() {
         axes![W = 8, V = 2, K = 64];
 
-        let table = HbmTensor::<i32, m![1], m![W, V], Typecheck>::new(Tensor::zeroed(), 0);
+        let table = HbmTensor::<i32, m![1], m![W, V], Typecheck>::from_parts(Tensor::zeroed(), None);
         let index = DmTensor::<i32, m![1], m![1], m![K], m![1], Typecheck>::from_parts(Tensor::zeroed(), None);
         let _output: DmTensor<i32, m![1], m![1], m![K], m![V], Typecheck> = table.dma_gather_unscaled(&index);
     }
@@ -1723,7 +1628,7 @@ mod tests {
         }
 
         let freed = Arc::new(AtomicBool::new(false));
-        let tensor = HbmTensor::<i32, m![1], m![A, B], Emulation>::new(Tensor::zeroed(), 0x1000)
+        let tensor = HbmTensor::<i32, m![1], m![A, B], Emulation>::from_parts(Tensor::zeroed(), Some(0x1000))
             .owns(DropFlag(Arc::clone(&freed)));
 
         // Merging `[A, B]` into `[AB]` keeps the wire order, so the relabel moves no data.
@@ -1733,7 +1638,7 @@ mod tests {
             !freed.load(Ordering::SeqCst),
             "reshape released the backend resource; the reshaped handle's address now dangles"
         );
-        assert_eq!(reshaped.address(), 0x1000);
+        assert_eq!(reshaped.address(), Some(0x1000));
     }
 
     #[test]

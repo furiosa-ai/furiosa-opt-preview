@@ -67,6 +67,12 @@ pub trait Backend: Sized + 'static {
     /// constructor.
     fn zeroed<D: Scalar>(mapping: &MappingValue) -> Self::Storage<D>;
 
+    /// A fresh HBM tensor with no source (see [`crate::tensor::memory::HbmTensor::new`]).
+    ///
+    /// Required, no default: whether an HBM tensor needs a device allocation is a backend's own call.
+    /// `Npu` takes one and hands its ownership to the tensor; the host-side backends hold bytes.
+    fn alloc_hbm<D: Scalar, Chip: M, Element: M>() -> HbmTensor<D, Chip, Element, Self>;
+
     /// Serialize the storage to a flat `D` buffer in `mapping`-order (the physical / wire layout),
     /// consuming the storage, delegating to the concrete storage's inherent serializer.
     fn into_vec<D: MaterializableScalar>(storage: Self::Storage<D>, mapping: &MappingValue) -> Vec<D>;

@@ -545,7 +545,8 @@ Plugging into the [cycle formula](#performance), `cycles ≈ ring_size × Time::
 - `Time::SIZE = D::SIZE × C::SIZE = 8 × 3 = 24`
 - `flits_per_packet = sizeof(f32) × Packet::SIZE / 32 = 4 × 8 / 32 = 1` (`Packet = m![E]`, `E::SIZE = 8`)
 
-The bitmap shows padding-only extraction directly: `bitmap[0] = {0, 1, 2}` means output slice 0 receives from the 3 valid input slices in its `C # 4` group while skipping index 3, the padding cell. Reading `{0, 1, 2, 3}` would pull that padding in as if it were real data.
+The bitmap shows padding-only extraction directly: `bitmap[0] = {0, 1, 2}` means output slice 0 receives from the 3 valid input slices in its `C # 4` group while skipping index 3, the padding cell.
+Reading `{0, 1, 2, 3}` would pull that padding in as if it were real data.
 
 ### Constraints
 

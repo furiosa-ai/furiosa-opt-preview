@@ -20,7 +20,7 @@ mod lane_size {
                 .to_hbm::<Chip, m![R, B]>(&mut ctx.pdma)
                 .await;
 
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, R # 8]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i32, Chip, m![A, R # 8]>::new();
 
         launch(valid_size_8, (&mut *ctx, &input, &input_trf, &mut output)).await;
     }
@@ -43,7 +43,7 @@ mod cpacket_size {
                 .to_hbm::<Chip, m![R, B]>(&mut ctx.pdma)
                 .await;
 
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, R # 8]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i32, Chip, m![A, R # 8]>::new();
 
         launch(valid_size_64, (&mut *ctx, &input, &input_trf, &mut output)).await;
     }
@@ -62,7 +62,7 @@ mod cpacket_size {
                 .to_hbm::<Chip, m![R, B / 2]>(&mut ctx.pdma)
                 .await;
 
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, R # 8]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i32, Chip, m![A, R # 8]>::new();
 
         launch(valid_size_32, (&mut *ctx, &input, &input_trf, &mut output)).await;
     }
@@ -85,7 +85,7 @@ mod cpacket_mapping {
                 .to_hbm::<Chip, m![R, E]>(&mut ctx.pdma)
                 .await;
 
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, R # 8]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i32, Chip, m![A, R # 8]>::new();
 
         launch(valid_one_collect_flit, (&mut *ctx, &input, &input_trf, &mut output)).await;
     }
@@ -103,7 +103,7 @@ mod cpacket_mapping {
                 .to_hbm::<Chip, m![R, B]>(&mut ctx.pdma)
                 .await;
 
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, R # 8]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i32, Chip, m![A, R # 8]>::new();
 
         launch(valid_two_collect_flits, (&mut *ctx, &input, &input_trf, &mut output)).await;
     }
@@ -126,7 +126,7 @@ mod time_broadcast {
                 .to_hbm::<Chip, m![R, T, E]>(&mut ctx.pdma)
                 .await;
 
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, T, R # 8]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i32, Chip, m![A, T, R # 8]>::new();
 
         launch(valid_single_tiling, (&mut *ctx, &input, &input_trf, &mut output)).await;
     }
@@ -145,7 +145,7 @@ mod time_broadcast {
         .to_hbm::<Chip, m![R, U, T, E]>(&mut ctx.pdma)
         .await;
 
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, U, T, R # 8]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i32, Chip, m![A, U, T, R # 8]>::new();
 
         launch(valid_double_tiling, (&mut *ctx, &input, &input_trf, &mut output)).await;
     }
@@ -163,7 +163,7 @@ mod time_broadcast {
                 .to_hbm::<Chip, m![R, E]>(&mut ctx.pdma)
                 .await;
 
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, T, R # 8]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i32, Chip, m![A, T, R # 8]>::new();
 
         launch(valid_tiling_not_in_trf, (&mut *ctx, &input, &input_trf, &mut output)).await;
     }
@@ -182,7 +182,7 @@ mod time_broadcast {
         .to_hbm::<Chip, m![R, T, V, E]>(&mut ctx.pdma)
         .await;
 
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, V, T, R # 8]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i32, Chip, m![A, V, T, R # 8]>::new();
 
         launch(valid_transposed_tiling, (&mut *ctx, &input, &input_trf, &mut output)).await;
     }
@@ -205,7 +205,7 @@ mod trf_mapping {
                 .to_hbm::<Chip, m![R, B]>(&mut ctx.pdma)
                 .await;
 
-        let mut output = unsafe { HbmTensor::<i32, Chip, m![A, 1 # 8]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i32, Chip, m![A, 1 # 8]>::new();
 
         launch(valid_mapping, (&mut *ctx, &input, &input_trf, &mut output)).await;
     }
@@ -234,21 +234,8 @@ mod trf_size {
             .to_hbm::<Chip, m![A, B]>(&mut ctx.pdma)
             .await;
 
-        let mut output = unsafe { HbmTensor::<i8, Chip, m![A, B]>::from_addr(0x1000) };
+        let mut output = HbmTensor::<i8, Chip, m![A, B]>::new();
 
         launch(valid_to_trf_full, (&mut *ctx, &input, &mut output)).await;
-    }
-
-    #[tokio::test]
-    async fn test_valid_to_trf_half() {
-        let mut ctx = Context::acquire();
-
-        let input = HostTensor::<i8, m![A, B]>::from_vec((0..<m![A, B]>::SIZE).map(|x| x as i8).collect::<Vec<_>>())
-            .to_hbm::<Chip, m![A, B]>(&mut ctx.pdma)
-            .await;
-
-        let mut output = unsafe { HbmTensor::<i8, Chip, m![A, B]>::from_addr(0x1000) };
-
-        launch(valid_to_trf_half, (&mut *ctx, &input, &mut output)).await;
     }
 }

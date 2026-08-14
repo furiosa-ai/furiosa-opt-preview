@@ -55,7 +55,9 @@ The two components, `TimeFilterConfig` and `PacketClipperConfig`, are explained 
 
 For each slice `s`, a time filter determines whether each time step `t` carries valid `R` data.
 The subsections below build up `fn valid()` step by step, starting from the simplest case and adding complexity.
-When `R` has no sub-expressions in `Time` or `Slice`, the time filter is disabled by setting `slice_mask = 0` and `slice_thres = 1`. Then `s & 0 = 0 < 1` for every `s`, hitting the `Less` arm so `fn valid()` always returns `true`. The choice of `slice_thres = 1` is conventional; any positive value works since `0` is always less than it.
+When `R` has no sub-expressions in `Time` or `Slice`, the time filter is disabled by setting `slice_mask = 0` and `slice_thres = 1`.
+Then `s & 0 = 0 < 1` for every `s`, hitting the `Less` arm so `fn valid()` always returns `true`.
+The choice of `slice_thres = 1` is conventional; any positive value works since `0` is always less than it.
 
 ```rust,ignore
 struct TimeFilterConfig {
@@ -256,15 +258,23 @@ TimeFilterConfig {
 
 Each field encodes one part of the validity decision:
 
-- `sequencer` records each `Time` sub-expression with its `R` stride, so the reconstructed `idx` equals the `R` contribution from `Time` at each time step `t`. For this example `idx` takes values in `{0, 1, 2, 3}` as `t` ranges over `[0, 4)`.
-- `slice_mask` extracts the bits of the slice id that carry the `R` contribution from `Slice`. For this example bit `0` carries `R # 16 / 4 % 2` and bit `6` carries `R # 16 / 8`, so `slice_mask = 0b1000001`.
-- `slice_thres` is the bit pattern within `slice_mask` that encodes the partial slice's `R` contribution. From the table above, the partial slice has `R` contribution `8`, encoded by setting bit `6` (`R # 16 / 8 = 1`) and clearing bit `0` (`R # 16 / 4 % 2 = 0`). So `slice_thres = 64`.
-- `time_thres` is `R::SIZE` minus the partial slice's `R` contribution. For this example `time_thres = 11 - 8 = 3`.
+- `sequencer` records each `Time` sub-expression with its `R` stride, so the reconstructed `idx` equals the `R` contribution from `Time` at each time step `t`.
+  For this example `idx` takes values in `{0, 1, 2, 3}` as `t` ranges over `[0, 4)`.
+- `slice_mask` extracts the bits of the slice id that carry the `R` contribution from `Slice`.
+  For this example bit `0` carries `R # 16 / 4 % 2` and bit `6` carries `R # 16 / 8`, so `slice_mask = 0b1000001`.
+- `slice_thres` is the bit pattern within `slice_mask` that encodes the partial slice's `R` contribution.
+  From the table above, the partial slice has `R` contribution `8`, encoded by setting bit `6` (`R # 16 / 8 = 1`) and clearing bit `0` (`R # 16 / 4 % 2 = 0`).
+  So `slice_thres = 64`.
+- `time_thres` is `R::SIZE` minus the partial slice's `R` contribution.
+  For this example `time_thres = 11 - 8 = 3`.
 
-`fn valid` returns the correct validity for every flit. To verify, decompose the `R` index as `r = r_slice + idx`, where `r_slice` is the `R` contribution from `Slice` (encoded by `s & slice_mask`) and `idx` is the contribution from `Time`, and consider the three cases of the slice comparison.
+`fn valid` returns the correct validity for every flit.
+To verify, decompose the `R` index as `r = r_slice + idx`, where `r_slice` is the `R` contribution from `Slice` (encoded by `s & slice_mask`) and `idx` is the contribution from `Time`, and consider the three cases of the slice comparison.
 
 - When `(s & slice_mask) < slice_thres`, every time step is valid: `r_slice` is at least one slice spacing below the partial slice's contribution, so `r = r_slice + idx < R::SIZE` for every `idx`.
-- When `(s & slice_mask) = slice_thres`, a time step is valid iff `idx < time_thres`. This is the partial slice, and by definition of `time_thres` its `r_slice = R::SIZE - time_thres`. So `r = r_slice + idx < R::SIZE` exactly when `idx < time_thres`.
+- When `(s & slice_mask) = slice_thres`, a time step is valid iff `idx < time_thres`.
+  This is the partial slice, and by definition of `time_thres` its `r_slice = R::SIZE - time_thres`.
+  So `r = r_slice + idx < R::SIZE` exactly when `idx < time_thres`.
 - When `(s & slice_mask) > slice_thres`, no time step is valid: `r_slice` is at least one slice spacing above the partial slice's contribution, so `r_slice ≥ R::SIZE`.
 
 #### `R` in `Time` and `Slice`
@@ -340,16 +350,24 @@ TimeFilterConfig {
 
 The config differs from `SliceMajor` in three fields (`slice_mask` follows the same pattern):
 
-- `sequencer`: every `Time` sub-expression stride is divided by `slice_span` first. For this example strides `4` and `8` become `1` and `2`.
-- `slice_thres`: encodes the partial slice's `r_slice = slice_span - (PADDED_SIZE - R::SIZE)`. For this example the target value is `4 - 3 = 1`, encoded with bit `0` set (`R # 16 % 2 = 1`) and bit `6` clear (`R # 16 / 2 % 2 = 0`), giving `slice_thres = 1`.
-- `time_thres`: always `time_span - 1`. For this example `time_thres = 3`.
+- `sequencer`: every `Time` sub-expression stride is divided by `slice_span` first.
+  For this example strides `4` and `8` become `1` and `2`.
+- `slice_thres`: encodes the partial slice's `r_slice = slice_span - (PADDED_SIZE - R::SIZE)`.
+  For this example the target value is `4 - 3 = 1`, encoded with bit `0` set (`R # 16 % 2 = 1`) and bit `6` clear (`R # 16 / 2 % 2 = 0`), giving `slice_thres = 1`.
+- `time_thres`: always `time_span - 1`.
+  For this example `time_thres = 3`.
 
-`fn valid` returns the correct validity for every flit. To verify, decompose the `R` index as `r = idx * slice_span + r_slice`, where `r_slice` is the slice's `R` contribution decoded from `s & slice_mask`, and consider the two cases of the slice comparison.
+`fn valid` returns the correct validity for every flit.
+To verify, decompose the `R` index as `r = idx * slice_span + r_slice`, where `r_slice` is the slice's `R` contribution decoded from `s & slice_mask`, and consider the two cases of the slice comparison.
 
 - When `(s & slice_mask) < slice_thres`, every time step is valid: `r_slice < slice_span - (PADDED_SIZE - R::SIZE)`, so `r ≤ (time_span - 1) * slice_span + r_slice < R::SIZE` for every `idx`.
-- When `(s & slice_mask) ≥ slice_thres`, a time step is valid iff `idx < time_thres = time_span - 1`. The slice's `r_slice ≥ slice_span - (PADDED_SIZE - R::SIZE)`. For `idx ≤ time_span - 2`, `r ≤ (time_span - 2) * slice_span + (slice_span - 1) < (time_span - 1) * slice_span ≤ R::SIZE`. For `idx = time_span - 1`, `r ≥ (time_span - 1) * slice_span + slice_span - (PADDED_SIZE - R::SIZE) = R::SIZE`.
+- When `(s & slice_mask) ≥ slice_thres`, a time step is valid iff `idx < time_thres = time_span - 1`.
+  The slice's `r_slice ≥ slice_span - (PADDED_SIZE - R::SIZE)`.
+  For `idx ≤ time_span - 2`, `r ≤ (time_span - 2) * slice_span + (slice_span - 1) < (time_span - 1) * slice_span ≤ R::SIZE`.
+  For `idx = time_span - 1`, `r ≥ (time_span - 1) * slice_span + slice_span - (PADDED_SIZE - R::SIZE) = R::SIZE`.
 
-Unlike `SliceMajor`, `TimeMajor` has no "all invalid" regime. The padding constraint `PADDED_SIZE - R::SIZE ≤ slice_span` caps over-padding tightly enough that no slice becomes fully invalid.
+Unlike `SliceMajor`, `TimeMajor` has no "all invalid" regime.
+The padding constraint `PADDED_SIZE - R::SIZE ≤ slice_span` caps over-padding tightly enough that no slice becomes fully invalid.
 
 ### Packet Clipper
 
@@ -610,8 +628,10 @@ Legend: `v` = below (all valid), `>` = boundary (partial), `x` = above (all inva
 
 - `Ho=3` columns (rightmost 4): all 0 (`H` time filter `x`, always closed).
 - `Co=3` columns (every 4th): all 0 (`C` time filter `x`).
-- `Co=2` columns (`H:v C:>`): `C` time filter is boundary, so only rows with `Ci=0` pass. Compare `Co=1` vs `Co=2`.
-- `Ho=2` columns (`H:> C:v`): `H` time filter is boundary, so only rows with `Hi=0` pass. Compare `Ho=1` vs `Ho=2`.
+- `Co=2` columns (`H:v C:>`): `C` time filter is boundary, so only rows with `Ci=0` pass.
+  Compare `Co=1` vs `Co=2`.
+- `Ho=2` columns (`H:> C:v`): `H` time filter is boundary, so only rows with `Hi=0` pass.
+  Compare `Ho=1` vs `Ho=2`.
 - `Ho=2 × Co=2` (both `>`): only `(Hi=0, Ci=0)` rows pass, the intersection of both boundaries.
 - Within valid cells, the `[8, 8, 3]` sawtooth from packet clipper always appears, the same regardless of slice.
 
@@ -693,7 +713,8 @@ fn reduce_wrong_interleave<'l, const T: Tu>(
 
 ### `R` in `Slice` and `Time`, Over-padded
 
-`TimeMajor` mode requires `PADDED_SIZE - R::SIZE ≤ slice_span`. At most `slice_span` `R` positions are over-padded.
+`TimeMajor` mode requires `PADDED_SIZE - R::SIZE ≤ slice_span`.
+At most `slice_span` `R` positions are over-padded.
 
 In the example below, `R = 14`, `Slice = m![X, R # 20 % 4]` (`slice_span = 4`), and `Time = m![A, R # 20 / 4]` with `A = 3` (so `time_span = 5` from `R # 20 / 4`, while `Time::SIZE = A × time_span = 15`).
 The constraint is on `time_span`, not `Time::SIZE`: non-`R` axes in `Time` like `A` cycle without changing `R`'s index, so they do not affect the constraint.

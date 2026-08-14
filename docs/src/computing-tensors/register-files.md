@@ -14,11 +14,14 @@ A `TrfTensor` is a tensor stored in the TRF:
 {{#include ../../../furiosa-opt-std/src/tensor/memory.rs:trf_tensor_def}}
 ```
 
-`Chip` / `Cluster` / `Slice` pass through from the source. `Lane` indexes the spatial parallelism (1, 2, 4, or 8 active lanes). `Element` holds the per-lane layout.
+`Chip` / `Cluster` / `Slice` pass through from the source.
+`Lane` indexes the spatial parallelism (1, 2, 4, or 8 active lanes).
+`Element` holds the per-lane layout.
 
 #### From Collect Engine
 
-`.to_trf::<Lane, Element>()` on `CollectTensor` produces a `TrfTensor` in the full TRF; `.to_trf_at::<Lane, Element>(address)` targets a `TrfAddress` region:
+`.to_trf::<Lane, Element>()` on `CollectTensor` produces a `TrfTensor`.
+Where in the register file it lands is the compiler's to decide, so the call names no region:
 
 ```rust,ignore
 {{#include ../../../furiosa-opt-std/src/engine/collect.rs:collect_to_trf}}
@@ -32,6 +35,26 @@ Element = [Time % FlitsPerLane, Packet]
 ```
 
 for some `FlitsPerLane` that the compiler derives from `Lane` and `Time`, so each lane is filled by `FlitsPerLane` consecutive flits.
+
+The following simple case occupies the full TRF:
+
+```rust
+# #![feature(adt_const_params)]
+# extern crate furiosa_opt_std;
+# use furiosa_opt_std::prelude::*;
+axes![B = 32];
+
+fn load_trf<'l, const T: Tu>(
+    input: CollectTensor<'l, T, i8, m![1], m![1 # 2], m![1 # 256], m![1], m![B]>,
+) -> TrfTensor<i8, m![1], m![1 # 2], m![1 # 256], m![1], m![B]> {
+    input.to_trf()
+}
+#
+# let mut ctx = Context::acquire();
+#
+# let c: CollectTensor<'_, _, i8, m![1], m![1 # 2], m![1 # 256], m![1], m![B]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
+# let _o = load_trf(c);
+```
 
 For example, in a matmul kernel `Lane` holds output channels and `Element` holds the contracted axis.
 
@@ -51,7 +74,7 @@ type Lane    = m![N];
 fn store_bmatmul_trf<'l, const T: Tu>(
     input: CollectTensor<'l, T, bf16, Chip, Cluster, Slice, m![N, K / 16], m![K % 16]>,
 ) -> TrfTensor<bf16, Chip, Cluster, Slice, Lane, m![K]> {
-    input.to_trf_at(TrfAddress::FirstHalf)
+    input.to_trf()
 }
 # 
 # let mut ctx = Context::acquire();
@@ -90,12 +113,13 @@ Only integers promote on store: `i4 → i5` (5 bits) and `i8 → i9` (9 bits) le
 `i8` / `f8` and `bf16` stay at their native widths (8 and 16 bits respectively); the 320-bit row holds extra slack relative to a flat 8- or 16-bit packing so the same physical row width serves all types.
 
 
-With fewer than 8 active lanes, each active lane sees more rows (as if the row count grew). Halving the active count doubles the rows per active lane (e.g., 4 active → 256 rows per bank, 1 active → 1024).
+With fewer than 8 active lanes, each active lane sees more rows (as if the row count grew).
+Halving the active count doubles the rows per active lane (e.g., 4 active → 256 rows per bank, 1 active → 1024).
 
 ### Double Buffering
 
 The TRF enables double-buffering by splitting each bank into two halves: the [TRF Sequencer](./contraction-engine/outer.md#trf-sequencer) loads from one half while a store fills the other, and the two can be flipped between iterations.
-Three address modes select the region, fixed at store time: `Full` uses all 128 rows per bank, `FirstHalf` uses rows 0–63, and `SecondHalf` uses rows 64–127.
+Three address modes name the region, and the scheduler picks one at store time: `Full` uses all 128 rows per bank, `FirstHalf` uses rows 0–63, and `SecondHalf` uses rows 64–127.
 The half modes cap per-slice capacity at 40 KB.
 
 See [Scheduling and Tuning: Double Buffering](../scheduling/tuning.md#double-buffering) for the tuning pattern that uses these halves across the main and sub contexts.
@@ -128,11 +152,13 @@ A `VrfTensor` is a tensor stored in the VRF:
 {{#include ../../../furiosa-opt-std/src/tensor/memory.rs:vrf_tensor_def}}
 ```
 
-`Chip` / `Cluster` / `Slice` pass through from the source. `Element` holds the per-(slice) layout.
+`Chip` / `Cluster` / `Slice` pass through from the source.
+`Element` holds the per-(slice) layout.
 
 #### From Collect Engine
 
-`.to_vrf::<Element2>()` on `CollectTensor` stores the flits into the VRF and produces a `VrfTensor`; `.to_vrf_at::<Element2>(address)` stores at a raw `Address`:
+`.to_vrf::<Element2>()` on `CollectTensor` stores the flits into the VRF and produces a `VrfTensor`.
+Where in the register file they land is the compiler's to decide, so the call names no address:
 
 ```rust,ignore
 {{#include ../../../furiosa-opt-std/src/engine/collect.rs:collect_to_vrf}}

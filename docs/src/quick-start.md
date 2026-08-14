@@ -1,334 +1,35 @@
 # Quick Start
 
-This chapter grows a runnable base-template vector kernel into elementwise and contraction patterns.
-Each example pairs device source with the scaffolded host program and oracle.
-The sequence adds one hardware decision at a time.
-The validation loop distinguishes execution, mapping, values, and schedule evidence.
+This index bootstraps a runnable base-template vector kernel.
+The five runnable patterns in [Kernel Design](./quick-start/kernel-design.md) add one hardware decision at a time.
+That single chapter owns the source-backed device and host-oracle walkthroughs for constant addition, elementwise multiplication, dot product, GEMV, and GEMM.
 
-## Tensor and Contraction
+Validation meanings and caveats are defined only in [Kernel Validation](./quick-start/kernel-validation.md).
 
-A tensor maps each named index in its shape to a value.
-A shape is an unordered set of named axes, so `{ N = 4, C = 3 }` and `{ C = 3, N = 4 }` identify the same tensor.
-An ordered representation of that shape behaves like a familiar multidimensional array.
-A tensor index supplies one value for every axis, so `{ N = 4, C = 3 }` includes indices such as `{ N: 0, C: 0 }` and `{ N: 0, C: 1 }`.
+HBM is high-bandwidth memory used for host transfers, and DM is on-chip data memory used by the Tensor Unit.
 
-| Tensor | Dimension | Example | Named shape |
-|--------|-----------|---------|-------------|
-| Scalar | 0D | `5.2` | `{}` |
-| Vector | 1D | `[1, 2, 3]` | `{ I = 3 }` |
-| Matrix | 2D | a `2 × 4` grid | `{ I = 2, J = 4 }` |
-| Image batch | 4D | four RGB images | `{ N = 4, C = 3, H = 256, W = 512 }` |
+After these basic patterns, continue through Mapping, Moving, Computing, End-to-End Cases, Scheduling, and Tools.
+The subsystem chapters now own the matching advanced examples, while End-to-End Cases collects composed model tutorials.
 
-Tensor contraction multiplies inputs and reduces every shared axis that is absent from the output.
-Dot product, GEMV, and GEMM therefore follow the same broadcast, multiply, and reduce structure.
+## Read the ordered child pages
 
-| Operation | Einsum | Broadcast | Reduce |
-|-----------|--------|-----------|--------|
-| Dot product | `I, I ->` | None | `I` |
-| GEMV | `I J, J -> I` | Vector across `I` | `J` |
-| GEMM | `I K, K J -> I J` | Left input across `J` and right input across `I` | `K` |
+Read [Setup and Tooling](./quick-start/setup-and-tooling.md) for installation and the first project.
+Read [Tensor and Contraction](./quick-start/tensor-and-contraction.md) for tensor shapes and contraction math.
+Read [Kernel Design](./quick-start/kernel-design.md) for the five runnable pattern sections.
+Read [Kernel Validation](./quick-start/kernel-validation.md) for typecheck, emulation, NPU, and schedule evidence.
 
-## Run and Verify a Kernel
+## Continue to Reference Chapters
 
-Use different evidence for execution, mappings, values, and schedules.
-`run` confirms that a kernel executes.
-`typecheck run` executes the kernel body with phantom tensors and catches mapping or shape errors.
-An emulation test with a host oracle checks values.
-A schedule dump compares performance candidates without NPU hardware.
-
-```bash
-# Run with the default emulation backend.
-cargo furiosa-opt run --release --bin constant_add
-
-# Check mapping and shapes by executing with phantom tensors.
-cargo furiosa-opt --backend typecheck run --release --bin constant_add
-
-# Check values against the host oracle.
-cargo furiosa-opt --backend emulation test --release --bin constant_add
-
-# Inspect the static schedule.
-cargo furiosa-opt compile constant_add_kernel --dump-schedule schedule.json
-```
-
-`typecheck test` is not correctness evidence because the phantom output is empty and an elementwise test loop can run zero iterations and still pass.
-Compare schedule makespan only when the release, shapes, data types, and mapping are fixed.
-
-## Use the Kernel Authoring Skill
-
-The `furiosa-opt-kernel-authoring` skill guides an agent that implements, debugs, or reviews a kernel.
-Give the agent a kernel task and ask it to use the `furiosa-opt-kernel-authoring` skill.
-When the agent does not discover product skills automatically, provide the installed source's `SKILL.md` path in the task.
-The agent records the source version, implements the host oracle and adversarial cases, and returns typecheck, emulation, schedule, and hardware evidence.
-This book explains kernel decisions, while the published [`furiosa-opt-std` rustdoc](https://docs.rs/crate/furiosa-opt-std) remains the canonical API source.
-
-## Constant Addition
-
-### Goal
-
-Compute \\(\text{out}[i] = \text{in}[i] + 1\\) for every element of a vector.
-Use this pattern for residual and bias addition.
-
-### Dataflow
-
-Move the vector from HBM to DM, stream each DM slice through Fetch, Collect, the Vector Engine, and Commit, and move the result from DM back to HBM.
-
-```mermaid
-flowchart TB
-    HOST[Host] <-->|PCIe DMA| HBM[(HBM)]
-    HBM <-->|Tensor DMA| DM[(DM)]
-
-    subgraph TU[Tensor Unit]
-        direction TB
-        FE[Fetch] --> CO[Collect] --> VE["Vector AddFxp +1"] --> CM[Commit]
-    end
-
-    DM -->|stream| FE
-    CM -->|stream| DM
-```
-
-### Device Source
-
-The kernel uses one chip, one of two clusters, and all 256 slices in that cluster.
-Each slice receives eight `i32` values.
-`TagMode::Zero` executes the Vector Engine on every cycle.
-`to_dm` distributes the vector across slices, and the `begin → fetch → collect → vector_init → vector_intra_slice_tag → vector_fxp → vector_final → commit` chain processes each slice in one pass.
-
-Device source: `src/kernel/constant_add_kernel.rs`.
-
-```rust,ignore
-{{#include ../../base-template/src/kernel/constant_add_kernel.rs}}
-```
-
-### Host Program and Oracle
-
-The host program creates input, uploads it to HBM, launches the device function, and compares the result with the host equation in its test.
-
-Base-template host program and oracle: `src/constant_add.rs`.
-
-```rust,ignore
-{{#include ../../base-template/src/constant_add.rs}}
-```
-
-### Mapping and Memory
-
-TCP has four nested hardware levels.
-
-| Level | Count (RNGD) | Role |
-|-------|--------------|------|
-| `Chip` | System-dependent | Top-level unit that holds HBM. |
-| `Cluster` | Two per chip | Group of 256 slices. |
-| `Slice` | 256 per cluster | One Tensor Unit. |
-| `Lane` | Eight per slice | One row of the Contraction Engine MAC array. |
-
-A tensor type encodes its element type and the distribution of each logical axis across this hierarchy.
-For example, `DmTensor<bf16, m![1], m![1 # 2], m![A / 8 # 256], m![A % 8]>` represents a `bf16` vector with axis `A` split across 256 slices with eight elements per slice.
-Each element of `A` has one well-defined position in one slice.
-
-Mapping operators describe where an axis goes.
-
-- `/` splits an axis by stride.
-- `%` gives the in-unit count.
-- `#` pads a mapping to the hardware unit count.
-- `=` reduces how much of an existing term a view covers, which is how a tile selects one piece of a tensor.
-
-`%` and `=` both narrow an axis, so it is worth stating what separates them.
-`%` introduces a new inner term: in `m![B / 2048, B % 2048]` the first term counts the 2048-element blocks of `B` and the second counts the positions inside one block.
-`=` leaves the terms alone and shrinks the extent the view reads, so `m![B / 2048 = 1 # 2]` selects one of the two blocks, where `# 2` keeps the stride of the full axis rather than of the selection.
-A tiled kernel uses them together, as in `m![B / 2048 = 1 # 2, B % 2048]`, which picks one block and covers every position within it.
-See [Tiling](./mapping-tensors/mapping-expressions.md#tiling) for the general rule and [Fetch and Commit](./kernel-examples/fetch-commit-engine.md#capacity-bounded-segmentation) for that mapping in a runnable kernel.
-
-Tensor Unit tensors also use `Time` for pipeline iterations and `Packet` for elements within an iteration.
-The Tensor Unit pipeline is Fetch → Switch → Collect → Contraction → Vector → Cast → Transpose → Commit.
-The Switch Engine connects slices while most stages operate independently within a slice.
-
-| Type | Location | Capacity (RNGD) | Role |
-|------|----------|-----------------|------|
-| `HbmTensor` | On-package | 48 GB and 1.5 TB/s | Long-term weight and activation storage. |
-| `DmTensor` | On-chip SRAM | 256 MB total and 512 KB per slice | Primary working memory. |
-| `TrfTensor` | On-chip SRAM | 8 KB per lane and eight lanes per slice | Contraction Engine register file. |
-| `VrfTensor` | On-chip SRAM | 8 KB per slice | Vector Engine operand register file. |
-
-See [Mapping Tensors](./mapping-tensors/index.md) for the complete mapping model, [Moving Tensors](./moving-tensors/index.md) for memory movement, and [Computing Tensors](./computing-tensors/index.md) for the pipeline APIs.
-
-## Elementwise Multiplication
-
-### Goal
-
-Compute \\(\text{out}[i] = \text{lhs}[i] \times \text{rhs}[i]\\).
-Use this pattern for gate scaling, GLU, and attention scaling.
-
-### Mapping and Dataflow
-
-The `sub` context preloads `rhs` into the VRF while the `main` context streams `lhs` and reads the VRF on every Vector Engine cycle.
-The two DM regions must not overlap.
-
-```mermaid
-flowchart TB
-    LHS_HBM[(lhs HBM)] -->|Tensor DMA| LHS_DM[(lhs DM)]
-    RHS_HBM[(rhs HBM)] -->|Tensor DMA| RHS_DM[(rhs DM)]
-
-    subgraph sub[sub context]
-        direction LR
-        sFE[Fetch] --> sCO[Collect] --> VRF[(VRF)]
-    end
-
-    subgraph main[main context]
-        direction LR
-        mFE[Fetch] --> mCO[Collect] --> VE["Vector MulInt"] --> CM[Commit]
-    end
-
-    RHS_DM --> sFE
-    LHS_DM --> mFE
-    VRF --> VE
-    CM --> OUT_DM[(result DM)]
-    OUT_DM -->|Tensor DMA| OUT_HBM[(HBM)]
-```
-
-Every device kernel has `ctx.main` and `ctx.sub` execution contexts on separate hardware resources.
-`main` runs the primary computation while `sub` commonly prefetches operands.
-`main` waits when it needs data that `sub` has not produced, and both contexts share the flat on-chip SRAM.
-
-Omit DM addresses for automatic placement.
-Use `_at` APIs only when an algorithm needs explicit non-overlapping addresses.
-The `Tu` const generic identifies whether a tensor flows through `{ Tu::Main }` or `{ Tu::Sub }`.
-The `sub` context loads `rhs_dm` through Fetch, Collect, and `.to_vrf()`, while `main` streams `lhs_dm` through `MulInt` with that stationary VRF operand.
-The two contexts run concurrently when their resource dependencies allow it.
-
-### Device Source
-
-Device source: `src/kernel/elementwise_mul_kernel.rs`.
-
-```rust,ignore
-{{#include ../../base-template/src/kernel/elementwise_mul_kernel.rs}}
-```
-
-### Host Program and Oracle
-
-Base-template host program and oracle: `src/elementwise_mul.rs`.
-
-```rust,ignore
-{{#include ../../base-template/src/elementwise_mul.rs}}
-```
-
-## Tensor Contraction
-
-A tensor maps each valid tensor index to a value, and its shape is an unordered set of named axes.
-Axis names carry meaning while their written order does not.
-Tensor contraction multiplies two inputs elementwise and reduces their shared axes.
-Every contraction consists of broadcast, multiply, and reduce steps.
-
-| Operation | Einsum | Broadcast | Multiply | Reduce |
-|-----------|--------|-----------|----------|--------|
-| Dot product | \\(I, I \rightarrow 1\\) | None. | \\(x_i y_i\\) | \\(\sum_i x_i y_i\\) |
-| GEMV | \\(IJ, J \rightarrow I\\) | \\(x\\) across \\(I\\). | \\(A_{ij} x_j\\) | \\(y_i = \sum_j A_{ij} x_j\\) |
-| GEMM | \\(IK, KJ \rightarrow IJ\\) | \\(A\\) across \\(J\\) and \\(B\\) across \\(I\\). | \\(A_{ik} B_{kj}\\) | \\(C_{ij} = \sum_k A_{ik} B_{kj}\\) |
-
-## Dot Product
-
-### Goal
-
-Compute \\(\sum_i x_i y_i\\).
-Use this pattern for attention scores and similarity.
-
-### Mapping and Dataflow
-
-One operand flows through the pipeline while the `sub` context stores the other operand in the TRF.
-`TrfAddress::Full` dedicates the full TRF to that operand, which the `sub` context loads through Fetch, Collect, and `.to_trf()`.
-
-`.contract_outer()` pairs 32-byte flits into 64-byte packets and reads the stationary TRF operand.
-The Stream Adapter performs the pairing and the TRF Sequencer reads the stationary operand.
-Both operands feed the per-lane multiplier.
-`.contract_packet()` reduces products spatially through the hardware reduction tree.
-`.contract_time::<m![1]>()` accumulates across time and produces one scalar per slice.
-`.contract_lane()` folds the lanes, which is trivial when `Lane = m![1]`.
-`.cast()` converts the `f32` accumulator to `bf16`.
-
-Contraction performs multiply-and-accumulate over many terms and needs a widened type.
-Contraction widens `i4` and `i8` to `i32`, and it widens `fp8` and `bf16` to `f32`.
-The annotations on `.align()` and `.contract()` select that widened type.
-
-### Device Source
-
-Device source: `src/kernel/dot_product_kernel.rs`.
-
-```rust,ignore
-{{#include ../../base-template/src/kernel/dot_product_kernel.rs}}
-```
-
-### Host Program and Oracle
-
-Base-template host program and oracle: `src/dot_product.rs`.
-
-```rust,ignore
-{{#include ../../base-template/src/dot_product.rs}}
-```
-
-## GEMV
-
-### Goal
-
-Compute \\(y_i = \sum_j A_{ij} x_j\\).
-Use this pattern for LLM decode.
-
-### Mapping and Dataflow
-
-Map output dimension `I` across slices so each slice computes one row.
-Broadcast the full vector `x` so every slice can contract it with its row.
-Unlike dot product, the rows are independent but every row needs the same complete vector operand.
-
-### Device Source
-
-Device source: `src/kernel/gemv_kernel.rs`.
-
-```rust,ignore
-{{#include ../../base-template/src/kernel/gemv_kernel.rs}}
-```
-
-### Host Program and Oracle
-
-Base-template host program and oracle: `src/gemv.rs`.
-
-```rust,ignore
-{{#include ../../base-template/src/gemv.rs}}
-```
-
-## GEMM
-
-### Goal
-
-Compute \\(C_{ij} = \sum_k A_{ik} B_{jk}\\).
-`A` broadcasts across `J`, and `B` broadcasts across `I`.
-
-### Mapping and Dataflow
-
-Map both output dimensions with `type Slice = m![I / 32, J / 32]` so each slice computes a 16 × 16 output tile.
-The Switch Engine routes each `B` tile to its matching slice, so each slice receives only the `J` portion that belongs to its output tile.
-`.contract_packet::<m![1]>()` reduces along `K` spatially.
-`.contract_time::<m![I]>()` accumulates over time while preserving `I`.
-`.contract_lane::<m![I], m![J # 8]>(LaneMode::Interleaved)` preserves `I` and `J` in the output packet.
-
-### Device Source
-
-Device source: `src/kernel/gemm_kernel.rs`.
-
-```rust,ignore
-{{#include ../../base-template/src/kernel/gemm_kernel.rs}}
-```
-
-### Host Program and Oracle
-
-Base-template host program and oracle: `src/gemm.rs`.
-
-```rust,ignore
-{{#include ../../base-template/src/gemm.rs}}
-```
-
-Blocked GEMM extends GEMM with tiling for matrices that exceed on-chip DM capacity.
-It covers temporal partitioning over `K` and spatial partitioning of `I` and `J` across chips.
-Flash Attention combines GEMM, Vector Engine softmax, and main/sub prefetch across a transformer attention head.
-
-## Continue to Tiled Kernels
-
-The examples above process tensors that fit in one hardware pass and within the 512 KB per-slice DM capacity.
+The runnable patterns process tensors that fit in one hardware pass and within the 512 KB per-slice DM capacity.
 Use temporal partitioning when tiles run sequentially over time and spatial partitioning when tiles distribute across parallel hardware units.
-See [Kernel Examples](./kernel-examples/index.md) for tiled and multi-chip designs.
+Read [Mapping Tensors](./mapping-tensors/index.md), then [Moving Tensors](./moving-tensors/index.md), then [Computing Tensors](./computing-tensors/index.md).
+After those reference chapters, choose a matching advanced pattern in the relevant Mapping, Moving, or Computing chapter.
+
+## Choose the next pattern
+
+The three reference chapters establish the mapping, movement, and compute contracts before you choose an example.
+Use the simplest example route that matches the kernel's next constraint.
+
+- **Fits one pass:** No escalation; the preceding basic patterns apply.
+- **Layout permutation or packet handling:** Read [Case Study: Tensor Unit I/O](./moving-tensors/tensor-unit-io.md) under Moving Tensors.
+- **Composed model patterns:** Read the [Case Study: Transformer](./kernel-examples/transformer.md) under End-to-End Cases.

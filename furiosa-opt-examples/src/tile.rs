@@ -8,7 +8,7 @@ axes![One = 1];
 /// Device function that transposes a tensor from shape [A, B] to [B, A].
 #[device(chip = 1)]
 pub fn tile_simple(ctx: &mut Context, input: HbmTensorView<'_, i8, m![1], m![A, B]>) -> HbmTensor<i8, m![1], m![B, A]> {
-    let mut output = unsafe { HbmTensor::<i8, m![1], m![B, A]>::from_addr(0x3000) };
+    let mut output = HbmTensor::<i8, m![1], m![B, A]>::new();
     for b in 0..32 {
         // TODO: replace with <m![B]>::SIZE
         let input_slice = input.tile::<m![B], 1, m![A, 1 # 32]>(b);
@@ -81,7 +81,7 @@ pub fn tile_window_commit(ctx: &mut Context, input: &HbmTensor<f32, Chip, m![D]>
 /// without that it fails VISA -> LIR with "no tensor exists for T{n}".
 #[device(chip = 1)]
 pub fn tile_view_in_loop(ctx: &mut Context, input: &HbmTensor<i8, m![1], m![A, B]>) -> HbmTensor<i8, m![1], m![B, A]> {
-    let mut output = unsafe { HbmTensor::<i8, m![1], m![B, A]>::from_addr(0x3000) };
+    let mut output = HbmTensor::<i8, m![1], m![B, A]>::new();
     for b in 0..32 {
         let input_slice = input.view().tile::<m![B], 1, m![A, 1 # 32]>(b);
         let output_slice = output.view_mut().tile::<m![B], 1, m![1 #{!} 32, A]>(b);
@@ -112,7 +112,7 @@ pub fn tile_view_in_nested_loop(
     ctx: &mut Context,
     input: &HbmTensor<i8, m![1], m![A, B]>,
 ) -> HbmTensor<i8, m![1], m![A, B]> {
-    let mut output = unsafe { HbmTensor::<i8, m![1], m![A, B]>::from_addr(0x3000) };
+    let mut output = HbmTensor::<i8, m![1], m![A, B]>::new();
     for g in 0..2 {
         // Outer-index tile: a 16-wide `B`-group selected by the enclosing loop var `g`. Its
         // `tile` takes `&self`, so the inner loop can re-slice it every iteration; the index
@@ -151,7 +151,7 @@ pub fn tile_chunked_output(
     ctx: &mut Context,
     input: &HbmTensor<i8, m![1], m![B, D]>,
 ) -> HbmTensor<i8, m![1], m![B, D]> {
-    let mut output = unsafe { HbmTensor::<i8, m![1], m![B, D]>::from_addr(0x3000) };
+    let mut output = HbmTensor::<i8, m![1], m![B, D]>::new();
     for i in 0..4 {
         let input_slice = input.view().tile::<m![D / 16], 1, m![B, 1 # 4, D % 16]>(i);
         let output_slice = output.view_mut().tile::<m![D / 16], 1, m![B, 1 #{!} 4, D % 16]>(i);
@@ -168,7 +168,7 @@ pub fn tile_unit_axis(
     ctx: &mut Context,
     input: &HbmTensor<i8, m![1], m![One, B, D]>,
 ) -> HbmTensor<i8, m![1], m![One, B, D]> {
-    let mut output = unsafe { HbmTensor::<i8, m![1], m![One, B, D]>::from_addr(0x3000) };
+    let mut output = HbmTensor::<i8, m![1], m![One, B, D]>::new();
     let input_slice = input.view().tile::<m![One], 1, m![1, B, D]>(0);
     let output_slice = output.view_mut().tile::<m![One], 1, m![1, B, D]>(0);
     input_slice.to_hbm_view(&mut ctx.tdma, output_slice);
@@ -180,7 +180,7 @@ pub fn tile_with_larger_than_one_1(
     ctx: &mut Context,
     up_weight: &HbmTensor<bf16, Chip, m![L, A]>,
 ) -> HbmTensor<bf16, Chip, m![L, A]> {
-    let mut output = unsafe { HbmTensor::<bf16, Chip, m![L, A]>::from_addr(0x3000) };
+    let mut output = HbmTensor::<bf16, Chip, m![L, A]>::new();
 
     let input_slice = up_weight.view().tile::<m![L], 256, m![L = 256 # 768, A]>(0);
     let output_slice = output.view_mut().tile::<m![L], 256, m![L = 256 #{!} 768, A]>(2);
@@ -219,7 +219,7 @@ pub fn tile_size_gt1_chunk_swap(
     ctx: &mut Context,
     input: &HbmTensor<bf16, Chip, m![L, A]>,
 ) -> HbmTensor<bf16, Chip, m![L, A]> {
-    let mut output = unsafe { HbmTensor::<bf16, Chip, m![L, A]>::from_addr(0x3000) };
+    let mut output = HbmTensor::<bf16, Chip, m![L, A]>::new();
 
     let input_slice = input.view().tile::<m![L], 256, m![L = 256 # 768, A]>(0);
     let output_slice = output.view_mut().tile::<m![L], 256, m![L = 256 #{!} 768, A]>(256);

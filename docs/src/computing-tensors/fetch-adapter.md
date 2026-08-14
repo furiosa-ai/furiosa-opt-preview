@@ -39,9 +39,12 @@ The key width picks the table and the requested output type picks the entry enco
 
 Widen a decoded 8-bit float to `f32` with a following `fetch_cast`, and apply any NVFP4 / MXFP4 per-block scale downstream in the [Vector Engine](./vector-engine/index.md) or the [Contraction Engine](./contraction-engine/index.md) (it is intentionally not folded into the table, which stays a static 16-entry, block-independent decode).
 
-The table for the `f4e2m1` decode is a compile-time constant baked into the fetch-sequencer configuration, so the `f4e2m1` weight stream is the only data input to the stage; there is no per-invocation table staging. The 16-entry e2m1 decode is block-independent, which is why the per-block scale stays out of it: folding the scale in would need a distinct table per block and defeat the shared static table.
+The table for the `f4e2m1` decode is a compile-time constant baked into the fetch-sequencer configuration, so the `f4e2m1` weight stream is the only data input to the stage; there is no per-invocation table staging.
+The 16-entry e2m1 decode is block-independent, which is why the per-block scale stays out of it: folding the scale in would need a distinct table per block and defeat the shared static table.
 
-The hardware sequencer walks byte-aligned keys (1 or 2 bytes), never a raw 4-bit nibble, and a 4-bit key must use a *paired* table. The `f4e2m1` decode therefore runs as a 256-entry byte-indexed table: each byte carries two nibbles and one lookup yields the pair of decoded `f8e4m3` values, decoding at two elements per key. The `f4e2m1` scalar is modelled accordingly as a byte holding two nibbles, with `BITS = 4` so the fetch mapping accounts elements rather than bytes.
+The hardware sequencer walks byte-aligned keys (1 or 2 bytes), never a raw 4-bit nibble, and a 4-bit key must use a *paired* table.
+The `f4e2m1` decode therefore runs as a 256-entry byte-indexed table: each byte carries two nibbles and one lookup yields the pair of decoded `f8e4m3` values, decoding at two elements per key.
+The `f4e2m1` scalar is modelled accordingly as a byte holding two nibbles, with `BITS = 4` so the fetch mapping accounts elements rather than bytes.
 
 ```rust,ignore
 # #![feature(adt_const_params)]
@@ -138,7 +141,8 @@ For a symmetric-signed input the residual is a difference of two same-width valu
 - `i4` residual: `[-8, 7] - [-8, 7] = [-15, 15]`, which needs `i5`'s `[-16, 15]`.
 - `i8` residual: `[-128, 127] - [-128, 127] = [-255, 255]`, which needs `i9`'s `[-256, 255]`.
 
-The subtraction therefore produces one more bit than it consumes. The conversion checks this at runtime: a residual outside the `i5`/`i9` range (an out-of-range `zero_point` or input) is rejected rather than silently wrapped.
+The subtraction therefore produces one more bit than it consumes.
+The conversion checks this at runtime: a residual outside the `i5`/`i9` range (an out-of-range `zero_point` or input) is rejected rather than silently wrapped.
 
 ### Contraction-Only Staging
 

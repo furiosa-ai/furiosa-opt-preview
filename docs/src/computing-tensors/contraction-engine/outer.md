@@ -28,7 +28,8 @@ The streaming operand's `Time` / `Packet` map to the output's `OutTime` / `OutPa
 `OutTime` retains the remaining factors of `Time`, with broadcast factors added at its innermost positions via [Broadcast](#broadcast).
 Broadcast factors come from the TRF operand's `Lane` / `Element` (where the streaming operand replicates against the TRF mapping) and from any purely-output axes that appear in `OutTime` / `OutPacket` but in neither the input nor the TRF (e.g. einsum `AB, BC -> ABCD` where `D` is broadcast).
 
-The `TrfTensor` has shape `[Chip, Cluster, Slice, Lane, Element]`, with `Chip` / `Cluster` / `Slice` / `Lane` spatially parallel: `Chip` / `Cluster` / `Slice` pass through to the output, and `Lane` partitions per-lane data across 1–8 hardware lanes. `Element` (the per-lane layout set by [`.to_trf()`](../register-files.md#tensor-register-file)) is reshaped by the TRF Sequencer to fill `OutTime` / `OutPacket`.
+The `TrfTensor` has shape `[Chip, Cluster, Slice, Lane, Element]`, with `Chip` / `Cluster` / `Slice` / `Lane` spatially parallel: `Chip` / `Cluster` / `Slice` pass through to the output, and `Lane` partitions per-lane data across 1–8 hardware lanes.
+`Element` (the per-lane layout set by [`.to_trf()`](../register-files.md#tensor-register-file)) is reshaped by the TRF Sequencer to fill `OutTime` / `OutPacket`.
 
 ## Stream Adapter
 
@@ -54,7 +55,8 @@ PackPacket = [Time % PackSize, Packet] # (PackSize × 32 / D::SIZE)
 `PackSize` is set by matching `OutPacket` against the input `Packet`: `PackSize = 2` if `OutPacket` absorbs the innermost size-2 factor of `Time`, otherwise `PackSize = 1`.
 Equivalently, `PackSize = OutPacket::SIZE * D::SIZE / 32`, so the user picks `OutPacket` (32 B or 64 B) and Packing's collect-flit count follows.
 
-Hardware always operates on 64 B packets internally; when `PackSize = 1`, the unused 32 B half holds zeros that do not propagate into the logical `OutPacket` type. Downstream stages (Packet Reducer, Lane Folder) therefore see only the `PackSize × 32` B payload, avoiding dummy cycles, see the [Lane Folder Sequential note](./lane-folder.md#sequential).
+Hardware always operates on 64 B packets internally; when `PackSize = 1`, the unused 32 B half holds zeros that do not propagate into the logical `OutPacket` type.
+Downstream stages (Packet Reducer, Lane Folder) therefore see only the `PackSize × 32` B payload, avoiding dummy cycles, see the [Lane Folder Sequential note](./lane-folder.md#sequential).
 
 ### Broadcast
 
@@ -96,13 +98,15 @@ fn stream_adapter_example<'l, const T: Tu>(
 # let mut ctx = Context::acquire();
 # 
 # let a: CollectTensor<'_, _, bf16, m![1], m![1 # 2], m![1 # 256], m![M, L], m![K]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
-# let b: TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![B, L, K]> = unsafe { TrfTensor::from_addr(TrfAddress::Full) };
+# let b: TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![B, L, K]> = TrfTensor::new();
 # let _o = stream_adapter_example(a, &b);
 ```
 
 ### Constraints
 
-- `OutPacket::SIZE * Storage::SIZE ∈ {32, 64}` bytes (on RNGD), where `Storage` is the pre-widen operand dtype (e.g. `bf16` = 2 B, *not* the widened `f32` accumulator the result tensor carries): 32 for `PackSize = 1`, 64 for `PackSize = 2`. The user picks this size and Packing's collect-flit count follows.
+- `OutPacket::SIZE * Storage::SIZE ∈ {32, 64}` bytes (on RNGD), where `Storage` is the pre-widen operand dtype (e.g. `bf16` = 2 B, *not* the widened `f32` accumulator the result tensor carries).
+  The size is 32 for `PackSize = 1` and 64 for `PackSize = 2`.
+  The user picks this size and Packing's collect-flit count follows.
 - `PackSize ∈ {1, 2}` (see [Packing](#packing)).
 - `Lane::SIZE ∈ {1, 2, 4, 8}`.
 
@@ -166,7 +170,7 @@ fn trf_sequencer_full_read<'l, const T: Tu>(
 # let mut ctx = Context::acquire();
 # 
 # let a: CollectTensor<'_, _, bf16, m![1], m![1 # 2], m![1 # 256], m![M, K / 16], m![K % 16]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
-# let b: TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![K]> = unsafe { TrfTensor::from_addr(TrfAddress::Full) };
+# let b: TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![K]> = TrfTensor::new();
 # let _o = trf_sequencer_full_read(a, &b);
 ```
 
@@ -193,7 +197,7 @@ fn trf_sequencer_partial_read<'l, const T: Tu>(
 # let mut ctx = Context::acquire();
 # 
 # let a: CollectTensor<'_, _, bf16, m![1], m![1 # 2], m![1 # 256], m![O, M, L], m![K]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
-# let b: TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![O, K]> = unsafe { TrfTensor::from_addr(TrfAddress::Full) };
+# let b: TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![O, K]> = TrfTensor::new();
 # let _o = trf_sequencer_partial_read(a, &b);
 ```
 
@@ -204,7 +208,8 @@ fn trf_sequencer_partial_read<'l, const T: Tu>(
 
 ### Architecture
 
-Across cycles, the sequencer iterates the outer factors of `Element` (i.e. `Element / ReadSize`) using the same nested-loop configuration as all other [sequencers](../../moving-tensors/sequencer.md), so a single `TrfTensor` walks `Element / ReadSize` cycles before exhausting its content.
+Across cycles, the sequencer iterates the outer factors of `Element` (i.e.
+`Element / ReadSize`) using the same nested-loop configuration as all other [sequencers](../../moving-tensors/sequencer.md), so a single `TrfTensor` walks `Element / ReadSize` cycles before exhausting its content.
 `PacketBroadcast` factors replicate the same row within a single cycle, filling the 64 B `OutPacket` past the natural `ReadSize` without consuming additional TRF read bandwidth.
 
 ### Performance

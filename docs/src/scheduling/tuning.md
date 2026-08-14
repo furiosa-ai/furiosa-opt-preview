@@ -29,7 +29,9 @@ The [Moving Tensors](../moving-tensors/index.md), [Computing Tensors](../computi
 ## Double buffering
 
 
-The public `TrfAddress` API exposes `Full`, `FirstHalf`, and `SecondHalf`. A kernel can place one batch in one half while another operation uses the other half; the halves are capacity regions, not an unconditional promise of overlap. Both halves share banks, so a candidate must still be checked for resource contention in the schedule.
+The scheduler splits the TRF into halves on its own: a tensor that fits in half the file is placed in one, so another operation can hold the other.
+A kernel does not name the region.
+Both halves share banks, so a candidate must still be checked for resource contention in the schedule.
 
 See [Register Files: Double Buffering](../computing-tensors/register-files.md#double-buffering) for capacities and address modes. Use the schedule viewer to verify whether the chosen pattern actually overlaps operations; do not assume a fixed cycle reduction.
 

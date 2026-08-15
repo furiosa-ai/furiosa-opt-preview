@@ -1901,15 +1901,15 @@ limitations under the License.
 ---
 
 Apache License 2.0
-  - cargo-furiosa-opt 0.5.1+g905b99ae
-  - furiosa-mapping 0.5.1+g905b99ae
-  - furiosa-mapping-macro 0.5.1+g905b99ae
-  - furiosa-mapping-types 0.5.1+g905b99ae
-  - furiosa-opt-common-ir 0.5.1+g905b99ae
-  - furiosa-opt-lower 0.5.1+g905b99ae
-  - furiosa-opt-lower-types 0.5.1+g905b99ae
-  - furiosa-opt-macro 0.5.1+g905b99ae
-  - furiosa-opt-std 0.5.1+g905b99ae
+  - cargo-furiosa-opt 0.6.0+gb1f793cf
+  - furiosa-mapping 0.6.0+gb1f793cf
+  - furiosa-mapping-macro 0.6.0+gb1f793cf
+  - furiosa-mapping-types 0.6.0+gb1f793cf
+  - furiosa-opt-common-ir 0.6.0+gb1f793cf
+  - furiosa-opt-lower 0.6.0+gb1f793cf
+  - furiosa-opt-lower-types 0.6.0+gb1f793cf
+  - furiosa-opt-macro 0.6.0+gb1f793cf
+  - furiosa-opt-std 0.6.0+gb1f793cf
   - abi_stable 0.11.3
   - abi_stable_derive 0.11.3
   - abi_stable_shared 0.11.0

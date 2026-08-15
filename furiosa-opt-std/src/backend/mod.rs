@@ -105,7 +105,7 @@ pub trait Backend: Sized + 'static {
     /// Element-wise zip of three same-layout tensors to a new scalar, the ternary peer of
     /// [`Self::map`] (1-ary) and [`Self::zip_with`] (2-ary). The result is defined only where all
     /// three inputs are. The VE engine uses it for branch-conditional combine: it passes the
-    /// execution-id `tag` as the third operand and resolves `TagFilter`/select inside the closure,
+    /// execution-id `tag` as the third operand and resolves the slot's `TagGuard`/select inside the closure,
     /// so the backend stays free of VE concepts.
     fn zip3_with<D: MaterializableScalar, D2: MaterializableScalar, D3: MaterializableScalar, D4: Scalar>(
         a: &Self::Storage<D>,

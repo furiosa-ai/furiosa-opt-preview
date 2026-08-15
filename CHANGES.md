@@ -18,10 +18,29 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+Breaking changes come first, each with what to write instead.
+
 - `furiosa-opt-examples` now holds only kernels that compile end to end, plus a `negative` module of
   fixtures that must be refused. Legal programs the compiler cannot lower to an EDF yet (`matmul`,
   `attention`, `vrf_add`, the value-form `runtime_if`, and the parallel-copy and shuffle transfers)
   moved out of the crate, so an example you find here compiles unless it is under `negative`.
+
+- A VE operand that applies to only some elements is written through `Branched`, which opens at the kind of hardware slot it drives and can drive several: `Branched::imm(guard, 100).imm(other, 200).rf(rest, &vrf)`. `imm` takes the next of a pass's three immediate registers, `rf` its one register-file port, once and last. An unconditional operand is still written bare (`.vector_fxp(op, 16384i32)`), and `VeOperand` is gone as a name a kernel writes.
+- `TagFilter` is `TagGuard`, and constrains the execution id bit by bit rather than only by group. Write `TagGuard::all()` for `TagFilter::All` and `TagGuard::group(id)` for `TagFilter::Group { id }`. `TagGuard::matches([BitReq; 4])` and `not_matches` are new, taking one `BitReq` per tag bit: `One`, `Zero` or `Ignore`.
+- Guards that admit the same execution ids are now the same value, so comparing guards compares predicates: `matches([Ignore; 4])` is `all()`, and `not_matches` of a pattern constraining bit 3 alone is that `group()`.
+- A comparison is `Cmp<D>`, typed by the stream's scalar and carrying its boundary positionally, replacing `InputCmp` and its `InputCmpI32`/`InputCmpF32` halves: `Cmp::Less(0)` in place of `InputCmp::I32(InputCmpI32::Less { boundary: 0 })`. `TagMode` is `TagMode<D>` to match.
+- `TagMode::ValidCount` and `TagMode::Vrf` are withheld. Neither ran on the host, and `ValidCount` compiled for the device, so a kernel naming it failed only once it ran.
+- A guard that could never fire is refused instead of compiled: `not_matches([Ignore; 4])`, which no execution id satisfies, and any slot after an unconditional one, which already claims every element left over.
+
+### Fixed
+
+- A conditional operand's slots fire in the order they are written: an element takes the first slot whose guard it satisfies, so a trailing `TagGuard::all()` is the pass's `else`. The LIR software executor had applied every matching slot in turn.
+- Unsupported shapes are refused against the kernel's own span instead of panicking inside the compiler: a `TagMode::AxisToggle` pass, a stash read guarded on the group bit alone, and chaining more ops than a VE cluster holds.
+
+### Known issues
+
+- A stash read guarded on the group bit alone does not lower. A cached read needs two things the compiler keeps apart -- which elements the operand applies to, and which group wrote the slice being read -- and a group-shaped guard cannot be told from a zip's read. Constrain another bit as well, or drop the guard.
+- `TagMode::AxisToggle` does not lower. `vector_intra_slice_unzip()` is the supported route to a group split.
 
 ## [v0.5.1]
 

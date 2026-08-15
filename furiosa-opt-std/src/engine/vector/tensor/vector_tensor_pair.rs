@@ -45,7 +45,7 @@ use crate::engine::vector::op::{
     BinaryArgMode, ClipBinaryOpF32, ClipBinaryOpI32, FpBinaryOp, FpDivBinaryOp, FpTernaryOp, FpUnaryOp, FxpBinaryOp,
     HasAlu, HasBinaryOp, HasTernaryOp, HasUnaryOp, LogicBinaryOpF32, LogicBinaryOpI32, TernaryArgMode,
 };
-use crate::engine::vector::operand::{GroupOperand, IntoGroupOperand, IntoGroupTernaryOperandTag, TernaryOperandTag};
+use crate::engine::vector::operand::{GroupOperand, GroupTernaryOperand, IntoGroupOperand, IntoGroupTernaryOperand};
 use crate::engine::vector::scalar::VeScalar;
 use crate::engine::vector::stage::markers as stage;
 use crate::engine::vector::stage::markers::{
@@ -201,15 +201,16 @@ impl<
         let group1_tag = self.group1.tag.clone();
         let op_fn = op.binary_op_fn(mode);
 
+        let (op_fn, group0_tag, group1_tag) = (&op_fn, &group0_tag, &group1_tag);
         let fn_group0 = group0_operand.map(|operand| {
-            |data: Tensor<D, m![{ Chip }, { Cluster }, { Slice }, { SplitTime }, { Packet }]>| {
-                apply_binary_op(&data, &group0_tag, &op_fn, &[operand], None)
+            move |data: Tensor<D, m![{ Chip }, { Cluster }, { Slice }, { SplitTime }, { Packet }]>| {
+                apply_binary_op(&data, group0_tag, op_fn, &operand, None)
             }
         });
 
         let fn_group1 = group1_operand.map(|operand| {
-            |data: Tensor<D, m![{ Chip }, { Cluster }, { Slice }, { SplitTime }, { Packet }]>| {
-                apply_binary_op(&data, &group1_tag, &op_fn, &[operand], None)
+            move |data: Tensor<D, m![{ Chip }, { Cluster }, { Slice }, { SplitTime }, { Packet }]>| {
+                apply_binary_op(&data, group1_tag, op_fn, &operand, None)
             }
         });
 
@@ -344,8 +345,8 @@ impl<'l, const T: Tu, S: stage::Stage, Chip: M, Cluster: M, Slice: M, SplitTime:
         self,
         op: Op,
         mode: Option<TernaryArgMode>,
-        group0_operand: Option<TernaryOperandTag<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>>,
-        group1_operand: Option<TernaryOperandTag<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>>,
+        group0_operand: GroupTernaryOperand<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
+        group1_operand: GroupTernaryOperand<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
     ) -> VectorTensorPair<'l, T, f32, TargetStage, Chip, Cluster, Slice, SplitTime, Packet, W>
     where
         TargetStage: stage::Stage,
@@ -356,15 +357,16 @@ impl<'l, const T: Tu, S: stage::Stage, Chip: M, Cluster: M, Slice: M, SplitTime:
         let group1_tag = self.group1.tag.clone();
         let op_fn = op.ternary_op_fn(mode);
 
+        let (op_fn, group0_tag, group1_tag) = (&op_fn, &group0_tag, &group1_tag);
         let fn_group0 = group0_operand.map(|operand| {
-            |data: Tensor<f32, m![{ Chip }, { Cluster }, { Slice }, { SplitTime }, { Packet }]>| {
-                apply_ternary_op(&data, &group0_tag, &op_fn, &[operand], None)
+            move |data: Tensor<f32, m![{ Chip }, { Cluster }, { Slice }, { SplitTime }, { Packet }]>| {
+                apply_ternary_op(&data, group0_tag, op_fn, &operand, None)
             }
         });
 
         let fn_group1 = group1_operand.map(|operand| {
-            |data: Tensor<f32, m![{ Chip }, { Cluster }, { Slice }, { SplitTime }, { Packet }]>| {
-                apply_ternary_op(&data, &group1_tag, &op_fn, &[operand], None)
+            move |data: Tensor<f32, m![{ Chip }, { Cluster }, { Slice }, { SplitTime }, { Packet }]>| {
+                apply_ternary_op(&data, group1_tag, op_fn, &operand, None)
             }
         });
 
@@ -741,8 +743,8 @@ impl<
     pub fn vector_fp_ternary(
         self,
         op: FpTernaryOp,
-        group0_operand: impl IntoGroupTernaryOperandTag<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
-        group1_operand: impl IntoGroupTernaryOperandTag<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
+        group0_operand: impl IntoGroupTernaryOperand<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
+        group1_operand: impl IntoGroupTernaryOperand<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
     ) -> VectorTensorPair<'l, T, f32, stage::Fp, Chip, Cluster, Slice, SplitTime, Packet, { Way4 }> {
         self.apply_ternary_to_both(
             op,
@@ -758,8 +760,8 @@ impl<
         self,
         op: FpTernaryOp,
         mode: TernaryArgMode,
-        group0_operand: impl IntoGroupTernaryOperandTag<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
-        group1_operand: impl IntoGroupTernaryOperandTag<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
+        group0_operand: impl IntoGroupTernaryOperand<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
+        group1_operand: impl IntoGroupTernaryOperand<VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
     ) -> VectorTensorPair<'l, T, f32, stage::Fp, Chip, Cluster, Slice, SplitTime, Packet, { Way4 }> {
         self.apply_ternary_to_both(
             op,

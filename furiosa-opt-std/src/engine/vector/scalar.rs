@@ -15,6 +15,10 @@ pub trait VeScalar: MaterializableScalar + sealed::Sealed {
     /// The value those 32 bits stand for.
     fn from_raw_bits(bits: u32) -> Self;
 
+    /// Ordered comparison in the scalar's own order: signed for `i32`, IEEE for `f32`. Named to avoid
+    /// shadowing `PartialOrd::lt` at concrete call sites.
+    fn lt_scalar(self, other: Self) -> bool;
+
     /// Rereads `self`'s 32 bits as `D2`, leaving them untouched: the functional model of
     /// [`vector_reinterpret`](crate::prelude::VectorTensor::vector_reinterpret). A reinterpret, not a
     /// conversion: `1.0f32.reinterpret::<i32>()` is `0x3f80_0000`, not `1`. `D2 == Self` is the identity.
@@ -39,6 +43,10 @@ impl VeScalar for i32 {
     fn from_raw_bits(bits: u32) -> Self {
         bits as i32
     }
+
+    fn lt_scalar(self, other: Self) -> bool {
+        self < other
+    }
 }
 
 impl VeScalar for f32 {
@@ -48,6 +56,10 @@ impl VeScalar for f32 {
 
     fn from_raw_bits(bits: u32) -> Self {
         Self::from_bits(bits)
+    }
+
+    fn lt_scalar(self, other: Self) -> bool {
+        self < other
     }
 }
 

@@ -26,29 +26,25 @@ use furiosa_opt_macro::primitive;
 use super::VeTensorShape;
 
 use super::VectorFinalTensor;
-use crate::array_vec::ArrayVec;
 use crate::backend::Backend;
 use crate::context::*;
-use crate::engine::vector::MAX_TAGS;
 use crate::engine::vector::alu::RngdAlu;
-use crate::engine::vector::branch::{TagMode, apply_branch_config};
+use crate::engine::vector::branch::{
+    BinaryBranchedOperand, ExecutionId, RfPort, TagGuard, TagMode, TernaryBranchedOperand, VeOperandLayout,
+    apply_branch_config,
+};
 use crate::engine::vector::layer::{FpToFxp, FxpToFp, Reinterpret};
 use crate::engine::vector::op::semantics::HasConversionOp;
 use crate::engine::vector::op::semantics::{HasBinaryOp, HasTernaryOp, HasUnaryOp};
 use crate::engine::vector::op::{
-    BinaryArgMode, ClipBinaryOpF32, ClipBinaryOpI32, FpBinaryOp, FpDivBinaryOp, FpTernaryOp, FpUnaryOp, FxpBinaryOp,
-    HasAlu, InterSliceReduceOpF32, InterSliceReduceOpI32, IntraSliceReduceOpF32, IntraSliceReduceOpI32,
-    LogicBinaryOpF32, LogicBinaryOpI32, TernaryArgMode,
+    BinaryArgMode, ClipBinaryOpF32, ClipBinaryOpI32, FpBinaryOp, FpDivBinaryOp, FpTernaryOp, FxpBinaryOp, HasAlu,
+    InterSliceReduceOpF32, InterSliceReduceOpI32, IntraSliceReduceOpF32, IntraSliceReduceOpI32, LogicBinaryOpF32,
+    LogicBinaryOpI32, TernaryArgMode,
 };
-use crate::engine::vector::operand::OperandTag;
-use crate::prelude::TagFilter;
 use crate::runtime::CurrentBackend;
-use crate::scalar::Opt;
 use crate::tensor::*;
 
-use crate::engine::vector::operand::{
-    BinaryOperandTag, IntoOperands, IntoTernaryOperandTags, StashTransition, TernaryOperandTag, VeRhs,
-};
+use crate::engine::vector::operand::{IntoBranchedOperand, IntoGuardedUnaryOp, IntoTernaryOperand, StashTransition};
 use crate::engine::vector::scalar::VeScalar;
 use crate::engine::vector::stage::markers as stage;
 use crate::engine::vector::stage::markers::CanTransitionTo;
@@ -200,11 +196,11 @@ impl<
         mut self,
         alu: RngdAlu,
         op_fn: impl Fn(D, D) -> D + Sync,
-        operands: &ArrayVec<BinaryOperandTag<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>, MAX_TAGS>,
+        operand: &BinaryBranchedOperand<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
         stash_data: Option<Tensor<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>>,
     ) -> VeTensorData<NextStage, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, NextFS, W> {
         self.ve_state.use_alu(alu);
-        let result = apply_binary_op(&self.inner, &self.tag, op_fn, operands.as_slice(), stash_data.as_ref());
+        let result = apply_binary_op(&self.inner, &self.tag, op_fn, operand, stash_data.as_ref());
         VeTensorData {
             inner: result,
             tag: self.tag,
@@ -344,12 +340,11 @@ impl<
         Self { ctx, data }
     }
 
-    /// Internal helper for binary operations: reads the stash the operand asks for, runs the op with
-    /// ALU tracking, and moves the stash typestate. All three come from the one `Op`, so a read
-    /// without a transition (or the reverse) is not expressible at the call sites. The `D` and `W` in
-    /// the bound are this impl's own, so an op method whose `where` clause names a different scalar or
-    /// way fails here rather than silently reading the stash at the wrong one. Mode defaulting
-    /// (`None` -> `Mode01`) happens in `HasBinaryOp::binary_op_fn`.
+    /// Internal helper for binary operations: reads the stash the operand asks for, runs the op with ALU
+    /// tracking, and moves the stash typestate. All three come from the one `Op`, so a read without a
+    /// transition is not expressible at the call sites. The `D` and `W` in the bound are this impl's own,
+    /// so an op method naming a different scalar or way fails here rather than reading the stash at the
+    /// wrong one.
     pub(crate) fn do_binary<NextStage: stage::Stage, NextFS: stage::VeTensorContext, Op>(
         self,
         op: impl HasAlu + HasBinaryOp<D>,
@@ -357,13 +352,13 @@ impl<
         operand: Op,
     ) -> VectorTensor<'l, T, NextStage, D, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, NextFS, W>
     where
-        Op: IntoOperands<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> + StashTransition<Stash, D, W>,
+        Op: IntoBranchedOperand<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> + StashTransition<Stash, D, W>,
     {
         let stash_data = Op::stashed(self.ve_state());
-        let operands = operand.into_operands();
+        let operand = operand.into_branched_operand();
         let data = self
             .data
-            .apply_binary(op.alu(), op.binary_op_fn(mode), &operands, stash_data)
+            .apply_binary(op.alu(), op.binary_op_fn(mode), &operand, stash_data)
             .apply_stash_transition::<Op>();
         VectorTensor { ctx: self.ctx, data }
     }
@@ -390,23 +385,18 @@ impl<
     ///
     /// Write-once: this op is defined only on the [`Fresh`](crate::engine::vector::stash_slot::Fresh)
     /// state and flips it to [`Occupied`](crate::engine::vector::stash_slot::Occupied), so a second
-    /// `vector_stash` (whether after a read, or back-to-back with no read) has no impl and does not
-    /// compile. Read-once is enforced by the [`Stash`](crate::engine::vector::operand::Stash)
-    /// operand, which consumes `Occupied` into
-    /// [`Spent`](crate::engine::vector::stash_slot::Spent), not back to `Fresh`, so a read never
-    /// re-arms the write. See the stash-slot [module docs] for the full state machine. Only on
-    /// `Stashable` stages (Tag, Logic, Fxp, Narrow, Fp, FpDiv, Clip) in the `Standalone` context.
+    /// `vector_stash` has no impl and does not compile. Read-once is enforced by the
+    /// [`Stash`](crate::engine::vector::operand::Stash) operand, which consumes `Occupied` into
+    /// [`Spent`](crate::engine::vector::stash_slot::Spent) rather than back to `Fresh`, so a read never
+    /// re-arms the write. See the stash-slot [module docs] for the state machine. Only on `Stashable`
+    /// stages (Tag, Logic, Fxp, Narrow, Fp, FpDiv, Clip) in the `Standalone` context.
     ///
-    /// Both HW-illegal double writes are compile errors (the second `vector_stash` finds no impl):
+    /// Both HW-illegal double writes are compile errors:
     ///
     /// ```text
     /// t.vector_stash().vector_fp_binary(op, Stash).vector_stash();  // read then re-stash: Spent has no vector_stash
     /// t.vector_stash().vector_stash();                              // no read between: Occupied has no vector_stash
     /// ```
-    ///
-    /// The read-once half is locked by the `compile_fail` doctests on
-    /// [`StashTransition`](crate::engine::vector::operand::StashTransition); the write-once half by
-    /// the `ve_elementwise_stash_*` example kernels (a real double `vector_stash` there is `E0599`).
     ///
     /// The stash takes the scalar the stream carries at the write, so `vector_reinterpret` before a
     /// `vector_stash` decides what gets stashed, and a read at the other scalar does not compile.
@@ -571,7 +561,7 @@ impl<'l, const T: Tu, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packe
     #[primitive(VectorInitTensor::vector_intra_slice_tag)]
     pub fn vector_intra_slice_tag(
         self,
-        branch: TagMode,
+        branch: TagMode<D>,
     ) -> VectorBranchTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, Fresh, { VeOrder::IntraFirst }> {
         // ANCHOR_END: vector_intra_slice_tag
         VectorBranchTensor::new(self.ctx, self.inner, branch)
@@ -672,7 +662,7 @@ impl<
     #[primitive(VectorTensor::vector_intra_slice_tag)]
     pub fn vector_intra_slice_tag(
         self,
-        branch: TagMode,
+        branch: TagMode<D>,
     ) -> VectorBranchTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, Fresh, { VeOrder::InterFirst }> {
         VectorBranchTensor::new(self.ctx, self.data.inner, branch)
     }
@@ -701,7 +691,7 @@ impl<'l, const T: Tu, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packe
     pub fn new(
         ctx: &'l mut TuContext<{ T }>,
         inner: Tensor<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
-        branch_config: TagMode,
+        branch_config: TagMode<D>,
     ) -> Self {
         assert_eq!(
             Packet::SIZE,
@@ -894,79 +884,113 @@ pub type VectorFilterTensor<
 // Helper functions for applying operations with tag
 // ============================================================================
 
-/// Resolves `operand0`'s rhs tensor and fuses one branch-conditional combine into a single
-/// [`Backend::zip3_with`] over `(out, rhs, tag)`. `Vrf`/`Stash` borrow the operand's existing tensor
-/// (no copy); only `Const` materializes a broadcast tensor.
-fn blend_operand<D: VeScalar, Mapping: M>(
-    out: &<CurrentBackend as Backend>::Storage<D>,
-    operand0: &VeRhs<D, Mapping>,
-    tag: &Tensor<u8, Mapping>,
-    stash_data: Option<&Tensor<D, Mapping>>,
-    blend: impl Fn(D, D, u8) -> D + Sync,
-) -> <CurrentBackend as Backend>::Storage<D> {
-    match operand0 {
-        VeRhs::Vrf { data } => CurrentBackend::zip3_with(out, &data.inner, &tag.inner, blend),
-        VeRhs::Stash => {
-            let stash = stash_data.expect("a stash operand reached the emulation without a stashed tensor: use the `Stash` operand, whose `StashTransition` supplies it, not a hand-built tag");
-            CurrentBackend::zip3_with(out, &stash.inner, &tag.inner, blend)
-        }
-        VeRhs::Const { v } => {
-            let rhs = Tensor::<D, Mapping>::splat(*v);
-            CurrentBackend::zip3_with(out, &rhs.inner, &tag.inner, blend)
-        }
-    }
+/// The tag tensor's byte as an execution id.
+///
+/// The tag unit writes four bits, so a wider value means the tensor was built by something other than
+/// `apply_branch_config` -- worth failing on rather than aliasing onto the low four bits.
+fn exec_id(raw: u8) -> ExecutionId {
+    ExecutionId::try_new(raw)
+        .unwrap_or_else(|| panic!("an execution id is four bits, but the tag tensor holds {raw:#04x}"))
 }
 
-/// Applies a binary operation with branch-conditional execution: for each operand, `op` runs only on
-/// cells whose `tag` matches the operand's `TagFilter`, leaving `out` unchanged elsewhere. Stash data
-/// is passed as a `Tensor` (already transposed to the current mapping).
+/// Applies one VE pass: every cell takes the first filled slot of `operand` whose [`TagGuard`] its
+/// `tag` satisfies, and `combine` runs once with that slot's operands. A cell no slot claims passes
+/// through unchanged, and empty (`None`) slots contribute nothing.
+///
+/// The early return below is not an emulation shortcut: first match is the hardware's rule, so a later
+/// slot never re-combines a cell an earlier one claimed. See `BranchedOperand`.
+///
+/// Binary and ternary passes share this body because they share the slot layout ([`VeOperandLayout`]);
+/// the arity shows up only as the `operand1` handed to `combine`. Stash data arrives as a `Tensor`,
+/// already transposed, and is read by the rhs port when that port carries no register.
+fn apply_slots<D: VeScalar, Mapping: M, L: VeOperandLayout<D, Mapping>>(
+    data: &Tensor<D, Mapping>,
+    tag: &Tensor<u8, Mapping>,
+    operand: &L,
+    stash_data: Option<&Tensor<D, Mapping>>,
+    combine: impl Fn(D, D, L::Operand1) -> D + Sync,
+) -> Tensor<D, Mapping> {
+    // A slot's guard, and an immediate slot's rhs, are constants for the whole pass, so the per-cell
+    // closure captures them by value instead of borrowing the operand or broadcasting the rhs to a
+    // full tensor.
+    let regs = operand
+        .regs()
+        .map(|slot| slot.map(|(guard, operand0, operand1)| (*guard, operand0, operand1)));
+    let port = operand.port().map(|(guard, port, operand1)| {
+        let rhs = match port {
+            RfPort::External(register) => register,
+            RfPort::Stash => stash_data.expect(
+                "a stash operand reached the emulation without a stashed tensor: use the `Stash` operand, whose \
+                 `StashTransition` supplies it, not a hand-built slot",
+            ),
+        };
+        (*guard, rhs, operand1)
+    });
+    // The port register feeds the port slot alone, so with no port the mainstream stands in for it
+    // and the closure below never reads that argument.
+    let port_rhs = port.map_or(data, |(_, rhs, _)| rhs);
+    let port_slot = port.map(|(guard, _, operand1)| (guard, operand1));
+
+    let inner = CurrentBackend::zip3_with(
+        &data.inner,
+        &port_rhs.inner,
+        &tag.inner,
+        move |cell, port_cell, raw_id| {
+            let id = exec_id(raw_id);
+            for (guard, operand0, operand1) in regs.iter().flatten() {
+                if guard.admits(id) {
+                    return combine(cell, *operand0, *operand1);
+                }
+            }
+            match port_slot {
+                Some((guard, operand1)) if guard.admits(id) => combine(cell, port_cell, operand1),
+                _ => cell,
+            }
+        },
+    );
+    Tensor::from_inner(inner)
+}
+
+/// Applies a binary operation with branch-conditional execution: [`apply_slots`] with no `operand1`.
 pub(super) fn apply_binary_op<D: VeScalar, Mapping: M>(
     data: &Tensor<D, Mapping>,
     tag: &Tensor<u8, Mapping>,
     op: impl Fn(D, D) -> D + Sync,
-    operands: &[BinaryOperandTag<D, Mapping>],
+    operand: &BinaryBranchedOperand<D, Mapping>,
     stash_data: Option<&Tensor<D, Mapping>>,
 ) -> Tensor<D, Mapping> {
-    let mut out = data.inner.clone();
-    for operand in operands {
-        let filter = operand.tag_filter();
-        let blend = |o: D, r: D, t: u8| if filter.matches(Opt::Init(t)) { op(o, r) } else { o };
-        out = blend_operand(&out, operand.operand0(), tag, stash_data, blend);
-    }
-    Tensor::from_inner(out)
+    apply_slots(data, tag, operand, stash_data, |mainstream, rhs, ()| {
+        op(mainstream, rhs)
+    })
 }
 
-/// Applies a unary operation to every position of `data`. Unary ops accept no branch [`OperandTag`].
-pub(super) fn apply_unary_op<D: VeScalar, Mapping: M>(
+/// Applies a unary operation where `guard` matches, leaving every other cell alone.
+///
+/// A unary node has no slots, so there is no priority order to resolve: one guard either claims a cell
+/// or does not. [`apply_slots`] is what the branched arities need instead.
+pub(super) fn apply_unary_op_where<D: VeScalar, Mapping: M>(
     data: &Tensor<D, Mapping>,
+    tag: &Tensor<u8, Mapping>,
+    guard: TagGuard,
     op: impl Fn(D) -> D + Sync,
 ) -> Tensor<D, Mapping> {
-    data.map(op)
+    let inner = CurrentBackend::zip_with(&data.inner, &tag.inner, move |cell, raw_id| {
+        if guard.admits(exec_id(raw_id)) { op(cell) } else { cell }
+    });
+    Tensor::from_inner(inner)
 }
 
-/// Applies a ternary operation to a tensor with branch-conditional execution.
-/// Ternary operations are only supported for f32 tensors.
+/// Applies a ternary operation with branch-conditional execution: [`apply_slots`] with each slot's
+/// own `operand1`, which the hardware selects per branch just like `operand0`. Ternary operations are
+/// only supported for f32 tensors.
 pub(super) fn apply_ternary_op<Mapping: M>(
     data: &Tensor<f32, Mapping>,
     tag: &Tensor<u8, Mapping>,
     op: impl Fn(f32, f32, f32) -> f32 + Sync,
-    operands: &[TernaryOperandTag<Mapping>],
+    operand: &TernaryBranchedOperand<f32, Mapping>,
     stash_data: Option<&Tensor<f32, Mapping>>,
 ) -> Tensor<f32, Mapping> {
-    let mut out = data.inner.clone();
-    for operand in operands {
-        let filter = operand.tag_filter();
-        let rhs1 = operand.operand1();
-        let blend = |o: f32, r: f32, t: u8| {
-            if filter.matches(Opt::Init(t)) {
-                op(o, r, rhs1)
-            } else {
-                o
-            }
-        };
-        out = blend_operand(&out, operand.operand0(), tag, stash_data, blend);
-    }
-    Tensor::from_inner(out)
+    apply_slots(data, tag, operand, stash_data, op)
 }
 
 // ============================================================================
@@ -998,7 +1022,7 @@ where
         operand: Op,
     ) -> VectorLogicTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Logic, stage::Standalone, Op>(op, None, operand)
@@ -1013,7 +1037,7 @@ where
         operand: Op,
     ) -> VectorLogicTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Logic, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1049,7 +1073,7 @@ where
         operand: Op,
     ) -> VectorLogicTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way8 }>,
     {
         self.do_binary::<stage::Logic, stage::Standalone, Op>(op, None, operand)
@@ -1064,7 +1088,7 @@ where
         operand: Op,
     ) -> VectorLogicTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way8 }>,
     {
         self.do_binary::<stage::Logic, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1100,7 +1124,7 @@ where
         operand: Op,
     ) -> VectorFxpTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Fxp, stage::Standalone, Op>(op, None, operand)
@@ -1115,7 +1139,7 @@ where
         operand: Op,
     ) -> VectorFxpTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Fxp, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1261,14 +1285,28 @@ impl<
 where
     S: stage::Stage + CanTransitionTo<stage::Fp>,
 {
-    /// Fp unary operation (f32 only).
+    /// Fp unary operation (f32 only), applied where its guard matches.
+    ///
+    /// Takes the op bare to run everywhere, or paired with a [`TagGuard`] to run on the elements that
+    /// guard admits:
+    ///
+    /// ```ignore
+    /// tensor.vector_fp_unary(FpUnaryOp::Sigmoid)                   // everywhere
+    /// tensor.vector_fp_unary((negative, FpUnaryOp::Sigmoid))       // where `negative` matches
+    /// ```
+    ///
+    /// One method rather than two because that is how the binary and logic ops read: an operand is
+    /// bare or it is a [`Branched`](crate::engine::vector::operand::Branched) layout, and the bare one
+    /// means [`TagGuard::all`]. A unary op has no operand to carry the guard, so the pairing goes on
+    /// the op.
     #[primitive(VectorTensor::vector_fp_unary)]
-    pub fn vector_fp_unary(
+    pub fn vector_fp_unary<Op: IntoGuardedUnaryOp>(
         mut self,
-        op: FpUnaryOp,
+        op: Op,
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER> {
+        let (guard, op) = op.into_guarded_unary_op();
         self.ve_state_mut().use_alu(op.alu());
-        let result = apply_unary_op(self.inner(), op.unary_op_fn());
+        let result = apply_unary_op_where(self.inner(), self.tag(), guard, op.unary_op_fn());
         let (ctx, _inner, tag, ve_state) = self.into_parts();
         VectorFpTensor::from_parts(ctx, result, tag, ve_state)
     }
@@ -1282,7 +1320,7 @@ where
         operand: Op,
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         self.do_binary::<stage::Fp, stage::Standalone, Op>(op, None, operand)
@@ -1297,7 +1335,7 @@ where
         operand: Op,
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         self.do_binary::<stage::Fp, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1318,7 +1356,7 @@ where
         operands: Op,
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoTernaryOperandTags<VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoTernaryOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         self.vector_fp_ternary_with_mode(op, TernaryArgMode::Mode012, operands)
@@ -1334,20 +1372,14 @@ where
         operands: Op,
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoTernaryOperandTags<VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoTernaryOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         let stash_data = Op::stashed(self.ve_state());
-        let operands = operands.into_ternary_operands();
+        let operands = operands.into_ternary_operand();
         self.ve_state_mut().use_alu(op.alu());
         let op_fn = op.ternary_op_fn(Some(mode));
-        let result = apply_ternary_op(
-            self.inner(),
-            self.tag(),
-            op_fn,
-            operands.as_slice(),
-            stash_data.as_ref(),
-        );
+        let result = apply_ternary_op(self.inner(), self.tag(), op_fn, &operands, stash_data.as_ref());
         let (ctx, _inner, tag, ve_state) = self.into_parts();
         let data = VeTensorData {
             inner: result,
@@ -1523,7 +1555,7 @@ where
         operand: Op,
     ) -> VectorFpDivTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS, { Way4 }>
     where
-        Op: IntoOperands<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         self.do_binary::<stage::FpDiv, FS, Op>(FpDivBinaryOp::DivF, None, operand)
@@ -1537,7 +1569,7 @@ where
         operand: Op,
     ) -> VectorFpDivTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS, { Way4 }>
     where
-        Op: IntoOperands<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         self.do_binary::<stage::FpDiv, FS, Op>(FpDivBinaryOp::DivF, Some(mode), operand)
@@ -1691,7 +1723,7 @@ where
         operand: Op,
     ) -> VectorClipTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Clip, stage::Standalone, Op>(op, None, operand)
@@ -1706,7 +1738,7 @@ where
         operand: Op,
     ) -> VectorClipTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Clip, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1742,7 +1774,7 @@ where
         operand: Op,
     ) -> VectorClipTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way8 }>,
     {
         self.do_binary::<stage::Clip, stage::Standalone, Op>(op, None, operand)
@@ -1757,7 +1789,7 @@ where
         operand: Op,
     ) -> VectorClipTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoOperands<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way8 }>,
     {
         self.do_binary::<stage::Clip, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1788,7 +1820,7 @@ where
     #[primitive(VectorTensor::vector_filter)]
     pub fn vector_filter<Time2: M>(
         self,
-        _config: TagFilter,
+        _config: TagGuard,
     ) -> VectorFilterTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet, Stash, VE_ORDER, stage::Standalone, { Way8 }>
     {
         todo!("Implement vector_filter operation")
@@ -1825,5 +1857,121 @@ impl<
         let result = self.inner().map(&op_fn);
         let (ctx, _inner, tag, ve_state) = self.into_parts();
         VectorTensor::from_parts(ctx, result, tag, ve_state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use furiosa_opt_common_ir::{BitReq, BranchedOperand, TagGuard};
+
+    use super::*;
+
+    /// One branch per element, so a cell an earlier slot claimed is not combined again by a later one.
+    /// `Max` makes the difference visible: applying both slots to cell 0 would give `max(0, 10, 50) = 50`
+    /// where first match gives `max(0, 10) = 10`.
+    ///
+    /// Bit 2 set is "negative" in the tag mode the branch-unit example uses.
+    #[test]
+    fn an_overlapping_later_slot_does_not_recombine_a_claimed_cell() {
+        axes![A = 4];
+        let negative = TagGuard::matches([BitReq::Ignore, BitReq::Ignore, BitReq::One, BitReq::Ignore]);
+        let data = Tensor::<i32, m![A]>::from_vec([0, 0, 0, 0]);
+        let tag = Tensor::<u8, m![A]>::from_vec([0b0100, 0b0000, 0b0100, 0b0000]);
+        let register = Tensor::<i32, m![A]>::from_vec([50, 50, 50, 50]);
+        let operand: BinaryBranchedOperand<i32, m![A]> = BranchedOperand::try_from_slots(
+            [Some((negative, 10)), None, None],
+            Some((TagGuard::all(), RfPort::External(register))),
+        )
+        .unwrap();
+
+        let out = apply_binary_op(&data, &tag, |a, b| a.max(b), &operand, None);
+
+        // Cells 0 and 2 match `negative` and stop at reg0; cells 1 and 3 fall through to the port.
+        assert_eq!(out.into_vec(), vec![10, 50, 10, 50]);
+    }
+
+    /// A guarded unary touches the cells its guard claims and leaves the rest, which is the whole of
+    /// what a guard means on a node with no slots to place it in.
+    ///
+    /// `vector_fp_unary` is this with `TagGuard::all`, so the unguarded form is covered by the same
+    /// path rather than a second one.
+    #[test]
+    fn a_guarded_unary_leaves_unclaimed_cells_alone() {
+        axes![A = 4];
+        let negative = TagGuard::matches([BitReq::Ignore, BitReq::Ignore, BitReq::One, BitReq::Ignore]);
+        let data = Tensor::<i32, m![A]>::from_vec([1, 2, 3, 4]);
+        let tag = Tensor::<u8, m![A]>::from_vec([0b0100, 0b0000, 0b0100, 0b0000]);
+
+        let guarded = apply_unary_op_where(&data, &tag, negative, |v| v * 10);
+        assert_eq!(guarded.into_vec(), vec![10, 2, 30, 4]);
+
+        let everywhere = apply_unary_op_where(&data, &tag, TagGuard::all(), |v| v * 10);
+        assert_eq!(everywhere.into_vec(), vec![10, 20, 30, 40]);
+    }
+
+    /// A cell no slot claims passes through untouched, which is what makes a guarded pass a partial
+    /// update rather than a whole-tensor one.
+    #[test]
+    fn a_cell_no_slot_claims_passes_through() {
+        axes![A = 2];
+        let only_bit0 = TagGuard::matches([BitReq::One, BitReq::Ignore, BitReq::Ignore, BitReq::Ignore]);
+        let data = Tensor::<i32, m![A]>::from_vec([7, 7]);
+        let tag = Tensor::<u8, m![A]>::from_vec([0b0001, 0b0000]);
+        let operand: BinaryBranchedOperand<i32, m![A]> =
+            BranchedOperand::try_from_slots([Some((only_bit0, 1)), None, None], None).unwrap();
+
+        let out = apply_binary_op(&data, &tag, |a, b| a + b, &operand, None);
+
+        assert_eq!(out.into_vec(), vec![8, 7]);
+    }
+
+    /// An empty layout leaves the stream alone entirely.
+    #[test]
+    fn an_empty_layout_leaves_the_stream_alone() {
+        axes![A = 2];
+        let data = Tensor::<i32, m![A]>::from_vec([3, 4]);
+        let tag = Tensor::<u8, m![A]>::from_vec([0b1111, 0b0000]);
+        let operand = BinaryBranchedOperand::<i32, m![A]>::default();
+
+        let out = apply_binary_op(&data, &tag, |a, b| a + b, &operand, None);
+
+        assert_eq!(out.into_vec(), vec![3, 4]);
+    }
+
+    /// Each ternary slot feeds its own `operand1`, which is why a ternary slot carries a pair at all:
+    /// two groups in one pass can multiply by different constants.
+    #[test]
+    fn each_ternary_slot_feeds_its_own_operand1() {
+        axes![A = 4];
+        // Bit 3 alone is what a group id means to the hardware. Written out rather than through
+        // `TagGuard::group` so the bit this rests on is visible in the test.
+        let group0 = TagGuard::matches([BitReq::Ignore, BitReq::Ignore, BitReq::Ignore, BitReq::Zero]);
+        let group1 = TagGuard::matches([BitReq::Ignore, BitReq::Ignore, BitReq::Ignore, BitReq::One]);
+        let data = Tensor::<f32, m![A]>::from_vec([1.0, 1.0, 1.0, 1.0]);
+        let tag = Tensor::<u8, m![A]>::from_vec([0b0000, 0b1000, 0b0000, 0b1000]);
+        let operand: TernaryBranchedOperand<f32, m![A]> =
+            BranchedOperand::try_from_slots([Some((group0, (2.0, 10.0))), Some((group1, (3.0, 20.0))), None], None)
+                .unwrap();
+
+        // fma: stream * operand0 + operand1, so each group shows both of its own values.
+        let out = apply_ternary_op(&data, &tag, |a, b, c| a * b + c, &operand, None);
+
+        assert_eq!(out.into_vec(), vec![12.0, 23.0, 12.0, 23.0]);
+    }
+
+    /// The port slot reads the stash tensor rather than the stream, and only where its guard matches.
+    #[test]
+    fn the_port_slot_reads_the_stash_tensor() {
+        axes![A = 2];
+        let bit0 = TagGuard::matches([BitReq::One, BitReq::Ignore, BitReq::Ignore, BitReq::Ignore]);
+        let data = Tensor::<i32, m![A]>::from_vec([1, 1]);
+        let tag = Tensor::<u8, m![A]>::from_vec([0b0001, 0b0000]);
+        let stash = Tensor::<i32, m![A]>::from_vec([40, 40]);
+        let operand: BinaryBranchedOperand<i32, m![A]> =
+            BranchedOperand::try_from_slots([None, None, None], Some((bit0, RfPort::Stash))).unwrap();
+
+        let out = apply_binary_op(&data, &tag, |a, b| a + b, &operand, Some(&stash));
+
+        assert_eq!(out.into_vec(), vec![41, 1], "the unguarded cell is untouched");
     }
 }

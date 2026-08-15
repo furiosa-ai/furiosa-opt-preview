@@ -7,13 +7,21 @@ use syn::{Data, DeriveInput, Item, Type, Variant, parse_macro_input, parse_quote
 
 /// The rev of this macro's source tree, read at first expansion so no build script has to
 /// stamp it (a build-script trigger on the macro would rebuild every dependent crate).
-/// `FURIOSA_OPT_REV` overrides it (a pipeline building outside the origin tree); no git
-/// tree reads `unknown`, which the driver skips.
+/// `FURIOSA_OPT_REV` overrides it (a pipeline building outside the origin tree). A published
+/// snapshot carries its origin rev in the crate version (`0.5.1+g<sha>`), and that stamp wins
+/// over git: a mirror checkout's own sha is the MIRROR commit, not the rev the driver was
+/// built from. A registry checkout has neither and reads `unknown`, which the driver skips.
 fn rev() -> &'static str {
     static REV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     REV.get_or_init(|| {
         std::env::var("FURIOSA_OPT_REV")
             .ok()
+            .or_else(|| {
+                env!("CARGO_PKG_VERSION")
+                    .split_once("+g")
+                    .map(|(_, sha)| sha.to_owned())
+                    .filter(|sha| !sha.is_empty())
+            })
             .or_else(|| {
                 let out = std::process::Command::new("git")
                     .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "--short=12", "HEAD"])

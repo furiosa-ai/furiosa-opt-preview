@@ -4,6 +4,7 @@ members = [
     "furiosa-mapping",
     "furiosa-mapping-macro",
     "furiosa-mapping-types",
+    "furiosa-opt-common-ir",
     "furiosa-opt-lower",
     "furiosa-opt-lower-types",
     "furiosa-opt-examples",

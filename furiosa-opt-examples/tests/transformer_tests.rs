@@ -1,5 +1,5 @@
 //! Smoke tests and deterministic scalar-oracle tests for the transformer decoder-block
-//! `#[device]` entry points. The oracle tests run on the host/emulation backend and cover
+//! `#[device]` entry points. The oracle tests run on the CPU backend and cover
 //! projection, chunked attention, decoder, final layer, and one connected decoder step.
 
 #![allow(clippy::type_complexity)]

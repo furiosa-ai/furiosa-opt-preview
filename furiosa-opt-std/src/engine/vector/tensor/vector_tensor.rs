@@ -897,7 +897,7 @@ fn exec_id(raw: u8) -> ExecutionId {
 /// `tag` satisfies, and `combine` runs once with that slot's operands. A cell no slot claims passes
 /// through unchanged, and empty (`None`) slots contribute nothing.
 ///
-/// The early return below is not an emulation shortcut: first match is the hardware's rule, so a later
+/// The early return below is not an engine shortcut: first match is the hardware's rule, so a later
 /// slot never re-combines a cell an earlier one claimed. See `BranchedOperand`.
 ///
 /// Binary and ternary passes share this body because they share the slot layout ([`VeOperandLayout`]);
@@ -920,7 +920,7 @@ fn apply_slots<D: VeScalar, Mapping: M, L: VeOperandLayout<D, Mapping>>(
         let rhs = match port {
             RfPort::External(register) => register,
             RfPort::Stash => stash_data.expect(
-                "a stash operand reached the emulation without a stashed tensor: use the `Stash` operand, whose \
+                "a stash operand reached the engine without a stashed tensor: use the `Stash` operand, whose \
                  `StashTransition` supplies it, not a hand-built slot",
             ),
         };

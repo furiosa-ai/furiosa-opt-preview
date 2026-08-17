@@ -1,16 +1,10 @@
 //! Per-op preparation step for the VALUE backends.
 //!
 //! Each helper derives the mapping data an op's host-side loop needs (broadcast residue, scatter
-//! payload, ...) and panics on a mapping its loop cannot walk. Emulation and Npu (`BufStorage`)
-//! consume the returned mapping to drive that loop; Typecheck (`PhantomStorage`) has no loop and does
-//! not call the carve-based helpers at all, since a carve encodes the loop's `dst ⊇ src` shape rather
-//! than an engine constraint (see [`PhantomStorage`] for the full reasoning and for what Typecheck
-//! does reject).
+//! payload, ...) and panics on a mapping its loop cannot walk.
 //!
 //! All helpers are noun-style and return a derived `Mapping` (or its parts). The shared file keeps
 //! the value backends in lockstep on the mapping algebra without duplicating the prep step.
-//!
-//! [`PhantomStorage`]: crate::storage::PhantomStorage
 //!
 //! [`Backend`]: crate::backend::Backend
 //! [`Tensor`]: crate::tensor::Tensor
@@ -80,7 +74,7 @@ pub(crate) struct GatherParams {
 /// `idx` is the full mapping of the indices tensor; the "key-axes-replacement" inside `dst` is
 /// derived as `dst ÷ payload`. `BufStorage::gather` (the sole caller) derives that residue from its
 /// own `Idx` type parameter instead, so the result here is discarded (`let _ = ...`); `carve` still
-/// runs for its ill-formed-mapping panic, the same pattern the module doc describes for Typecheck.
+/// runs for its ill-formed-mapping panic.
 pub(crate) fn gather_params(src: &Mapping, dst: &Mapping, idx: &Mapping) -> GatherParams {
     let payload = dst.carve(idx);
     let _ = dst.carve(&payload);

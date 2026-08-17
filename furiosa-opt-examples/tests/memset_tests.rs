@@ -1,8 +1,8 @@
-//! Answer-key tests for the `memset` example kernels on the emulation backend.
+//! Answer-key tests for the `memset` example kernels on the CPU backend.
 //!
-//! These pin the VISA-level *calculation*: each kernel is launched on emulation and its readback is
+//! These pin the VISA-level *calculation*: each kernel is launched on the CPU and its readback is
 //! checked against a hand-written answer key. (VISA-vs-LIR *parity*, that device translation matches
-//! this emulation, lives in `npu-visa-test`.) Every kernel overwrites a **non-fill** input, so a
+//! this calculation, lives in `npu-visa-test`.) Every kernel overwrites a **non-fill** input, so a
 //! readback equal to the fill value proves the fill fired (a passthrough would echo the input). The
 //! input is `m![A, B]`; the 2-cluster relayout reads it back as `m![A / 2, A % 2, B]` (`OutMap`).
 
@@ -14,7 +14,7 @@ use furiosa_opt_std::prelude::*;
 
 type OutMap = m![A / 2, A % 2, B];
 
-/// Launches a whole-region `memset` kernel on emulation over a non-fill `$input` and asserts every
+/// Launches a whole-region `memset` kernel on the CPU over a non-fill `$input` and asserts every
 /// readback cell equals `$fill`: the answer key for a fill that overwrites the whole region.
 macro_rules! whole_region_answer_test {
     ($name:ident, $d:ty, $fn:ident, $input:expr, $fill:expr $(,)?) => {

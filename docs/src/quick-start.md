@@ -16,7 +16,7 @@ The subsystem chapters now own the matching advanced examples, while End-to-End 
 Read [Setup and Tooling](./quick-start/setup-and-tooling.md) for installation and the first project.
 Read [Tensor and Contraction](./quick-start/tensor-and-contraction.md) for tensor shapes and contraction math.
 Read [Kernel Design](./quick-start/kernel-design.md) for the five runnable pattern sections.
-Read [Kernel Validation](./quick-start/kernel-validation.md) for typecheck, emulation, NPU, and schedule evidence.
+Read [Kernel Validation](./quick-start/kernel-validation.md) for compile, CPU, NPU, and schedule evidence.
 
 ## Continue to Reference Chapters
 

@@ -19,7 +19,7 @@
 //! when it should have been refused, so the check is still missing. The 17 such entries today are all
 //! `switch_assertions::invalid_*`.
 //!
-//! Most of these kernels still run under emulation, because what they violate is a
+//! Most of these kernels still run on the CPU, because what they violate is a
 //! device-translation rule rather than an arithmetic one. The answer-key tests exercise that,
 //! asserting the panic where the emulator catches it too; only compilation must fail.
 

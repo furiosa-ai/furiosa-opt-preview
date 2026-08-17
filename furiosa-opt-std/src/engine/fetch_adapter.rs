@@ -329,7 +329,7 @@ fn verify_fetch_mask<Time: M, Packet: M, OutTime: M, OutPacket: M>() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Emulation;
+    use crate::backend::Cpu;
     use crate::cast::TableLookup;
     use crate::scalar::{f4e2m1, f8e4m3};
     use crate::tensor::Tensor;
@@ -366,8 +366,8 @@ mod tests {
     #[test]
     fn table_lookup_tensor_map_matches_spec() {
         let keys: Vec<f4e2m1> = (0..16u8).map(f4e2m1::from_bits).collect();
-        let input = Tensor::<f4e2m1, m![C], Emulation>::from_vec(keys);
-        let decoded: Tensor<f8e4m3, m![C], Emulation> = input.map(|v| v.lookup());
+        let input = Tensor::<f4e2m1, m![C], Cpu>::from_vec(keys);
+        let decoded: Tensor<f8e4m3, m![C], Cpu> = input.map(|v| v.lookup());
         let got: Vec<u32> = decoded.into_vec().into_iter().map(|v| v.to_f32().to_bits()).collect();
         let want: Vec<u32> = E2M1_F32_ORACLE.iter().map(|v| v.to_bits()).collect();
         assert_eq!(got, want);

@@ -293,7 +293,6 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
     }
 
     /// Reads the tensor view into a new tensor. Delegates to [`Backend::transpose`], so the read is a
-    /// no-op on the value-free Typecheck phantom.
     pub fn read(self) -> Tensor<D, E, B> {
         let mut result = Tensor::zeroed();
         result.view_mut().transpose(self, false);

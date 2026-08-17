@@ -53,7 +53,7 @@ async fn test_host_tile_offsets_may_be_runtime_values() {
         .await;
 
     // Cross the allocation's first, middle, and last rows on both the immutable source view and
-    // mutable destination view. Under `--backend npu`, every pair goes through the view-to-buffer
+    // mutable destination view. Under the NPU build, every pair goes through the view-to-buffer
     // conversion before launch.
     let moves = vec![(0, C::SIZE - 1), (C::SIZE / 2, C::SIZE / 2), (C::SIZE - 1, 0), (3, 5)];
     for &(src_row, dst_row) in &moves {

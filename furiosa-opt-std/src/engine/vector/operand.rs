@@ -188,7 +188,7 @@ pub trait StashTransition<S: StashState, RD: VeScalar, const W: Way> {
     fn transition(state: VeState<S>) -> VeState<Self::Next>;
 
     /// The stashed tensor this operand reads, in the reader's mapping, or `None` for an operand that
-    /// does not read the stash. Which one it is follows from the operand type, so the emulation needs
+    /// does not read the stash. Which one it is follows from the operand type, so the engine needs
     /// no runtime look at the lowered operands.
     fn stashed<Mapping: M>(state: &VeState<S>) -> Option<Tensor<RD, Mapping>>;
 }

@@ -14,7 +14,7 @@ type Cluster = m![1 # 2];
 /// FxpMul, then `SubFxp` asks for FxpAdd again.
 ///
 /// Expected: the vISA-to-LIR lowering reports `6 is not available for op Binary(SubFxp)`, which the
-/// snapshot pins. Emulation panics on the same conflict, which the answer-key test pins by catching it.
+/// snapshot pins. Cpu panics on the same conflict, which the answer-key test pins by catching it.
 #[device(chip = 1)]
 pub fn ve_elementwise_fxp_chain(ctx: &mut Context, input: &HbmTensor<i32, Chip, m![A]>) -> HbmTensor<i32, Chip, m![A]> {
     let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut ctx.tdma);

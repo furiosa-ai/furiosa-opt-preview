@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Changed
+
+- The `Emulation` backend type is renamed to `Cpu`: it is not a mode you select but what
+  running on the CPU means, and a plain `cargo build`/`cargo test` is that build.
+
+### Removed
+
+- The `typecheck` backend is gone: the `Typecheck` backend type, its `PhantomStorage`, the
+  `--cfg backend="typecheck"` world, and `cargo furiosa-opt --backend typecheck`. Its two jobs
+  moved to their proper homes: mapping and shape validation of a kernel body is
+  `cargo furiosa-opt compile` (the translator verifies every selected kernel statically, and
+  catches device constraints phantom execution never could), and value validation is a CPU
+  test. The `backend` cfg is now npu-only: a build without the cfg IS the CPU build, so a
+  plain `cargo build`/`cargo test` and a proxy-less invocation are the same build, byte for
+  byte.
+
 ## [v0.6.0]
 
 ### Removed

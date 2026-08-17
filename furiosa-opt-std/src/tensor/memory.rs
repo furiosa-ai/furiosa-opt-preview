@@ -168,7 +168,7 @@ impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> 
 
 /// Host-side `HostTensor` constructors. Bound to `Backend`; the value-iterating methods (`zero`,
 /// `rand`) and `from_vec` / `from_safetensors` all bottom out in `Tensor::from_vec`, which
-/// `BufStorage` implements as a real `Vec<D>` fill, so those work on Npu / Emulation host-side
+/// `BufStorage` implements as a real `Vec<D>` fill, so those work on Npu / Cpu host-side
 /// staging too.
 impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> {
     /// Creates a tensor filled with zeros.
@@ -267,7 +267,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     /// A fresh HBM tensor, for a device function's output.
     ///
     /// The backend allocates it: `Npu` takes a device allocation, which the handle owns and frees on
-    /// drop, and `Emulation` holds the bytes on the host. A kernel compiled for `Npu` never runs this,
+    /// drop, and `Cpu` holds the bytes on the host. A kernel compiled for `Npu` never runs this,
     /// because the compiled program places its own buffers.
     // `new()` builds an uninitialized handle, so a `Default` impl (which would look zero-cost and
     // safe) is deliberately not provided, matching `DmTensor::new`.
@@ -328,7 +328,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     where
         D: MaterializableScalar,
     {
-        // Emulation / Npu move the already-packed bytes out; Simulation re-packs. Both agree because
+        // Cpu / Npu move the already-packed bytes out; Simulation re-packs. Both agree because
         // they share the `Scalar::store` packing primitive.
         let packed = self.inner.clone().into_buf();
         debug_assert_eq!(packed.len(), D::size_in_bytes_from_length(Pair::<Chip, Element>::SIZE));
@@ -624,7 +624,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
     where
         D: MaterializableScalar,
     {
-        // The `read` tensor's buffer already IS the packed device image on Emulation / Npu, so
+        // The `read` tensor's buffer already IS the packed device image on Cpu / Npu, so
         // `into_buf` moves it out directly; Simulation re-packs. Both share `Scalar::store`.
         self.inner.clone().read().into_buf()
     }
@@ -1476,7 +1476,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Lane: M, Packet: M, B: B
 mod tests {
     use super::*;
 
-    use crate::backend::{Emulation, Typecheck};
+    use crate::backend::Cpu;
     use crate::scalar::Scalar;
 
     /// Builds the shared `dma_gather_unscaled` fixture for backend `B`: an HBM table `[W=8, V=2]`
@@ -1504,25 +1504,24 @@ mod tests {
         (output.inner.into_vec(), expected)
     }
 
-    /// `dma_gather_unscaled` on `Emulation`: the physical `BufStorage` gather (driven by the
+    /// `dma_gather_unscaled` on `Cpu`: the physical `BufStorage` gather (driven by the
     /// sequencer) matches the hand oracle. Peer of the byte-offset `dma_gather_scaled` and of the
-    /// `Tensor`-level `emulation_write_gather_roundtrip_unscaled`.
+    /// `Tensor`-level `cpu_write_gather_roundtrip_unscaled`.
     #[test]
-    fn emulation_dma_gather_unscaled_roundtrip() {
-        let (got, expected) = run_dma_gather_unscaled::<Emulation>();
+    fn cpu_dma_gather_unscaled_roundtrip() {
+        let (got, expected) = run_dma_gather_unscaled::<Cpu>();
         assert_eq!(got, expected);
     }
 
     /// A mutable HBM view borrows the owner's storage rather than a detached buffer. Once the view
     /// is released, reading the whole owning tensor must therefore observe the view's writes.
     #[test]
-    fn emulation_hbm_view_mut_updates_owning_tensor() {
+    fn cpu_hbm_view_mut_updates_owning_tensor() {
         axes![A = 8];
 
         let expected: Vec<i32> = (0..A::SIZE as i32).map(|x| x * 3 + 1).collect();
-        let source =
-            HbmTensor::<i32, m![1], m![A], Emulation>::from_parts(Tensor::from_vec(expected.clone()), Some(0x1000));
-        let mut destination = HbmTensor::<i32, m![1], m![A], Emulation>::from_parts(
+        let source = HbmTensor::<i32, m![1], m![A], Cpu>::from_parts(Tensor::from_vec(expected.clone()), Some(0x1000));
+        let mut destination = HbmTensor::<i32, m![1], m![A], Cpu>::from_parts(
             Tensor::from_vec(std::iter::repeat_n(-1, A::SIZE)),
             Some(0x2000),
         );
@@ -1548,7 +1547,7 @@ mod tests {
 
         // A placed table: the window arithmetic below is what a `launch` argument hands the device.
         const BASE: u64 = 0x1000;
-        let table = HbmTensor::<i32, m![1], m![A, H], Emulation>::from_parts(Tensor::zeroed(), Some(BASE));
+        let table = HbmTensor::<i32, m![1], m![A, H], Cpu>::from_parts(Tensor::zeroed(), Some(BASE));
         for start in starts {
             let row = table.view().tile::<m![A], 1, Row>(start);
             assert_eq!(row.address(), Some(BASE + (start * row_bytes) as u64));
@@ -1559,7 +1558,7 @@ mod tests {
             );
         }
 
-        let mut table = HbmTensor::<i32, m![1], m![A, H], Emulation>::from_parts(Tensor::zeroed(), Some(BASE));
+        let mut table = HbmTensor::<i32, m![1], m![A, H], Cpu>::from_parts(Tensor::zeroed(), Some(BASE));
         for start in starts {
             let row = table.view_mut().tile::<m![A], 1, RowMut>(start);
             assert_eq!(row.address(), Some(BASE + (start * row_bytes) as u64));
@@ -1580,7 +1579,7 @@ mod tests {
 
         // Element `a * H + h` holds that flat position, so one value names the cell a view reached.
         let values: Vec<i32> = (0..(A::SIZE * H::SIZE) as i32).collect();
-        let table = HbmTensor::<i32, m![1], m![A, H], Emulation>::from_parts(Tensor::from_vec(values), None);
+        let table = HbmTensor::<i32, m![1], m![A, H], Cpu>::from_parts(Tensor::from_vec(values), None);
 
         let row = table.view().tile::<m![A], 1, m![1 # 8, H]>(3);
         let half = row.tile::<m![H], 2, m![1 # 8, H = 2 # 4]>(2);
@@ -1593,19 +1592,6 @@ mod tests {
             [3 * H::SIZE as i32 + 2, 3 * H::SIZE as i32 + 3],
             "row 3, then 2 columns in"
         );
-    }
-
-    /// Typecheck backend: `dma_gather_unscaled` propagates the same shape assertions
-    /// (`gather_params` mapping algebra) as the scaled gather without iterating any buffer. The
-    /// output tensor under Typecheck has no values; this only pins that the call does not panic for
-    /// a well-formed block-table shape (visa->LIR lowering is pinned by the `compare_edf!` test).
-    #[test]
-    fn typecheck_dma_gather_unscaled_runs_assertion_only() {
-        axes![W = 8, V = 2, K = 64];
-
-        let table = HbmTensor::<i32, m![1], m![W, V], Typecheck>::from_parts(Tensor::zeroed(), None);
-        let index = DmTensor::<i32, m![1], m![1], m![K], m![1], Typecheck>::from_parts(Tensor::zeroed(), None);
-        let _output: DmTensor<i32, m![1], m![1], m![K], m![V], Typecheck> = table.dma_gather_unscaled(&index);
     }
 
     /// `reshape` consumes `self`, so it must hand the backend resource (`owner`) to the reshaped
@@ -1628,7 +1614,7 @@ mod tests {
         }
 
         let freed = Arc::new(AtomicBool::new(false));
-        let tensor = HbmTensor::<i32, m![1], m![A, B], Emulation>::from_parts(Tensor::zeroed(), Some(0x1000))
+        let tensor = HbmTensor::<i32, m![1], m![A, B], Cpu>::from_parts(Tensor::zeroed(), Some(0x1000))
             .owns(DropFlag(Arc::clone(&freed)));
 
         // Merging `[A, B]` into `[AB]` keeps the wire order, so the relabel moves no data.

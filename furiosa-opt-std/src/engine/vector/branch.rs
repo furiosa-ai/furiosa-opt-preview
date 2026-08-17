@@ -34,7 +34,7 @@ pub enum TagMode<D: VeScalar> {
     /// Set each branch id bit using comparison operations.
     Comparison([Cmp<D>; 4]),
     // Withheld: neither runs on the host, and `ValidCount` does lower to the branch unit's augmenter,
-    // so a kernel naming it used to compile for the device and then panic in host emulation -- an op
+    // so a kernel naming it used to compile for the device and then panic on the host engine -- an op
     // public on only one of the two paths. Restore a variant with its `apply_branch_config` arm.
     //
     // /// Set branch id using valid count generator.

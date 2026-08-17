@@ -4,74 +4,55 @@ The Kernel Optimizer provides build, test, run, and direct-compile workflows for
 The `cargo-furiosa-opt` command is the entry point for these workflows.
 
 `cargo-furiosa-opt` is a thin wrapper around cargo for the Furiosa NPU compiler toolchain.
-Anywhere you would run `cargo`, run `cargo furiosa-opt` instead: every cargo argument passes through verbatim, and the wrapper selects a backend and compiles the kernels your build needs.
+`cargo furiosa-opt` is the NPU build; a plain `cargo` invocation builds and runs on the CPU.
+Every cargo argument passes through verbatim, and the wrapper compiles the kernels your build needs.
 
 For installation, see [Installation and First Program](../quick-start/setup-and-tooling.md#installation-and-first-program).
 
 ## First Commands
 
-Run a binary with emulation, then check mappings, compare values with an oracle, and export schedule data.
+Run a binary on the CPU, then check mappings, compare values with an oracle, and export schedule data.
 
 ```bash
-cargo furiosa-opt run --release --bin gemm
-cargo furiosa-opt --backend typecheck run --release --bin gemm
-cargo furiosa-opt --backend emulation test --release --bin gemm
+cargo run --release --bin gemm
+cargo furiosa-opt compile
+cargo test --release --bin gemm
 cargo furiosa-opt compile gemm_kernel --dump-schedule schedule.json
 ```
 
 Quick Start introduces these commands in context.
-This section gives the complete `cargo-furiosa-opt` command reference and explains each backend and compilation mode.
-Use [Kernel Validation](../quick-start/kernel-validation.md) to interpret typecheck, emulation, NPU, and schedule results.
+This section gives the complete `cargo-furiosa-opt` command reference.
+Use [Kernel Validation](../quick-start/kernel-validation.md) to interpret compile, CPU, NPU, and schedule results.
 
 ## Usage
 
 ```text
-cargo furiosa-opt [--backend <backend>] <command> [args]
+cargo furiosa-opt <command> [args]
 cargo furiosa-opt compile [FILTER]... [options]
 ```
 
-The first form is the cargo passthrough: `<command>` is any cargo subcommand (`build`, `test`, `run`, …) and `[args]` are forwarded to cargo unchanged.
+The first form is the cargo passthrough: `<command>` is any cargo subcommand (`build`, `test`, `run`, …) and `[args]` are forwarded to cargo unchanged, compiled for the NPU.
 The second form compiles kernels directly.
 See [Direct compilation](#direct-compilation-cargo-furiosa-opt-compile).
 
+A plain `cargo build`/`cargo test`/`cargo run` is the CPU build: kernels run on the host, and no NPU hardware or SDK is required.
+
 ## What the wrapper adds
 
-Compared to plain cargo, `cargo furiosa-opt` does a few things around the cargo invocation:
+Compared to plain cargo, `cargo furiosa-opt` does two things around the cargo invocation:
 
-- **Selects a backend.**
-  It builds, tests, or runs with your specified backend.
-  See [`--backend`](#--backend-backend).
-- **Builds the kernels you need automatically.**
-  Under `--backend npu`, `cargo furiosa-opt` compiles necessary `#[device]` functions before the cargo build so the resulting binary can load them at runtime.
-  See [Automatic kernel builds](#automatic-kernel-builds).
-
-## `--backend` _backend_
-
-Selects the backend that evaluates each kernel.
-Because every argument after it passes through to cargo verbatim, `--backend` must appear **before** the cargo subcommand:
-
-```bash
-cargo furiosa-opt --backend typecheck run
-cargo furiosa-opt --backend npu test my_test
-```
-
-**Default:** `emulation`
-
-**Possible values:**
-
-- `typecheck`: Type-level mapping and shape validation with value-level loops short-circuited by phantom tensors.
-  No NPU hardware is required.
-- `emulation`: Host-side buffer emulation of tensor operations.
-  No NPU hardware is required.
-- `npu`: Real NPU dispatch through compiled kernels.
-  It triggers automatic kernel compilation.
+- **Targets the NPU.**
+  Kernels dispatch to real hardware.
   It requires a physical NPU and the Furiosa SDK.
+- **Builds the kernels you need automatically.**
+  It compiles necessary `#[device]` functions before the cargo build so the resulting binary can load them at runtime.
+  See [Automatic kernel builds](#automatic-kernel-builds).
 
 See [Quick Start: Kernel Optimizer](../quick-start/setup-and-tooling.md#kernel-optimizer) for a task-oriented overview.
 
 ## Automatic kernel builds
 
-Under `--backend npu`, `cargo furiosa-opt` runs a kernel pre-compilation step before handing off to cargo.
+`cargo furiosa-opt` runs a kernel pre-compilation step before handing off to cargo.
 The pre-step runs only when it matters.
 It is skipped unless **both** of the following hold:
 
@@ -91,7 +72,6 @@ Artifacts are written under the output directory (see [`FURIOSA_OPT_OUT_DIR`](#e
 ## Direct compilation: `cargo furiosa-opt compile`
 
 `cargo furiosa-opt compile` compiles `#[device]` functions directly, without the cargo passthrough.
-It always builds NPU kernels, so it takes no `--backend`.
 
 ```bash
 # Compile every #[device] function in every kernel package.

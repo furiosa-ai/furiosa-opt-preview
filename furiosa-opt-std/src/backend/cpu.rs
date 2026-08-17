@@ -2,49 +2,48 @@ use furiosa_mapping::Mapping as MappingValue;
 use furiosa_mapping::*;
 
 use crate::scalar::{MaterializableScalar, Scalar};
-use crate::storage::PhantomStorage;
+use crate::storage::BufStorage;
 use crate::tensor::Tensor;
 use crate::tensor::memory::{HbmTensor, HostTensor};
 
 use crate::backend::Backend;
 use crate::cast::{ContractionAccumulator, ContractionCast};
 
-/// Typecheck backend: shape/mapping-only, no host-side computation.
+/// Cpu backend: host-side buffer interpreter using `BufStorage` storage.
 ///
-/// All per-operation overrides live on [`PhantomStorage`]'s inherent methods. The Backend
-/// supplies only the host-side DMA stubs here.
+/// Runs every operation over the physical staging buffer through `BufStorage`'s inherent
+/// methods, with no device behind it, over the same `Vec<D>` staging buffer shape `Npu` uses.
+/// DMA is the shared host-side `transpose` passthrough.
 #[derive(Debug, Clone, Copy)]
-pub struct Typecheck;
+pub struct Cpu;
 
-impl<D: Scalar, Mapping: M> Tensor<D, Mapping, Typecheck> {
-    /// Phantom tensor for Typecheck: metadata only, no values.
-    ///
-    /// `Tensor::zeroed()` is the generic constructor but reads as element-level
-    /// "zero-filled"; for Typecheck the whole tensor *is* the empty value, so this name
-    /// matches the actual semantics.
-    pub fn empty() -> Self {
-        Self::zeroed()
-    }
-}
+impl Backend for Cpu {
+    type Storage<D: Scalar> = BufStorage<D, Vec<u8>>;
 
-impl Backend for Typecheck {
-    type Storage<D: Scalar> = PhantomStorage<D>;
-
-    fn from_vec<D: Scalar>(mapping: &MappingValue, data: impl IntoIterator<Item = D>) -> Self::Storage<D> {
-        PhantomStorage::from_vec(mapping, data)
+    fn from_vec<D: Scalar>(_mapping: &MappingValue, data: impl IntoIterator<Item = D>) -> Self::Storage<D> {
+        BufStorage::from_vec(data)
     }
 
-    /// This backend has no values, so an HBM tensor is its shape and nothing else.
+    fn from_buf<D: MaterializableScalar>(_mapping: &MappingValue, buf: Vec<u8>) -> Self::Storage<D> {
+        BufStorage::from_buf(buf)
+    }
+
+    /// No device behind this backend, so the tensor is just its bytes; the address stays the
+    /// placeholder every host-side handle carries.
     fn alloc_hbm<D: Scalar, Chip: M, Element: M>() -> HbmTensor<D, Chip, Element, Self> {
-        HbmTensor::from_parts(Tensor::empty(), None)
+        HbmTensor::from_parts(Tensor::zeroed(), None)
     }
 
     fn zeroed<D: Scalar>(mapping: &MappingValue) -> Self::Storage<D> {
-        PhantomStorage::zeroed(mapping)
+        BufStorage::zeroed(mapping.size())
     }
 
     fn into_vec<D: MaterializableScalar>(storage: Self::Storage<D>, mapping: &MappingValue) -> Vec<D> {
         storage.into_vec(mapping)
+    }
+
+    fn into_buf<D: Scalar>(storage: Self::Storage<D>, mapping: &MappingValue) -> Vec<u8> {
+        storage.into_buf(mapping)
     }
 
     fn map<D: Scalar, D2: Scalar>(src: &Self::Storage<D>, f: impl Fn(D) -> D2 + Sync) -> Self::Storage<D2> {
@@ -73,12 +72,11 @@ impl Backend for Typecheck {
         src: &Self::Storage<D>,
         src_offset: &Index,
         dst_offset: &Index,
-        _src_map: &MappingValue,
-        _dst_map: &MappingValue,
+        src_map: &MappingValue,
+        dst_map: &MappingValue,
         allow_broadcast: bool,
     ) {
-        // `PhantomStorage` holds no buffer, so it ignores `*_map` and moves nothing; see its doc.
-        dst.transpose::<Src, Dst>(src, src_offset, dst_offset, allow_broadcast);
+        dst.transpose::<Src, Dst>(src, src_offset, dst_offset, src_map, dst_map, allow_broadcast);
     }
 
     fn reduce<D: MaterializableScalar, Src: M, Dst: M>(
@@ -93,24 +91,27 @@ impl Backend for Typecheck {
     fn contraction<D: ContractionCast + MaterializableScalar>(
         lhs: &Self::Storage<D>,
         rhs: &Self::Storage<D>,
-        _lhs_map: &MappingValue,
-        _rhs_map: &MappingValue,
-        _pre_reduce: &MappingValue,
+        lhs_map: &MappingValue,
+        rhs_map: &MappingValue,
+        pre_reduce: &MappingValue,
         out: &MappingValue,
     ) -> Self::Storage<D> {
-        // `PhantomStorage` holds no values, so it neither widens nor folds; see its doc.
-        lhs.contraction(rhs, out)
+        // `BufStorage` is a bare buffer with no layout of its own, so it reads operand strides from
+        // `lhs_map`/`rhs_map` (the same reason its `transpose` above takes `src_map`/`dst_map`).
+        BufStorage::contraction(lhs, rhs, lhs_map, rhs_map, pre_reduce, out)
     }
 
     fn contraction_prewidened<D: ContractionAccumulator>(
         lhs: &Self::Storage<D>,
         rhs: &Self::Storage<D>,
-        _lhs_map: &MappingValue,
-        _rhs_map: &MappingValue,
-        _pre_reduce: &MappingValue,
+        lhs_map: &MappingValue,
+        rhs_map: &MappingValue,
+        pre_reduce: &MappingValue,
         out: &MappingValue,
     ) -> Self::Storage<D> {
-        lhs.contraction(rhs, out)
+        // `BufStorage` is a bare buffer with no layout of its own, so it reads operand strides from
+        // `lhs_map`/`rhs_map` (the same reason its `transpose` above takes `src_map`/`dst_map`).
+        BufStorage::contraction_prewidened(lhs, rhs, lhs_map, rhs_map, pre_reduce, out)
     }
 
     fn scatter<D: Scalar, Src: M, Key: M, Dst: M, Idx: M>(
@@ -137,22 +138,21 @@ impl Backend for Typecheck {
 
     fn transmute<D: MaterializableScalar, Src: M, Dst: M>(
         storage: Self::Storage<D>,
-        _src_map: &MappingValue,
-        _dst_map: &MappingValue,
+        src_map: &MappingValue,
+        dst_map: &MappingValue,
     ) -> Self::Storage<D> {
-        // `PhantomStorage` holds no buffer; a relabel is purely type-level.
-        storage
+        storage.transmute(src_map, dst_map)
     }
 
     async fn to_hbm<D: MaterializableScalar, Element: M, Chip: M, Element2: M>(
-        _host: &HostTensor<D, Element, Self>,
+        host: &HostTensor<D, Element, Self>,
     ) -> HbmTensor<D, Chip, Element2, Self> {
-        Self::alloc_hbm()
+        HbmTensor::from_parts(host.inner().transpose(true), None)
     }
 
     async fn from_hbm<D: MaterializableScalar, Chip: M, Element: M, Element2: M>(
-        _hbm: &HbmTensor<D, Chip, Element, Self>,
+        hbm: &HbmTensor<D, Chip, Element, Self>,
     ) -> HostTensor<D, Element2, Self> {
-        Tensor::empty().into()
+        hbm.inner().transpose(true).into()
     }
 }

@@ -11,16 +11,17 @@ The host must be `x86_64-unknown-linux-gnu` on Ubuntu 22.04 or newer, since the 
 On macOS or arm64, run everything inside a `linux/amd64` container.
 
 ```bash
-sudo apt install build-essential libclang-dev   # every backend
-sudo apt install gcc-aarch64-linux-gnu          # only for --backend npu
+sudo apt install build-essential libclang-dev   # every build
+sudo apt install gcc-aarch64-linux-gnu          # only for the NPU build (cargo furiosa-opt)
 ```
 
 Install these before the toolchain below, which does not cover them: rustc links host binaries with the system `cc`, and `furiosa-opt-std`'s build script loads `libclang.so`.
 
-### Install and Typecheck the Starter
+### Install and Run the Starter
 
 The Furiosa optimizer is a rustc driver and is ABI-locked to the pinned nightly.
-Install the toolchain and host tools, create the standard starter, then typecheck its GEMM binary:
+Install the toolchain and host tools, create the standard starter, then run it on the CPU and
+compile its kernels:
 
 ```bash
 rustup toolchain install nightly-2026-05-01
@@ -29,27 +30,28 @@ cargo +nightly-2026-05-01 binstall cargo-furiosa-opt
 cargo install cargo-generate
 cargo generate furiosa-ai/furiosa-opt base-template
 cd base-template
-cargo furiosa-opt --backend typecheck run --release --bin gemm
+cargo run --release --bin gemm
+cargo furiosa-opt compile
 ```
 
 `rust-toolchain.toml` pins the same channel in the generated project.
 Cargo activates it automatically in that directory.
 
-`cargo-furiosa-opt` injects the required `--cfg backend="..."` settings and pre-compiles NPU kernels.
+A plain `cargo` invocation builds and runs on the CPU. `cargo furiosa-opt` builds for the NPU and
+pre-compiles the kernels.
 
 ### NPU Requirements
 
-The NPU backend also requires the Furiosa SDK and a physical NPU.
+The NPU build also requires the Furiosa SDK and a physical NPU.
 It dispatches through the SDK kernel driver and PE runtime (`furiosa-driver-rngd`, `furiosa-smi`, and related components).
 See the [SDK documentation](https://developer.furiosa.ai/latest/en/).
 
-The `emulation` and `typecheck` backends do not require the SDK.
-They run host-side with no NPU dependency.
+The CPU build does not require the SDK; it runs host-side with no NPU dependency.
 
 ## The Generated Project
 
 The command path scaffolds the `base-template` starter.
-The template is the standard executable example, and continuous integration (CI) generates the current source under an arbitrary name before testing it with emulation.
+The template is the standard executable example, and continuous integration (CI) generates the current source under an arbitrary name before testing it on the CPU.
 Read [Tensor and Contraction](./tensor-and-contraction.md) and [Kernel Validation](./kernel-validation.md) before adapting the generated template.
 Use the Kernel Authoring Skill when an agent implements the change.
 
@@ -88,7 +90,7 @@ It gives programmers fine-grained control when they write vISA by hand or genera
 
 #### Kernel Optimizer
 
-The [Kernel Optimizer tool reference](../tools/kernel-optimizer.md) owns CLI syntax, backend selection, and compilation behavior.
+The [Kernel Optimizer tool reference](../tools/kernel-optimizer.md) owns CLI syntax and compilation behavior.
 
 #### Language Server
 

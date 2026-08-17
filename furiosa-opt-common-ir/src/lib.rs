@@ -317,7 +317,7 @@ impl Display for TagGuard {
 ///
 /// Slot order is match priority, not hardware register numbering: an element takes the first filled
 /// slot whose guard it satisfies -- first match, not every match, which the ISA specifies and the
-/// hardware, host emulation and the LIR executor all implement. So overlapping guards are resolved by
+/// hardware, the host engine and the LIR executor all implement. So overlapping guards are resolved by
 /// slot order rather than accumulated, and an unconditional slot is the pass's `else`, with nothing
 /// after it. Command generation assigns the physical registers from the branch list this lowers to.
 ///

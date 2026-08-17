@@ -14,7 +14,7 @@ pub trait Buf: From<Vec<u8>> + Into<Vec<u8>> + AsRef<[u8]> + AsMut<[u8]> + Clone
 
 impl<T> Buf for T where T: From<Vec<u8>> + Into<Vec<u8>> + AsRef<[u8]> + AsMut<[u8]> + Clone + std::fmt::Debug {}
 
-/// Emulation / Npu tensor: the dense device image as one packed `Vec<u8>`. Element `i` sits at position
+/// Cpu / Npu tensor: the dense device image as one packed `Vec<u8>`. Element `i` sits at position
 /// `i` (padding included, zero-initialized); a byte-multiple `D` takes its own byte run, a sub-byte `D`
 /// (`f4e2m1` / `i4`) packs two per byte. Only [`Scalar::load`] / [`Scalar::store`] know the width, so the
 /// generic-over-`D` ops address elements by logical index. The element count is byte-aligned (enforced by
@@ -324,8 +324,8 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
     /// REASSOCIATES: one output cell's residue block is folded left-to-right in `residue` order, which is
     /// the physical (wire) order of the reduced axes, not necessarily the serial-`iter` stream order, so
     /// `reduce_fn` runs in an implementation-defined order. For an associative `reduce_fn` the result
-    /// equals the serial one; for a non-associative one (e.g. `f32` add/mul) the Emulation result can
-    /// differ from serial. Accepted: Emulation is not bit-reproducible for non-associative reductions.
+    /// equals the serial one; for a non-associative one (e.g. `f32` add/mul) the Cpu result can
+    /// differ from serial. Accepted: Cpu is not bit-reproducible for non-associative reductions.
     /// The order is still deterministic across runs regardless of rayon's split, since each cell folds
     /// its whole block alone.
     pub(crate) fn reduce<Src: M, Dst: M, R: Fn(D, D) -> D + Sync>(
@@ -396,7 +396,7 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
     ///
     /// REASSOCIATES, like [`Self::reduce`]: one output cell's products are summed in physical (wire)
     /// order of the contracted axes, not the serial-`iter` stream order. Exact for an associative
-    /// combine; for `f32` add/mul the Emulation result can differ from serial. Accepted; the order is
+    /// combine; for `f32` add/mul the Cpu result can differ from serial. Accepted; the order is
     /// still deterministic across runs regardless of rayon's split.
     fn contraction_in<Acc>(
         lhs: &BufStorage<D, B>,
@@ -1232,7 +1232,7 @@ mod tests {
     }
 
     /// f32 reduce over a `> PAR_MIN_JOB` split: `f32` add is non-associative, so the reassociated parallel
-    /// fold need only AGREE WITH SERIAL TO TOLERANCE, not bit-exactly (the documented Emulation
+    /// fold need only AGREE WITH SERIAL TO TOLERANCE, not bit-exactly (the documented Cpu
     /// non-reproducibility). The tolerance is tight (`1e-4` relative): reassociating 256 well-conditioned
     /// positive adds drifts only ~`n·eps ≈ 1.5e-5`, so `1e-4` passes genuine reassociation yet still
     /// catches a dropped / double-counted term (~0.4%+), which the associative `i32` tests cannot.

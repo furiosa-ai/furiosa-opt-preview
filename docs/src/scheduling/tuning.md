@@ -8,7 +8,7 @@ Tuning is a controlled experiment: preserve correctness, record a baseline, chan
 Follow this order for every candidate:
 
 1. Run the type-checking path to validate mapping and shape constraints.
-2. Run emulation with a host oracle, including the relevant boundary cases.
+2. Run a CPU test with a host oracle, including the relevant boundary cases.
 3. Compile the baseline and record its schedule makespan.
 4. Change one lever while keeping release, shapes, data types, and mappings fixed.
 5. Run the same checks and dump the candidate schedule.

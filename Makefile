@@ -15,7 +15,6 @@ help:
 	@echo "  make clippy             - Run clippy linter"
 	@echo "  make fmt                - Run code formatter check"
 	@echo "  make test               - Run tests in release mode"
-	@echo "  make test-typecheck     - Run tests in release mode with --cfg backend=\"typecheck\""
 	@echo "  make mdbook-install     - Install mdbook utility and plugins"
 	@echo "  make mdbook-serve       - Serve docs locally"
 	@echo "  make mdbook-build       - Build static HTML documentation"
@@ -66,21 +65,9 @@ mdbook-test:
 	cargo test -p furiosa-opt-std --release --no-run
 	mdbook test $(DOCS_DIR) -L $(CARGO_TARGET_DIR)/release/deps/
 
-.PHONY: mdbook-test-typecheck
-mdbook-test-typecheck: export RUSTUP_TOOLCHAIN = $(RUST_TOOLCHAIN_CHANNEL)
-mdbook-test-typecheck: export CARGO_TARGET_DIR = target/typecheck
-mdbook-test-typecheck:
-	cargo furiosa-opt --backend typecheck test -p furiosa-opt-std --release --no-run
-	RUSTFLAGS='--cfg backend="typecheck"' mdbook test $(DOCS_DIR) -L $(CARGO_TARGET_DIR)/release/deps/
-
 .PHONY: test
 test: test-no-run
 	cargo test --workspace --release
-
-.PHONY: test-typecheck
-test-typecheck:
-	RUSTDOCFLAGS='--cfg backend="typecheck"' CARGO_TARGET_DIR=target/typecheck \
-	  cargo furiosa-opt --backend typecheck test --workspace --release
 
 .PHONY: licenses
 licenses:

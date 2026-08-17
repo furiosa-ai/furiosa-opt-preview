@@ -721,7 +721,7 @@ The constraint is on `time_span`, not `Time::SIZE`: non-`R` axes in `Time` like 
 The correct padding is `R # 16` (since `16 - 14 = 2 ≤ slice_span = 4`), giving `time_span = 4`.
 Using `R # 20` over-pads `R`, making `time_span = 5` and adding an extra `Time` iteration that contains no real data.
 For slices below `slice_thres` (slice contribution = 0), the sequencer-reconstructed `idx` reaches `4 × 4 = 16` when `R # 20 / 4 = 4`, giving `R` index 16 ≥ `R::SIZE`: padding that shouldn't be reachable.
-`Emulation` catches exactly this: reducing over the over-padded layout panics (`out x residue must factor the operand`) rather than running with a stale, unreachable `R` index.
+The CPU engine catches exactly this: reducing over the over-padded layout panics (`out x residue must factor the operand`) rather than running with a stale, unreachable `R` index.
 
 ```rust,should_panic
 # #![feature(adt_const_params)]

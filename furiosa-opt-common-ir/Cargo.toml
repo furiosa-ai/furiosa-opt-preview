@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-opt-common-ir"
-version = "0.6.0+gefc8aafd"
+version = "0.6.0+g053a5c4c"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/furiosa-ai/furiosa-opt"

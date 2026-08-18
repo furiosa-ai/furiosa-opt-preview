@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [v0.6.0]
+
 ### Changed
 
 - The `Emulation` backend type is renamed to `Cpu`: it is not a mode you select but what
@@ -21,11 +23,6 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   test. The `backend` cfg is now npu-only: a build without the cfg IS the CPU build, so a
   plain `cargo build`/`cargo test` and a proxy-less invocation are the same build, byte for
   byte.
-
-## [v0.6.0]
-
-### Removed
-
 - Every API that took a raw address is gone: `HbmTensor::from_addr`, `TrfTensor::from_addr`,
   `VrfTensor::from_addr`, the `TrfAddress` enum, and the `*_at` variants (`to_dm_at`,
   `to_dm_pcopy_at`, `dma_gather_scaled_at`, `to_trf_at`, `to_vrf_at`, `commit_at`). An address was
@@ -93,7 +90,6 @@ Breaking changes come first, each with what to write instead.
 - `TagMode::AxisToggle` does not lower. `vector_intra_slice_unzip()` is the supported route to a group split.
 - A DMA cannot place a tile whose padded axis is an inner digit of a split. The reduced case is pinned in the examples as `mre/dma_padded_inner_digit`.
 - An inner-digit tile is supported on an axis the HBM argument names directly. A tile reaching into an axis nested under another is still refused at compile time.
-
 ## [v0.5.1]
 
 ### Changed

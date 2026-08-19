@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Removed
+
+- `DmTensor::to_dm_pcopy` and `DmTensorView::to_dm_view_pcopy` are gone; neither ever compiled past
+  MIR. Write the same DM to DM copy as a fetch/commit round trip through the Tensor Unit
+  (`begin` -> `fetch` -> `collect` -> `commit_trim` -> `commit` / `commit_view`), or as
+  `DmTensor::to_dm` / `DmTensorView::to_dm_view` for a DMA copy.
+
 ## [v0.6.0]
 
 ### Changed
@@ -38,6 +45,14 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 Breaking changes come first, each with what to write instead.
 
+- `vector_intra_slice_reduce` is no longer available in pair mode, before or after the `_zip`. The
+  reducer takes no group condition, so it cannot fold only the group a `_zip` wrote. The call no
+  longer compiles on a zipped tensor, and a stream that went through `vector_intra_slice_unzip` is
+  refused when it is compiled.
+- `vector_intra_slice_reduce` checks the accumulator slots it needs. The non-reduce `Time` positions
+  inner to the outermost reduced axis each hold a live accumulator, and the reducer has 8; a mapping
+  that asks for more is refused with the count it asked for. This is the bound the Time Reducer
+  already checked, now shared between the two engines.
 - `furiosa-opt-examples` now holds only kernels that compile end to end, plus a `negative` module of
   fixtures that must be refused. Legal programs the compiler cannot lower to an EDF yet (`matmul`,
   `attention`, `vrf_add`, the value-form `runtime_if`, and the parallel-copy and shuffle transfers)

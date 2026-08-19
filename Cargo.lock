@@ -251,7 +251,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cargo-furiosa-opt"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 
 [[package]]
 name = "cast"
@@ -563,17 +563,18 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "furiosa-mapping"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 dependencies = [
  "abi_stable",
  "furiosa-mapping-macro",
  "furiosa-mapping-types",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
 name = "furiosa-mapping-macro"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 dependencies = [
  "lalrpop",
  "lalrpop-util",
@@ -584,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-mapping-types"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 dependencies = [
  "abi_stable",
  "furiosa-mapping-macro",
@@ -597,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-common-ir"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 dependencies = [
  "furiosa-opt-macro",
  "serde",
@@ -607,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-examples"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 dependencies = [
  "criterion",
  "env_logger",
@@ -622,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-lower"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 dependencies = [
  "abi_stable",
  "furiosa-mapping",
@@ -632,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-lower-types"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 dependencies = [
  "abi_stable",
  "furiosa-mapping-types",
@@ -642,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-macro"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -651,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-std"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 dependencies = [
  "abi_stable",
  "arrayvec",

@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-mapping"
-version = "0.6.0+g053a5c4c"
+version = "0.6.0+g07af1a1b"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/furiosa-ai/furiosa-opt"
@@ -11,6 +11,7 @@ description = "Public interface for the Furiosa NPU mapping DSL."
 abi_stable = { workspace = true }
 furiosa-mapping-macro = { path = "../furiosa-mapping-macro", version = "0.6" }
 furiosa-mapping-types = { path = "../furiosa-mapping-types", version = "0.6" }
+thiserror = { workspace = true }
 
 
 [dev-dependencies]

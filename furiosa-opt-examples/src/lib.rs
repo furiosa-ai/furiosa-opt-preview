@@ -23,6 +23,7 @@ pub mod memory_op;
 pub mod memset;
 pub mod mnist;
 pub mod negative;
+pub mod padded_axis_tile;
 pub mod param;
 pub mod pe_count;
 pub mod reshape;

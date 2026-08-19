@@ -10,6 +10,8 @@ const ONE_FLIT_ELEMENTS: usize = 8;
 const HALF_FLIT_ELEMENTS: usize = 4;
 /// Inner `Time` cells folded into the packet by Way4 concat.
 const WAY4_TIME_INNER: usize = 2;
+/// Accumulator slots the intra-slice reducer holds in Way4, one per non-reduce position it keeps live.
+const INTRA_SLICE_ACCUMULATOR_SLOTS: usize = 8;
 
 /// Why a vector packet reshape or intra-slice reduce is not realizable on the Vector engine.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -127,6 +129,21 @@ pub enum VectorError {
         /// The declared output packet.
         out_packet: Mapping,
     },
+    /// Intra-slice reduce: the non-reduce `Time` axes inner to the reduce outnumber the accumulators.
+    #[error(
+        "IntraSliceReduce: InnerTime, the non-reduce Time axes inner to the outermost {reduce_label} \
+         axis, needs {slots} accumulator slots but the reducer holds {limit}. Time {time}"
+    )]
+    ReduceAccumulatorsExceeded {
+        /// The required reduce label.
+        reduce_label: Ident,
+        /// The input time.
+        time: Mapping,
+        /// Slots the mapping asks for (`InnerTime::SIZE`).
+        slots: usize,
+        /// Slots the reducer holds.
+        limit: usize,
+    },
 }
 
 /// `vector_narrow_split`: split a one-flit (8-element) packet, folding the front 4 into `Packet2` and
@@ -240,7 +257,8 @@ pub fn config_vector_widen_pad(packet: &Mapping, packet2: &Mapping) -> Result<()
 }
 
 /// Intra-slice reduce: `[OutTime, OutPacket]` must divide `[Time, Packet]` exactly, every reduced axis
-/// must carry `reduce_label`, and the packet is preserved or reduced to 4.
+/// must carry `reduce_label`, the packet is preserved or reduced to 4, and the `Time` axes inner to
+/// the reduce must fit the accumulator slots.
 pub fn config_reduce_label(
     time: &Mapping,
     packet: &Mapping,
@@ -269,6 +287,17 @@ pub fn config_reduce_label(
         });
     }
 
+    // Only `Time` indexes slots: `Packet` is the spatial width of one, so it costs none.
+    let slots = crate::verify::inner_reduce_extent(time, out_time).map_err(VectorError::ReduceIndivisible)?;
+    if slots > INTRA_SLICE_ACCUMULATOR_SLOTS {
+        return Err(VectorError::ReduceAccumulatorsExceeded {
+            reduce_label: *reduce_label,
+            time: time.clone(),
+            slots,
+            limit: INTRA_SLICE_ACCUMULATOR_SLOTS,
+        });
+    }
+
     let packet = packet.normalize();
     let out_packet = out_packet.normalize();
     if packet != out_packet && out_packet != <m![1 # 4]>::to_value().normalize() {
@@ -281,7 +310,13 @@ pub fn config_reduce_label(
 mod tests {
     use super::*;
 
-    axes![R = 19, A = 2];
+    axes![R = 19, A = 2, S = 16, U = 12, V = 8, W = 4];
+
+    /// `config_reduce_label` with a Way4 packet that the reduce leaves alone.
+    fn reduce_time(time: Mapping, out_time: Mapping, reduce_label: &Ident) -> Result<(), VectorError> {
+        let packet = <m![1 # 4]>::to_value();
+        config_reduce_label(&time, &packet, &out_time, &packet, reduce_label)
+    }
 
     /// Padded stride/modulo split through `config_vector_narrow_split`.
     ///
@@ -299,5 +334,73 @@ mod tests {
             &<m![R # 24 % 2, A]>::to_value(),
         )
         .unwrap();
+    }
+
+    /// A reduce on the innermost `Time` axis holds one accumulator, however wide the axes outside it.
+    #[test]
+    fn reduce_innermost_axis_needs_one_slot() {
+        reduce_time(<m![U, S]>::to_value(), <m![U]>::to_value(), &S::NAME).unwrap();
+    }
+
+    /// The `Packet`-only reduce spends no slot: `Time` passes through untouched at any size.
+    #[test]
+    fn reduce_in_packet_only_needs_one_slot() {
+        config_reduce_label(
+            &<m![U]>::to_value(),
+            &<m![W]>::to_value(),
+            &<m![U]>::to_value(),
+            &<m![1 # 4]>::to_value(),
+            &W::NAME,
+        )
+        .unwrap();
+    }
+
+    /// The non-reduce axes inner to the reduce multiply into the slot count, up to the 8 available.
+    #[test]
+    fn reduce_inner_non_reduce_axes_fill_the_slots() {
+        reduce_time(
+            <m![S, U % 2, V % 4]>::to_value(),
+            <m![U % 2, V % 4]>::to_value(),
+            &S::NAME,
+        )
+        .unwrap();
+
+        // One more inner position than the reducer can hold.
+        let over = reduce_time(
+            <m![S, U % 3, V % 4]>::to_value(),
+            <m![U % 3, V % 4]>::to_value(),
+            &S::NAME,
+        );
+        assert_eq!(
+            over,
+            Err(VectorError::ReduceAccumulatorsExceeded {
+                reduce_label: S::NAME,
+                time: <m![S, U % 3, V % 4]>::to_value(),
+                slots: 12,
+                limit: INTRA_SLICE_ACCUMULATOR_SLOTS,
+            })
+        );
+    }
+
+    /// A reduced axis inner to the outermost reduced one folds into the same slot, so only the
+    /// non-reduce axis between the two is charged.
+    #[test]
+    fn reduce_axis_inner_to_the_reduce_costs_no_slot() {
+        reduce_time(<m![S / 8, U % 2, S % 8]>::to_value(), <m![U % 2]>::to_value(), &S::NAME).unwrap();
+    }
+
+    /// A padded non-reduce axis occupies a slot per padded position, not per live element.
+    #[test]
+    fn reduce_charges_the_padded_extent() {
+        let padded = reduce_time(<m![S, A # 16]>::to_value(), <m![A # 16]>::to_value(), &S::NAME);
+        assert_eq!(
+            padded,
+            Err(VectorError::ReduceAccumulatorsExceeded {
+                reduce_label: S::NAME,
+                time: <m![S, A # 16]>::to_value(),
+                slots: 16,
+                limit: INTRA_SLICE_ACCUMULATOR_SLOTS,
+            })
+        );
     }
 }

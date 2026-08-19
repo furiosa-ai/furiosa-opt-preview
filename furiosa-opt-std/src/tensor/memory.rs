@@ -926,17 +926,6 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
         DmTensor::from_parts(self.inner.transpose(true), None)
     }
 
-    /// Copies into a fresh DM tensor via parallel copy. Like [`Self::to_dm`], the `Slice` size is
-    /// preserved (`Slice::SIZE == Slice2::SIZE`).
-    #[primitive(DmTensor::to_dm_pcopy)]
-    pub fn to_dm_pcopy<Slice2: M, Element2: M>(
-        &self,
-        _sub: &mut TuContext<{ Tu::Sub }>,
-    ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
-        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
-        DmTensor::from_parts(self.inner.transpose(true), None)
-    }
-
     /// Reshapes the tensor to a different mapping at the same address, consuming `self`. Delegates to
     /// [`Tensor::reshape`].
     ///
@@ -1031,17 +1020,6 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             Element2,
         >(DMA_SRAM_WRITE_WIDTH);
         dst.inner.transpose(self.inner, true);
-    }
-
-    /// Writes data to a mutable tensor view for data memory.
-    #[primitive(DmTensorView::to_dm_view_pcopy)]
-    pub fn to_dm_view_pcopy<Chip2: M, Cluster2: M, Slice2: M, Element2: M>(
-        self,
-        _sub: &mut TuContext<{ Tu::Sub }>,
-        mut dst: DmTensorViewMut<'l, D, Chip2, Cluster2, Slice2, Element2, B>,
-    ) {
-        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster2, Slice, Slice2>();
-        dst.inner.transpose(self.inner, false);
     }
 
     /// Creates immutable views by splitting along a tile expression over Chip.

@@ -181,6 +181,7 @@ Pair mode reinterprets [`BinaryArgMode`](#argument-modes) depending on the op: p
 
 Pair-mode constraints:
 - `stash()` and `filter()` are unavailable throughout pair mode (both paired and merged phases).
+- [`vector_intra_slice_reduce()`](./intra-slice-reduce.md) is unavailable throughout pair mode as well, before and after the `_zip`: the reducer takes no group condition.
 - Before `_zip` (the paired phase), the chain cannot transition to the [inter-slice reducer](./inter-slice-reducer.md), since `vector_inter_slice_reduce()` is not available on per-group tensors.
   After `_zip` (the merged phase), the result is `Commitable` again and can call `vector_inter_slice_reduce()` if the current stage supports the transition.
 - ALU usage is shared across the two groups: an ALU used in either group counts as consumed for both.

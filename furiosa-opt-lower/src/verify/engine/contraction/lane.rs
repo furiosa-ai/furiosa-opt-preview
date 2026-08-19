@@ -8,7 +8,10 @@ use std::fmt::{self, Display, Formatter};
 
 use furiosa_mapping::{Mapping, MappingExt, PaddingKind};
 
-use crate::verify::{CONTRACT_LANE_OUT_PACKET_ELEMENTS, TEMPORAL_ACCUMULATOR_COLS, align_up, inner_reduce_extent};
+use crate::DivideTerm;
+use crate::verify::{
+    CONTRACT_LANE_OUT_PACKET_ELEMENTS, TEMPORAL_ACCUMULATOR_COLS, align_up, padded_extent_at, padding_per_stride,
+};
 
 /// MAC accumulator element capacity; the reduce buffer (axes inner to the reduce) must fit within it.
 const ACCUMULATOR_CAPACITY_ELEMENTS: usize = 1024;
@@ -171,13 +174,35 @@ pub fn config_contract_lane(
         });
     }
 
-    // The axes inner to the outermost reduce, one buffer slot each.
-    let inner_time =
-        inner_reduce_extent(pre_reduce_time, time).map_err(|_| ContractLaneError::InconsistentReduceTime {
+    // Recover the axes inner to the outermost reduce (dividing `pre_reduce_time` by post-reduce `time`).
+    let division_terms =
+        crate::config_divide_exact(pre_reduce_time, time).map_err(|_| ContractLaneError::InconsistentReduceTime {
             mode,
             pre_reduce_time: pre_reduce_time.clone(),
             time: time.clone(),
         })?;
+    let time_padding_per_stride = padding_per_stride(pre_reduce_time);
+    // A sub-term is dropped before the walk, not skipped inside it: the walk compares adjacent
+    // boundaries, and skipping in place would still compare across the sub-term.
+    let boundaries: Vec<(&DivideTerm, usize)> = division_terms
+        .iter()
+        .filter_map(|term| padded_extent_at(&time_padding_per_stride, term).map(|extent| (term, extent)))
+        .collect();
+    let dividend_end = |&(term, extent): &(&DivideTerm, usize)| term.dividend_stride * extent;
+    let inner_time = if boundaries.is_empty() {
+        // All axes reduced.
+        1
+    } else if dividend_end(&boundaries[0]) < pre_reduce_time.size() {
+        // The outermost axis was reduced, so everything below the top is inner to the reduce.
+        time.size()
+    } else {
+        // The outermost retained factor reaches the top; walk outer-to-inner to the first gap between
+        // adjacent retained terms (the reduce boundary), else nothing is inner to the reduce.
+        boundaries
+            .windows(2)
+            .find(|w| dividend_end(&w[1]) != w[0].0.dividend_stride)
+            .map_or(1, |w| w[0].0.divisor_stride)
+    };
 
     // Each `InnerTime` slot holds one `[Lane, Packet]` chunk; the `LaneMode` pads exactly one of the two
     // axes to a fixed width (Interleaved pads `Lane` to the 8-wide output bus, Sequential pads `Packet`

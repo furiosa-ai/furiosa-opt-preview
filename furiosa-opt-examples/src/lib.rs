@@ -1,7 +1,8 @@
 //! Virtual ISA programs.
 //!
-//! Every kernel outside [`negative`] compiles end-to-end to an EDF; [`negative`] holds the
-//! rejection fixtures, which must fail. Legal programs the compiler cannot lower yet are not here
+//! Every concrete kernel outside [`negative`] compiles end-to-end to an EDF; [`generic`]'s
+//! fns compile from a linked root's launches instead, and [`negative`] holds the rejection
+//! fixtures, which must fail. Legal programs the compiler cannot lower yet are not here
 //! at all: they live in the private `npu-opt-examples` crate under `unsupported`.
 
 #![expect(clippy::type_complexity)] // Necessary for mapping expressions.
@@ -18,12 +19,12 @@ pub mod dma;
 pub mod fetch_assertions;
 pub mod fetch_commit;
 pub mod fetch_table_lookup;
+pub mod generic;
 pub mod host_tile_view;
 pub mod memory_op;
 pub mod memset;
 pub mod mnist;
 pub mod negative;
-pub mod padded_axis_tile;
 pub mod param;
 pub mod pe_count;
 pub mod reshape;

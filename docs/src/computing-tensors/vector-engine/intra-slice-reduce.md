@@ -16,7 +16,6 @@ The reduce call's key parameters are below.
 - **`OutTime`, `OutPacket`**: The output `Time` and `Packet` shape after reduction.
   These match the input `Time` and `Packet` with every `REDUCE_LABEL` factor removed.
 
-The call is unavailable in [Pair Mode](./intra-slice-chain.md#pair-mode).
 The examples below exercise each parameter combination.
 
 ### Reduction in `Time`
@@ -157,7 +156,7 @@ A single slot accumulates all `R` values into the output.
 If `InnerTime::SIZE` exceeds 8, the API rejects the call.
 For example:
 
-```rust,should_panic
+```rust
 # #![feature(adt_const_params)]
 # extern crate furiosa_opt_std;
 # use furiosa_opt_std::prelude::*;

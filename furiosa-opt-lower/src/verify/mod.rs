@@ -103,34 +103,3 @@ fn collect_axis_extents(m: &Mapping, out: &mut Vec<usize>) {
         other => out.push(other.size()),
     }
 }
-
-/// Live positions inner to the outermost reduced axis (`InnerTime::SIZE`), the accumulator slots a
-/// reducer holds at once, or an error when `post_reduce` does not divide `pre_reduce`.
-///
-/// The division matches the retained axes; the reduced ones are the gaps between them. Padded
-/// extents count, since a padded position still takes its slot.
-pub(crate) fn inner_reduce_extent(pre_reduce: &Mapping, post_reduce: &Mapping) -> Result<usize, String> {
-    let division_terms = crate::config_divide_exact(pre_reduce, post_reduce)?;
-    let padded_extents = padding_per_stride(pre_reduce);
-    // A sub-term is dropped before the walk, not skipped inside it: the walk compares adjacent
-    // boundaries, and skipping in place would still compare across the sub-term.
-    let boundaries: Vec<(&DivideTerm, usize)> = division_terms
-        .iter()
-        .filter_map(|term| padded_extent_at(&padded_extents, term).map(|extent| (term, extent)))
-        .collect();
-    let dividend_end = |&(term, extent): &(&DivideTerm, usize)| term.dividend_stride * extent;
-    Ok(if boundaries.is_empty() {
-        // All axes reduced.
-        1
-    } else if dividend_end(&boundaries[0]) < pre_reduce.size() {
-        // The outermost axis was reduced, so everything below the top is inner to the reduce.
-        post_reduce.size()
-    } else {
-        // The outermost retained factor reaches the top; walk outer-to-inner to the first gap between
-        // adjacent retained terms (the reduce boundary), else nothing is inner to the reduce.
-        boundaries
-            .windows(2)
-            .find(|w| dividend_end(&w[1]) != w[0].0.dividend_stride)
-            .map_or(1, |w| w[0].0.divisor_stride)
-    })
-}

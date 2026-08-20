@@ -155,6 +155,11 @@ A `VrfTensor` is a tensor stored in the VRF:
 `Chip` / `Cluster` / `Slice` pass through from the source.
 `Element` holds the per-(slice) layout.
 
+Those three are what a Vector Engine op matches an operand against, so an operand carried under a different partition than the stream it feeds is a compile error rather than a read of another slice's data (see [Operands](./vector-engine/intra-slice-chain.md#operands)).
+`.reshape::<Chip2, Cluster2, Slice2, Element2>()` restates one under another partition of the same slices, which is how an operand replicated under an anonymous broadcast (`m![256]`) feeds a stream partitioned by a named axis.
+It relabels the mapping and moves no data, so it is `unsafe` for the same reason `DmTensor::reshape` is: every physical position must already hold what the new mapping claims of it.
+Regrouping axes and naming a broadcast distribution axis are the two forms that satisfy that; the `# Safety` section on `VrfTensor::reshape` states both.
+
 #### From Collect Engine
 
 `.to_vrf::<Element2>()` on `CollectTensor` stores the flits into the VRF and produces a `VrfTensor`.

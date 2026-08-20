@@ -297,34 +297,24 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote!((#(#param_names),*))
     };
 
-    let (impl_generics, _, where_clause) = generics.split_for_impl();
-    let generic_keys: Vec<_> = generics
-        .params
-        .iter()
-        .filter_map(|param| match param {
-            syn::GenericParam::Lifetime(_) => None,
-            syn::GenericParam::Type(param) => {
-                let ident = &param.ident;
-                Some(quote!(<#ident as ::furiosa_opt_std::prelude::AxisName>::SIZE))
-            }
-            syn::GenericParam::Const(param) => {
-                let ident = &param.ident;
-                Some(quote!(#ident))
-            }
-        })
-        .collect();
-
-    // The launch selects its kernel from the binary's `furiosa_kernels` registry by the fn's
-    // path and its numeric axis/const values. A concrete fn is the empty-key case.
+    // Under `furiosa_opt` (the driver's scan/compile passes) no `.bin` exists yet, so embed nothing.
     let npu_body = quote! {
-        static __FURIOSA_OPT_KERNELS: furiosa_opt_std::backend::npu::Kernels =
-            furiosa_opt_std::backend::npu::Kernels::new();
-        let __furiosa_opt_kernel = furiosa_opt_std::backend::npu::kernel(
-            &__FURIOSA_OPT_KERNELS,
-            concat!(module_path!(), "::", #name_str),
-            &[#(#generic_keys),*],
-        )
-        .await;
+        static __FURIOSA_OPT_KERNEL: furiosa_opt_std::OnceCell<furiosa_opt_std::backend::npu::Kernel> =
+            furiosa_opt_std::OnceCell::const_new();
+        #[cfg(furiosa_opt)]
+        let __furiosa_opt_kernel = __FURIOSA_OPT_KERNEL
+            .get_or_init(|| async { furiosa_opt_std::backend::npu::Kernel::load(&[]).await })
+            .await;
+        #[cfg(not(furiosa_opt))]
+        let __furiosa_opt_kernel = __FURIOSA_OPT_KERNEL
+            .get_or_init(|| async {
+                furiosa_opt_std::backend::npu::Kernel::load(include_bytes!(concat!(
+                    env!("FURIOSA_OPT_OUT_DIR"), "/", env!("CARGO_PKG_NAME"), "/",
+                    module_path!(), "::", #name_str, ".bin"
+                )))
+                .await
+            })
+            .await;
         #tensor_stmts
         #run_body
     };
@@ -338,7 +328,7 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
         // each of these lints depending on how the user defined the device
         // function, and `#[expect]` fails when the lint doesn't fire.
         #[allow(dead_code, unused, clippy::too_many_arguments)]
-        fn #hidden #impl_generics (#inputs) #output #where_clause #block
+        fn #hidden #generics (#inputs) #output #block
 
         // Marker struct: the `__furiosa_opt_` prefix dodges a same-named module, and the braced (non-unit)
         // form keeps it out of the value namespace so it coexists with the hidden fn; npu `scan` strips it.
@@ -365,7 +355,7 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        impl #impl_generics furiosa_opt_std::runtime::DeviceFn<#tuple_type> for #hidden #where_clause {
+        impl #generics furiosa_opt_std::runtime::DeviceFn<#tuple_type> for #hidden {
             type Output = #return_ty;
             fn execute(#body_destructure: #tuple_type) -> impl std::future::Future<Output = Self::Output> {
                 async move {

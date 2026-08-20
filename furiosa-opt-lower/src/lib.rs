@@ -9,7 +9,7 @@
 //! backend (`tu-ops` / `npu-visa-translate`) call all of these.
 
 use abi_stable::std_types::{RResult, RString, RVec};
-use furiosa_mapping::{Mapping, PaddingKind};
+use furiosa_mapping::{Mapping, MappingExt, PaddingKind};
 pub use furiosa_opt_lower_types::{
     COMMIT_VALID_PACKET_SIZES, CommitError, DivideTerm, FactorLeaf, FetchError, MAX_SEQUENCER_ENTRIES, PadError,
     RelaxedDivision, StreamSequencerConfig, SwitchAxis, SwitchConfig, SwitchError, SwitchFrame, TileError,
@@ -20,10 +20,11 @@ mod verify;
 pub use verify::{
     BITS_PER_BYTE, CastError, CollectError, CommitCastError, CommitTrimError, ContractLaneError, ContractPacketError,
     ContractTimeError, FLIT_BYTES, LaneMode, StreamAdapterError, TEMPORAL_ACCUMULATOR_COLS, ToTrfError, ToVrfError,
-    VRF_BYTES, VectorError, config_cast, config_collect, config_commit_cast, config_commit_trim, config_contract_lane,
-    config_contract_packet, config_contract_time, config_reduce_label, config_stream_adapter, config_to_trf,
-    config_to_vrf, config_vector_narrow_split, config_vector_narrow_trim, config_vector_widen_concat,
-    config_vector_widen_pad,
+    UnreadableCause, VRF_BYTES, VRF_CACHE_BYTES, VectorError, VrfOperandError, config_cast, config_collect,
+    config_commit_cast, config_commit_trim, config_contract_lane, config_contract_packet, config_contract_time,
+    config_reduce_label, config_stream_adapter, config_to_trf, config_to_vrf, config_vector_intra_slice_unzip,
+    config_vector_narrow_split, config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad,
+    config_vrf_operand,
 };
 
 /// Raw `extern "C-unwind"` decls for the prebuilt impl's exports.
@@ -75,14 +76,6 @@ mod sys {
             out_time: &Mapping,
             ring_size: usize,
         ) -> RResult<RVec<RVec<usize>>, SwitchError>;
-
-        pub(super) fn config_tile(
-            index: &Mapping,
-            element: &Mapping,
-            expected: &Mapping,
-            len: usize,
-            hole_fill: PaddingKind,
-        ) -> RResult<(), TileError>;
 
         pub(super) fn config_pad(element: &Mapping, expected: &Mapping) -> RResult<(), PadError>;
     }
@@ -171,11 +164,8 @@ pub fn switch_custom_snoop_bitmap(
         .map(|bitmap| bitmap.into_iter().map(Vec::from).collect())
 }
 
-/// Validate a `tile` view (`index` divides `element` into `expected`), or the [`TileError`].
-///
-/// `hole_fill` is the padding kind the out-of-tile cells must carry — Top for a
-/// read `view().tile()`, Bottom (down padding) for a `view_mut().tile()` write
-/// destination.
+/// Validates a `tile` view: locating `index` in `element` and narrowing it to `len` must produce
+/// `expected`.
 pub fn config_tile(
     index: &Mapping,
     element: &Mapping,
@@ -183,7 +173,31 @@ pub fn config_tile(
     len: usize,
     hole_fill: PaddingKind,
 ) -> Result<(), TileError> {
-    unsafe { sys::config_tile(index, element, expected, len, hole_fill) }.into_result()
+    let size = index.size();
+    // A unit axis has no step to locate: every position selects the same cell, so a valid tile can
+    // only re-declare the buffer. `lower_indexed_view` relies on that no-op case.
+    let split = if size == 1 {
+        if len != 1 {
+            return Err(TileError::Split);
+        }
+        element.normalize()
+    } else {
+        // Located, not divided, so an axis whose live extent is not a multiple of the chunk passes:
+        // `m![W # 155648 / 8192]` holds 19 chunks though its live 151936 is not a multiple of 8192.
+        let stride = element.find_axis(index).map_err(|_| TileError::Split)?;
+        // `hole_fill` is `Top` for a read `view().tile()`, `Bottom` for a `view_mut().tile()`
+        // destination. Shared with `MappingShape::windowed_class`, so check and shape cannot drift.
+        element
+            .window_axis(stride, size, len, hole_fill)
+            .map_err(|_| TileError::Split)?
+    };
+
+    let requested = expected.normalize();
+    if split == requested {
+        Ok(())
+    } else {
+        Err(TileError::UnexpectedView { split, requested })
+    }
 }
 
 /// Validate a `pad` view (`expected` is `element` under one outermost `Top` padding factor), or the

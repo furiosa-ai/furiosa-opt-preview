@@ -14,6 +14,7 @@ pub use contraction::{
     config_contract_packet, config_contract_time, config_stream_adapter,
 };
 pub use vector::{
-    VectorError, config_reduce_label, config_vector_narrow_split, config_vector_narrow_trim,
-    config_vector_widen_concat, config_vector_widen_pad,
+    UnreadableCause, VectorError, VrfOperandError, config_reduce_label, config_vector_intra_slice_unzip,
+    config_vector_narrow_split, config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad,
+    config_vrf_operand,
 };

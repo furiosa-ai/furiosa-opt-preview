@@ -79,7 +79,7 @@ impl<'l, const T: Tu, P: CanApplyToTrf, D: Scalar, Chip: M, Cluster: M, Slice: M
     #[primitive(TuTensor::to_trf)]
     pub fn to_trf<Lane: M, Element: M>(self) -> TrfTensor<D, Chip, Cluster, Slice, Lane, Element, B> {
         verify_to_trf::<D, Lane, Time, Packet, Element>();
-        TrfTensor::from_parts(self.inner.transpose(false))
+        TrfTensor::new(self.inner.transpose(false))
     }
 }
 // ANCHOR_END: collect_to_trf
@@ -91,8 +91,8 @@ impl<'l, const T: Tu, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice:
     /// Stores to the vector register file.
     #[primitive(TuTensor::to_vrf)]
     pub fn to_vrf<Element: M>(self) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
-        constraints::assert_vrf_capacity::<D, Element>();
-        VrfTensor::from_parts(self.inner.transpose(false))
+        verify_to_vrf::<D, Time, Packet, Element>();
+        VrfTensor::new(self.inner.transpose(false))
     }
 }
 // ANCHOR_END: collect_to_vrf
@@ -108,6 +108,12 @@ pub(crate) fn verify_collect<D: Scalar, Time: M, Packet: M, Time2: M, Packet2: M
         D::BITS,
     )
     .unwrap_or_else(|message| panic!("{message}"));
+}
+
+/// Validates `to_vrf` via [`furiosa_opt_lower::config_to_vrf`] (element rule documented there).
+pub(crate) fn verify_to_vrf<D: Scalar, Time: M, Packet: M, Element: M>() {
+    furiosa_opt_lower::config_to_vrf(&Time::to_value(), &Packet::to_value(), &Element::to_value(), D::BITS)
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// Total TRF capacity in bytes: 8 lanes x 2 banks x 128 rows x 32 bytes. Where a tensor lands in the

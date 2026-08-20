@@ -1,6 +1,6 @@
 [package]
 name = "cargo-furiosa-opt"
-version = "0.5.1+g94819663"
+version = "0.6.0+g0a3cd0eb"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/furiosa-ai/furiosa-opt"

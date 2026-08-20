@@ -1,13 +1,13 @@
 [package]
 name = "furiosa-opt-common-ir"
-version = "0.5.1+g94819663"
+version = "0.6.0+g0a3cd0eb"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/furiosa-ai/furiosa-opt"
 description = "Common IR that furiosa-opt-std and the translator share."
 
 [dependencies]
-furiosa-opt-macro = { path = "../furiosa-opt-macro", version = "0.5" }
+furiosa-opt-macro = { path = "../furiosa-opt-macro", version = "0.6" }
 serde = { workspace = true }
 serde-lite = { workspace = true }
 thiserror = { workspace = true }

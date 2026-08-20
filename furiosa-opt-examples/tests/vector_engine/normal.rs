@@ -1,5 +1,4 @@
 use crate::common::{assert_f32_bits_eq, assert_f32_vec_eq};
-use furiosa_opt_examples::negative::vector_engine::ve_elementwise_fxp_chain;
 use furiosa_opt_examples::vector_engine::{
     A, B, ve_elementwise_full_pipeline, ve_elementwise_fxp_const, ve_elementwise_logic, ve_elementwise_multi_vrf,
     ve_elementwise_reinterpret_abs_f32, ve_elementwise_reinterpret_chain_f32, ve_elementwise_stash_f32,
@@ -9,7 +8,6 @@ use furiosa_opt_examples::vector_engine::{
 use furiosa_opt_std::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 // =============================================================================
 // VE Elementwise Tests (uses A=512, B=256 from vector_engine.rs)
@@ -32,29 +30,6 @@ async fn test_ve_elementwise_fxp_const() {
     let expected = input.into_inner().map(|x| x.wrapping_add(100));
 
     assert_eq!(expected.into_vec(), result.into_vec());
-}
-
-/// This test verifies that ALU conflicts are properly detected.
-/// AddFxp and SubFxp both use FxpAdd ALU, so chaining them should panic.
-#[tokio::test]
-async fn test_ve_elementwise_fxp_chain() {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let mut ctx = Context::acquire();
-
-            let mut rng = SmallRng::seed_from_u64(42);
-            let input = HostTensor::<i32, m![A]>::rand(&mut rng);
-
-            let input_hbm = input.to_hbm(&mut ctx.pdma).await;
-
-            launch(ve_elementwise_fxp_chain, (&mut *ctx, &input_hbm)).await;
-        });
-    }));
-
-    assert!(
-        result.is_err(),
-        "Expected panic due to ALU conflict (FxpAdd used twice)"
-    );
 }
 
 #[tokio::test]

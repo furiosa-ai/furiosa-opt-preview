@@ -67,9 +67,8 @@ use crate::scalar::Scalar;
 use crate::tensor::Tensor;
 use crate::tensor::tu::{Position, TuTensor};
 
-/// A VE stream's five-axis mapping, which the operand impls name to say an operand is read at the
-/// stream's own partition. Public because those impls are, and their headers spell it out.
-pub type VeTensorShape<Chip, Cluster, Slice, Time, Packet> = m![{ Chip }, { Cluster }, { Slice }, { Time }, { Packet }];
+pub(crate) type VeTensorShape<Chip, Cluster, Slice, Time, Packet> =
+    m![{ Chip }, { Cluster }, { Slice }, { Time }, { Packet }];
 
 /// After the vector engine (`vector_final`).
 ///

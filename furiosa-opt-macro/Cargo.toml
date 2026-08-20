@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-opt-macro"
-version = "0.6.0+g0a3cd0eb"
+version = "0.5.1+gdc190606"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/furiosa-ai/furiosa-opt"

@@ -2,11 +2,6 @@
 
 use furiosa_mapping::*;
 
-pub(crate) fn verify_vector_intra_slice_unzip<I: AxisName, Time: M, Packet: M>() {
-    furiosa_opt_lower::config_vector_intra_slice_unzip(&I::NAME, &Time::to_value(), &Packet::to_value())
-        .unwrap_or_else(|message| panic!("{message}"));
-}
-
 pub(crate) fn verify_vector_narrow_split<Time: M, Packet: M, Time2: M, Packet2: M>() {
     furiosa_opt_lower::config_vector_narrow_split(
         &Time::to_value(),

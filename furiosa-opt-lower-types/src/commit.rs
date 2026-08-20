@@ -1,7 +1,7 @@
 //! The Commit engine's legal packet sizes and typed failure reasons.
 
 use abi_stable::StableAbi;
-use abi_stable::std_types::{RBox, RVec};
+use abi_stable::std_types::RVec;
 use furiosa_mapping_types::{Mapping, SequencerError};
 
 use crate::MAX_SEQUENCER_ENTRIES;
@@ -24,35 +24,9 @@ pub enum CommitError {
         /// The packet size, in bytes.
         bytes: usize,
     },
-    /// The trimmed packet is not the DM `element`'s innermost run: the engine drains one packet into the
-    /// element's inner cells, so the element split at the packet size must give the packet back. The
-    /// mappings are boxed to keep the whole error under the large-`Err` budget.
-    #[error(
-        "Commit: the trimmed packet {} must be the innermost run of the DM element {}, but that \
-         element's innermost {} cells are {}. If the element's layout is the intended one, the stream \
-         has to reach the commit in that order: run it through the transpose engine so the packet \
-         becomes the element's innermost run",
-        &**packet, &**element, packet.size(), &**element_inner
-    )]
-    PacketNotInnermost {
-        /// The post-`commit_trim` packet.
-        packet: RBox<Mapping>,
-        /// The DM element the commit writes into.
-        element: RBox<Mapping>,
-        /// The element's own innermost run, split off at the packet size.
-        element_inner: RBox<Mapping>,
-    },
-    /// The matcher could not place a time axis into the DM `element` layout (the packet placed fine).
-    /// The mappings are boxed to keep the whole error under the large-`Err` budget.
-    #[error("Commit: cannot write the time axes {} into the DM element {} ({reason:?})", &**in_time, &**element)]
-    Unwritable {
-        /// Why the matcher gave up.
-        reason: SequencerError,
-        /// The stream's time axes.
-        in_time: RBox<Mapping>,
-        /// The DM element the commit writes into.
-        element: RBox<Mapping>,
-    },
+    /// The matcher could not place an input axis into the DM `element` layout.
+    #[error("Commit: cannot write an input axis into DM ({0:?})")]
+    Unwritable(SequencerError),
     /// A DM cell is left unwritten (the carved-down memory remainders).
     #[error("Commit: a DM cell is left unwritten ({0:?})")]
     Unwritten(RVec<Mapping>),

@@ -86,18 +86,6 @@ pub enum ToVrfError {
         /// Register file capacity in bytes.
         capacity: usize,
     },
-    /// `Time` concatenated with `Packet` does not equal `Element`.
-    #[error(
-        "`to_vrf` element mismatch: the register holds the stream it stores, `[Time, Packet]` = \
-         {expected}, but the declared `Element` is {got}. Name the stream the `collect` left, \
-         padding included."
-    )]
-    ElementMismatch {
-        /// `[Time, Packet]`.
-        expected: Mapping,
-        /// The declared `Element`.
-        got: Mapping,
-    },
 }
 
 /// Pads the input packet to a flit-aligned boundary, then splits at the flit: the inner flit must be
@@ -202,30 +190,13 @@ pub fn config_to_trf(
 ///
 /// One slice's `Element` must fit the vector register file. The VRF is not partitioned by an address
 /// the way the TRF is, so the capacity is the whole file ([`VRF_BYTES`]).
-///
-/// `Element` is that stream and nothing else: the store writes one slice's `[Time, Packet]`, so a
-/// declared `Element` naming other cells describes a register the store never wrote. The comparison
-/// is on normalized mappings, which is what lets a kernel regroup the seam it does not care about
-/// (`[m![B / 8], m![B % 8]]` declared as `m![B]`) while a shape that reaches other cells is refused.
-/// [`config_to_trf`] states the same rule for the TRF, where `Lane` takes `Time`'s outer half first.
-pub fn config_to_vrf(
-    time: &Mapping,
-    packet: &Mapping,
-    element: &Mapping,
-    element_bits: usize,
-) -> Result<(), ToVrfError> {
+pub fn config_to_vrf(element: &Mapping, element_bits: usize) -> Result<(), ToVrfError> {
     let bytes = size_in_bytes(element_bits, element.size());
     if bytes > VRF_BYTES {
         return Err(ToVrfError::ExceedsCapacity {
             bytes,
             capacity: VRF_BYTES,
         });
-    }
-
-    let expected = time.clone().pair(packet.clone()).normalize();
-    let got = element.normalize();
-    if expected != got {
-        return Err(ToVrfError::ElementMismatch { expected, got });
     }
     Ok(())
 }
@@ -237,20 +208,12 @@ mod tests {
 
     use super::*;
 
-    axes![B = 2048, C = 4096, E = 2];
+    axes![B = 2048, C = 4096];
 
     /// One slice's operand filling the file exactly is the largest legal `to_vrf`.
     #[test]
     fn to_vrf_at_capacity() {
-        assert_eq!(
-            config_to_vrf(
-                &<m![B / 8]>::to_value(),
-                &<m![B % 8]>::to_value(),
-                &<m![B]>::to_value(),
-                32
-            ),
-            Ok(())
-        );
+        assert_eq!(config_to_vrf(&<m![B]>::to_value(), 32), Ok(()));
     }
 
     /// The same element count in a wider type no longer fits, so the bound is on bytes and not on
@@ -258,12 +221,7 @@ mod tests {
     #[test]
     fn to_vrf_over_capacity_by_element_width() {
         assert_eq!(
-            config_to_vrf(
-                &<m![B / 8]>::to_value(),
-                &<m![B % 8]>::to_value(),
-                &<m![B]>::to_value(),
-                64
-            ),
+            config_to_vrf(&<m![B]>::to_value(), 64),
             Err(ToVrfError::ExceedsCapacity {
                 bytes: 16_384,
                 capacity: VRF_BYTES,
@@ -275,40 +233,11 @@ mod tests {
     #[test]
     fn to_vrf_over_capacity_by_axis_size() {
         assert_eq!(
-            config_to_vrf(
-                &<m![C / 8]>::to_value(),
-                &<m![C % 8]>::to_value(),
-                &<m![C]>::to_value(),
-                32
-            ),
+            config_to_vrf(&<m![C]>::to_value(), 32),
             Err(ToVrfError::ExceedsCapacity {
                 bytes: 16_384,
                 capacity: VRF_BYTES,
             })
         );
-    }
-
-    /// The `Time` / `Packet` seam is the stream's, not the register's: an `Element` spelling it out
-    /// names the same cells as one that folds it away, and both are the stream.
-    #[test]
-    fn to_vrf_element_regroups_the_stream() {
-        assert_eq!(
-            config_to_vrf(
-                &<m![B / 8]>::to_value(),
-                &<m![B % 8]>::to_value(),
-                &<m![B / 8, B % 8]>::to_value(),
-                32
-            ),
-            Ok(())
-        );
-    }
-
-    /// An `Element` that drops the stream's padding reaches fewer cells than the store wrote, so it
-    /// is a different register and is refused here rather than at the VE op that reads it.
-    #[test]
-    fn to_vrf_element_dropping_stream_padding_rejects() {
-        let error =
-            config_to_vrf(&<m![1]>::to_value(), &<m![E # 8]>::to_value(), &<m![E]>::to_value(), 32).unwrap_err();
-        assert!(matches!(error, ToVrfError::ElementMismatch { .. }), "{error}");
     }
 }

@@ -99,19 +99,6 @@ Each operand comes from one of three sources.
 
 Ternary ops (`FmaF`) take a pair `(operand0, operand1)`.
 
-A VRF operand is read per slice by an indexer, which puts three rules on it.
-
-First, its `Chip` / `Cluster` / `Slice` are the stream's own: at slice `s` the op reads what slice `s` holds, so an operand under a different partition is a compile error instead of a silent read of another slice's data.
-[`VrfTensor::reshape`](../register-files.md#vector-register-file) restates one under the stream's partition when the two describe the same slices, e.g. an operand replicated under an anonymous `m![256]` feeding a stream partitioned by a named axis.
-
-Second, one access (the `Packet`: 8 lanes in 8-way, 4 in 4-way) is one indexer step, and the indexer offers just two read options.
-**Broadcast** feeds every lane from one address; **contiguous** reads `Packet` consecutive `Element` cells.
-So the packet axes must be the operand's innermost, contiguous ones, or absent from it entirely; a packet that walks an outer axis of the operand, or mixes broadcast and live lanes inside one access, has no encoding and is rejected.
-
-Third, the two directions of an axis mismatch are not the same.
-An axis the operand has and the stream does not is refused, with `the stream leaves operand axes unmatched`, because the cells it indexes would never be read.
-An axis the stream has and the operand does not is a broadcast, which is how one operand feeds every row of the stream.
-
 The same op method picks up different sources by the argument type:
 
 ```rust,ignore
@@ -194,7 +181,6 @@ Pair mode reinterprets [`BinaryArgMode`](#argument-modes) depending on the op: p
 
 Pair-mode constraints:
 - `stash()` and `filter()` are unavailable throughout pair mode (both paired and merged phases).
-- [`vector_intra_slice_reduce()`](./intra-slice-reduce.md) is unavailable throughout pair mode as well, before and after the `_zip`: the reducer takes no group condition.
 - Before `_zip` (the paired phase), the chain cannot transition to the [inter-slice reducer](./inter-slice-reducer.md), since `vector_inter_slice_reduce()` is not available on per-group tensors.
   After `_zip` (the merged phase), the result is `Commitable` again and can call `vector_inter_slice_reduce()` if the current stage supports the transition.
 - ALU usage is shared across the two groups: an ALU used in either group counts as consumed for both.
@@ -699,7 +685,7 @@ fn vrf_add<'l, const T: Tu>(
 # let mut ctx = Context::acquire();
 #
 # let i: CollectTensor<'_, _, i32, m![1], m![B], m![A / 8], m![N], m![A % 8]> = CollectTensor::new(&mut ctx.main, Tensor::zero());
-# let v: VrfTensor<i32, m![1], m![B], m![A / 8], m![A % 8]> = VrfTensor::zero();
+# let v: VrfTensor<i32, m![1], m![B], m![A / 8], m![A % 8]> = VrfTensor::new();
 # let _o = vrf_add(i, &v);
 ```
 

@@ -241,7 +241,7 @@ mod tests {
 
     /// One slice's operand filling the file exactly is the largest legal `to_vrf`.
     #[test]
-    fn to_vrf_at_capacity() {
+    fn to_vrf_fills_file() {
         assert_eq!(
             config_to_vrf(
                 &<m![B / 8]>::to_value(),

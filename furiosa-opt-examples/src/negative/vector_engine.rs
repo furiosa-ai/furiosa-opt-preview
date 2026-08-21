@@ -72,8 +72,8 @@
 //!
 //! axes![W = 256, B = 32];
 //!
-//! fn store<'l, const T: Tu>(
-//!     input: BeginTensor<'l, T, i32, m![1], m![1 # 2], m![1 # 128], m![1], m![B]>,
+//! fn store<'l>(
+//!     input: BeginTensor<'l, { Tu::Sub }, i32, m![1], m![1 # 2], m![1 # 128], m![1], m![B]>,
 //! ) -> VrfTensor<i32, m![1], m![1 # 2], m![1 # 128], m![B]> {
 //!     input.fetch::<m![1], m![B]>().collect::<m![B / 8], m![B % 8]>().to_vrf()
 //! }

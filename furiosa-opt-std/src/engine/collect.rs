@@ -85,12 +85,29 @@ impl<'l, const T: Tu, P: CanApplyToTrf, D: Scalar, Chip: M, Cluster: M, Slice: M
 // ANCHOR_END: collect_to_trf
 
 // ANCHOR: collect_to_vrf
-impl<'l, const T: Tu, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<'l, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    TuTensor<'l, { Tu::Sub }, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Stores to the vector register file.
     #[primitive(TuTensor::to_vrf)]
     pub fn to_vrf<Element: M>(self) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
+        verify_to_vrf::<D, Time, Packet, Element>();
+        VrfTensor::new(self.inner.transpose(false))
+    }
+}
+
+impl<'l, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    TuTensor<'l, { Tu::Main }, P, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    /// Stores to the vector register file, occupying the sub context the write runs through.
+    ///
+    /// The borrow lasts the statement. How long the *register* stays occupied is the compiler's
+    /// allocation to make, so the returned [`VrfTensor`] keeps no borrow.
+    #[primitive(TuTensor::to_vrf_from_main)]
+    pub fn to_vrf<Element: M>(
+        self,
+        _sub: &mut TuContext<{ Tu::Sub }>,
+    ) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
         verify_to_vrf::<D, Time, Packet, Element>();
         VrfTensor::new(self.inner.transpose(false))
     }

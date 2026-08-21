@@ -584,3 +584,58 @@ pub fn ve_elementwise_multi_vrf(
 // =============================================================================
 // Group pair operations (ve_group_pair_*)
 // =============================================================================
+
+/// A contraction result stored to the VRF and read back as a scale: the dot product feeds the
+/// vector engine, whose pass ends at the write port, and a second stream consumes the register.
+#[device(chip = 1)]
+pub fn ve_contract_to_vrf(
+    ctx: &mut Context,
+    act: &HbmTensor<f8e4m3, Chip, m![W]>,
+    weight: &HbmTensor<f8e4m3, Chip, m![P, W]>,
+    scale: &HbmTensor<f32, Chip, m![P]>,
+) -> HbmTensor<f32, Chip, m![P]> {
+    let act_dm: DmTensor<f8e4m3, Chip, Cluster, Slice, m![W]> = act.to_dm(&mut ctx.tdma);
+    let weight_dm: DmTensor<f8e4m3, Chip, Cluster, Slice, m![P, W]> = weight.to_dm(&mut ctx.tdma);
+    let scale_dm: DmTensor<f32, Chip, Cluster, Slice, m![P]> = scale.to_dm(&mut ctx.tdma);
+
+    let weight_trf: TrfTensor<f8e4m3, Chip, Cluster, Slice, m![P], m![W]> = ctx
+        .sub
+        .begin(weight_dm.view())
+        .fetch::<m![P], m![W]>()
+        .collect::<m![P, W / 32], m![W % 32]>()
+        .to_trf();
+
+    let dot: VrfTensor<f32, Chip, Cluster, Slice, m![P]> = ctx
+        .main
+        .begin(act_dm.view())
+        .fetch::<m![W / 32], m![W % 32]>()
+        .collect::<m![W / 32], m![W % 32]>()
+        .contract_outer::<m![W / 64], m![W % 64], _, _, _>(&weight_trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![1]>()
+        .contract_lane::<m![1], m![P]>(LaneMode::Interleaved)
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![P / 4 % 2], m![P % 4]>()
+        .vector_fp_unary(FpUnaryOp::Sqrt)
+        .vector_widen_concat::<m![1], m![P]>()
+        .vector_final()
+        .to_vrf(&mut ctx.sub);
+
+    let result: DmTensor<f32, Chip, Cluster, Slice, m![P]> = ctx
+        .main
+        .begin(scale_dm.view())
+        .fetch::<m![1], m![P]>()
+        .fetch_cast::<f32>()
+        .collect::<m![1], m![P]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![P / 4 % 2], m![P % 4]>()
+        .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &dot)
+        .vector_widen_concat::<m![1], m![P]>()
+        .vector_final()
+        .commit_trim::<m![P]>()
+        .commit();
+
+    result.to_hbm(&mut ctx.tdma)
+}

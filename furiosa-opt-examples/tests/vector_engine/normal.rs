@@ -1,9 +1,9 @@
 use crate::common::{assert_f32_bits_eq, assert_f32_vec_eq};
 use furiosa_opt_examples::vector_engine::{
-    A, B, ve_elementwise_full_pipeline, ve_elementwise_fxp_const, ve_elementwise_logic, ve_elementwise_multi_vrf,
-    ve_elementwise_reinterpret_abs_f32, ve_elementwise_reinterpret_chain_f32, ve_elementwise_stash_f32,
-    ve_elementwise_stash_i32, ve_elementwise_ternary, ve_elementwise_ternary_stash, ve_elementwise_vrf,
-    ve_stash_after_reinterpret_f32, ve_stash_after_widen_f32, ve_stash_fxp_fxp,
+    A, B, P, W, ve_contract_to_vrf, ve_elementwise_full_pipeline, ve_elementwise_fxp_const, ve_elementwise_logic,
+    ve_elementwise_multi_vrf, ve_elementwise_reinterpret_abs_f32, ve_elementwise_reinterpret_chain_f32,
+    ve_elementwise_stash_f32, ve_elementwise_stash_i32, ve_elementwise_ternary, ve_elementwise_ternary_stash,
+    ve_elementwise_vrf, ve_stash_after_reinterpret_f32, ve_stash_after_widen_f32, ve_stash_fxp_fxp,
 };
 use furiosa_opt_std::prelude::*;
 use rand::SeedableRng;
@@ -319,4 +319,27 @@ async fn test_ve_elementwise_ternary_stash() {
     let expected = input.into_inner().map(|x| x.mul_add(x, 1.0));
 
     assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
+}
+
+/// A dot product stored to the VRF and read back: `act` and `weight` are all ones over `W = 64`, so
+/// each output channel's dot product is 64 and its square root 8, which scales `scale[p] = p`.
+#[tokio::test]
+async fn test_ve_contract_to_vrf() {
+    let mut ctx = Context::acquire();
+
+    let act = HostTensor::<f8e4m3, m![W]>::from_vec(vec![f8e4m3::from_f32(1.0); <m![W]>::SIZE])
+        .to_hbm(&mut ctx.pdma)
+        .await;
+    let weight = HostTensor::<f8e4m3, m![P, W]>::from_vec(vec![f8e4m3::from_f32(1.0); <m![P, W]>::SIZE])
+        .to_hbm(&mut ctx.pdma)
+        .await;
+    let scale = HostTensor::<f32, m![P]>::from_vec((0..<m![P]>::SIZE).map(|p| p as f32).collect::<Vec<_>>())
+        .to_hbm(&mut ctx.pdma)
+        .await;
+
+    let out = launch(ve_contract_to_vrf, (&mut *ctx, &act, &weight, &scale)).await;
+    let got = out.to_host::<m![P]>(&mut ctx.pdma).await.into_vec();
+
+    let expected: Vec<f32> = (0..<m![P]>::SIZE).map(|p| 8.0 * p as f32).collect();
+    assert_f32_vec_eq(&got, &expected);
 }

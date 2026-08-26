@@ -15,6 +15,7 @@ pub mod commit_view_tile;
 pub mod contract_element_types;
 pub mod contract_outer_assertions;
 pub mod dma;
+pub mod f4_indexing;
 pub mod fetch_assertions;
 pub mod fetch_commit;
 pub mod fetch_table_lookup;

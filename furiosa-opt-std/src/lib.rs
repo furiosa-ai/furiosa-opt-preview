@@ -2,6 +2,7 @@
 
 #![expect(incomplete_features)]
 #![feature(adt_const_params)]
+#![feature(float_erf)]
 #![feature(inherent_associated_types)]
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]

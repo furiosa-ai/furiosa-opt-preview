@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- Generic `#[device]` functions compile. Only a launch fixes their generic arguments, and the
+  binary being linked is what knows every launch, so that is where their kernels now compile:
+  a `cargo furiosa-opt` build embeds the kernels for each binary's own launches into that
+  binary, and a launch finds its kernel in the running binary itself — no kernel files ship
+  next to it. This covers every linked shape (a bin, an example, a test harness, and a cdylib
+  such as a Python wheel's extension module), and launches of kernels another crate defines.
+
 ### Changed
 
 - `vector_intra_slice_reduce` is no longer available in pair mode, before or after the `_zip`. The
@@ -65,6 +74,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Changed
 
 Breaking changes come first, each with what to write instead.
+
+- `cargo furiosa-opt compile` refuses a filter that names a generic fn, per fn: a generic fn
+  has no instantiation to compile on its own. Launch it from a target and build that target
+  (`cargo furiosa-opt build`/`test`); `compile` stays the direct artifact tool for concrete fns.
 
 - `furiosa-opt-examples` now holds only kernels that compile end to end, plus a `negative` module of
   fixtures that must be refused. Legal programs the compiler cannot lower to an EDF yet (`matmul`,

@@ -4,6 +4,7 @@ mod cast;
 mod collect;
 mod commit_adapter;
 mod contraction;
+mod fetch;
 mod vector;
 
 pub use cast::{CastError, config_cast};
@@ -13,6 +14,7 @@ pub use contraction::{
     ContractLaneError, ContractPacketError, ContractTimeError, LaneMode, StreamAdapterError, config_contract_lane,
     config_contract_packet, config_contract_time, config_stream_adapter,
 };
+pub use fetch::{FetchLiftDimension, FetchLiftMappingError, config_fetch_lift_mapping};
 pub use vector::{
     UnreadableCause, VectorError, VrfOperandError, config_reduce_label, config_vector_intra_slice_unzip,
     config_vector_narrow_split, config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad,

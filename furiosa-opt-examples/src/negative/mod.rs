@@ -30,6 +30,7 @@
 
 pub mod contract_outer_assertions;
 pub mod dma;
+pub mod fetch_lift;
 pub mod generic_device;
 pub mod memset;
 pub mod runtime_if_scalar;

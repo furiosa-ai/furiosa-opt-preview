@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-opt-std"
-version = "0.6.0+gcd29ee18"
+version = "0.6.0+gd0f33ffd"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/furiosa-ai/furiosa-opt"

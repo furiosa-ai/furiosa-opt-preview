@@ -15,6 +15,9 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   next to it. This covers every linked shape (a bin, an example, a test harness, and a cdylib
   such as a Python wheel's extension module), and launches of kernels another crate defines.
 
+- `DmTensorView::dm_cluster_swap` swaps two clusters and lowers to EDF, with
+  VISA/LIR/EDF regression coverage.
+
 ### Changed
 
 - `vector_intra_slice_reduce` is no longer available in pair mode, before or after the `_zip`. The
@@ -35,6 +38,13 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - The Transpose Engine accepts doubled input packing for 8-bit and 16-bit elements. A packet can
   now contribute 16 valid elements per cycle, and vISA lowering emits the corresponding
   `fetch_in_width_shift`; 4-bit and 32-bit doubled packing remain unsupported.
+- `fetch_chip_lift`, `fetch_cluster_lift`, and `fetch_slice_lift` move axes that a plain `fetch`
+  would traverse in `Time` onto a broadcast slot in the `Chip`, `Cluster`, or `Slice` placement.
+  Each destination reads a different offset from its local copy, with no data transfer and no change
+  to `OutPacket`. The source region must already be replicated.
+- A lift works in either execution context and follows the source view selected at runtime. Slice
+  bases combine constant offsets with the source address in that context. Lifted reads support
+  custom-broadcast switches and DM, VRF, or TRF outputs.
 
 ### Removed
 

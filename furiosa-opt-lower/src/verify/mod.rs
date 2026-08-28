@@ -26,11 +26,11 @@ pub mod engine;
 
 pub use engine::{
     CastError, CollectError, CommitCastError, CommitTrimError, ContractLaneError, ContractPacketError,
-    ContractTimeError, LaneMode, StreamAdapterError, ToTrfError, ToVrfError, UnreadableCause, VectorError,
-    VrfOperandError, config_cast, config_collect, config_commit_cast, config_commit_trim, config_contract_lane,
-    config_contract_packet, config_contract_time, config_reduce_label, config_stream_adapter, config_to_trf,
-    config_to_vrf, config_vector_intra_slice_unzip, config_vector_narrow_split, config_vector_narrow_trim,
-    config_vector_widen_concat, config_vector_widen_pad, config_vrf_operand,
+    ContractTimeError, FetchLiftDimension, FetchLiftMappingError, LaneMode, StreamAdapterError, ToTrfError, ToVrfError,
+    UnreadableCause, VectorError, VrfOperandError, config_cast, config_collect, config_commit_cast, config_commit_trim,
+    config_contract_lane, config_contract_packet, config_contract_time, config_fetch_lift_mapping, config_reduce_label,
+    config_stream_adapter, config_to_trf, config_to_vrf, config_vector_intra_slice_unzip, config_vector_narrow_split,
+    config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad, config_vrf_operand,
 };
 
 /// Bits in a byte.

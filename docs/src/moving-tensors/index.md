@@ -82,6 +82,7 @@ Do not read a destination before its producing transfer or commit has completed,
 
 * **[Fetch](./fetch-engine.md)** reads DM with one per-slice sequencer and emits a packet stream for the Tensor Unit.
   Its output mapping chooses the stream `Time` and `Packet` axes.
+  [Axis lifting](./fetch-engine.md#axis-lifting) can also move an axis from `Time` to `Chip`, `Cluster`, or `Slice` when the selected dimension contains a broadcast.
 * **[Commit](./commit-engine.md)** writes a Tensor Unit stream to DM.
   Its `Element` mapping chooses the destination layout and can transpose stream axes during the write.
 * **[DMA](./dma-engine.md)** pairs read and write sequencers for memory-to-memory movement.

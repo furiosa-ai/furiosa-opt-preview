@@ -19,6 +19,7 @@ pub mod dma;
 pub mod f4_indexing;
 pub mod fetch_assertions;
 pub mod fetch_commit;
+pub mod fetch_lift;
 pub mod fetch_table_lookup;
 pub mod generic;
 pub mod host_tile_view;

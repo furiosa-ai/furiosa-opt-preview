@@ -460,7 +460,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
              (only Chip + Element); Cluster distribution is decided at .to_dm() time. \
              No current callers. Either the Element axis is meant to encode a Cluster \
              sub-axis (API needs to take that axis explicitly) or the operation belongs \
-             on DmTensorView::dm_cluster_shuffle. Pending design review; see the doc \
+             on DmTensorView::dm_cluster_swap. Pending design review; see the doc \
              comment on hbm_cluster_shuffle."
         )
     }
@@ -1158,25 +1158,21 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         }
     }
 
-    /// Redistributes data across clusters by DMA (DM ↔ DM): `shuffle_pattern[target] = source`
-    /// copies the source cluster to the target cluster — e.g. `[1, 0]` swaps clusters 0 and 1.
-    #[primitive(DmTensorView::dm_cluster_shuffle)]
-    pub fn dm_cluster_shuffle<const CLUSTER_DIM: usize>(
+    /// Swaps clusters 0 and 1 by Tensor DMA (DM ↔ DM).
+    #[primitive(DmTensorView::dm_cluster_swap)]
+    pub fn dm_cluster_swap(
         self,
         dma: &mut DmaContext<{ Dma::Tensor }>,
-        shuffle_pattern: &[usize],
     ) -> DmTensor<D, Chip, Cluster, Slice, Element, B> {
         let mut shuffled: DmTensor<D, Chip, Cluster, Slice, Element, B> = DmTensor::new();
 
-        for (target_cluster_idx, source_cluster_idx) in shuffle_pattern.iter().enumerate() {
-            self.cluster_tile::<Cluster, 1, Padding<Identity, CLUSTER_DIM>>(*source_cluster_idx)
+        for (target_cluster_idx, source_cluster_idx) in [1, 0].into_iter().enumerate() {
+            self.cluster_tile::<Cluster, 1, Padding<Identity, 2>>(source_cluster_idx)
                 .to_dm_view(
                     dma,
                     shuffled
                         .view_mut()
-                        .cluster_tile::<Cluster, 1, Padding<Identity, CLUSTER_DIM, { PaddingKind::Bottom }>>(
-                            target_cluster_idx,
-                        ),
+                        .cluster_tile::<Cluster, 1, Padding<Identity, 2, { PaddingKind::Bottom }>>(target_cluster_idx),
                 );
         }
 

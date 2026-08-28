@@ -166,6 +166,25 @@ pub fn sequence(
     Ok(configs.into_iter().map(SequencerConfigExt::coalesce).collect())
 }
 
+/// Cuts a power-of-two mapping into outermost-first two-position slots.
+/// Panics when the mapping size is not a power of two.
+pub fn into_slots_of_size_two(mapping: &Mapping) -> Vec<Mapping> {
+    let size = mapping.size();
+    assert!(
+        size.is_power_of_two(),
+        "a mapping counted in size-2 slots must have a power-of-two size, got {size}"
+    );
+    let mut slots = Vec::with_capacity(size.trailing_zeros() as usize);
+    let mut rest = mapping.normalize();
+    while rest.size() > 1 {
+        // Normalize each slot separately so equivalent padded spellings collapse alike.
+        slots.push(rest.clone().modulo(2).normalize());
+        rest = rest.stride(2).normalize();
+    }
+    slots.reverse();
+    slots
+}
+
 impl MappingExt for Mapping {
     fn normalize(&self) -> Self {
         unsafe { sys::mapping_normalize(self) }

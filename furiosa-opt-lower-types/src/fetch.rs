@@ -5,8 +5,37 @@ use furiosa_mapping_types::{Mapping, SequencerError};
 
 use crate::MAX_SEQUENCER_ENTRIES;
 
-/// Why a fetch is not realizable on the Fetch engine — one variant per `config_fetch` / frontend
-/// `verify_fetch` check.
+/// Supported fetch-base alignment for efficient SRAM access.
+pub const FETCH_BASE_BYTES: usize = 8;
+
+/// Why fetch bases cannot be materialized for the placement grid.
+#[repr(C)]
+#[derive(StableAbi, Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FetchBaseError {
+    #[error("cannot locate fetch bases over the placement grid: {reason:?}")]
+    Unlocatable { reason: SequencerError },
+    #[error(
+        "unaligned fetch base at chip/cluster/slice position {position}: {bits} bits; expected a \
+         multiple of {FETCH_BASE_BYTES} bytes"
+    )]
+    UnalignedBase {
+        /// The first unaligned chip x cluster x slice position.
+        position: usize,
+        /// The position's read offset in bits.
+        bits: usize,
+    },
+    #[error(
+        "the fetch base of chip/cluster/slice position {position} overflows: {base} elements at \
+         {element_bits} bits each"
+    )]
+    BaseOffsetOverflow {
+        position: usize,
+        base: usize,
+        element_bits: usize,
+    },
+}
+
+/// Why a fetch is not realizable on the Fetch engine.
 #[repr(C)]
 #[derive(StableAbi, Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FetchError {
@@ -26,6 +55,18 @@ pub enum FetchError {
         time: Mapping,
         /// The carved-down `Packet` memory remainder.
         packet: Mapping,
+    },
+    /// The packet's innermost axis is not contiguous in DM.
+    #[error(
+        "Fetch: the packet's innermost axis must be contiguous in DM, but {innermost} has memory \
+         stride {memory_stride}; use the DM's innermost axis as the packet, or transpose after the \
+         fetch"
+    )]
+    NonContiguousPacket {
+        /// The innermost packet entry.
+        innermost: Mapping,
+        /// Its stride in DM elements.
+        memory_stride: usize,
     },
     /// The packet and time descriptors need more entries than the shared table holds.
     #[error("Fetch: needs {needed} sequencer entries, but the table holds {MAX_SEQUENCER_ENTRIES}")]

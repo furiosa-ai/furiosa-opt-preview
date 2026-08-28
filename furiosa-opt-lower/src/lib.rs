@@ -8,23 +8,23 @@
 //! `furiosa_mapping` terms, with no hidden algorithm. Both the frontend (`furiosa-opt-std`) and the IR
 //! backend (`tu-ops` / `npu-visa-translate`) call all of these.
 
-use abi_stable::std_types::{RResult, RString, RVec};
+use abi_stable::std_types::{ROption, RResult, RString, RVec};
 use furiosa_mapping::{Mapping, MappingExt, PaddingKind};
 pub use furiosa_opt_lower_types::{
-    COMMIT_VALID_PACKET_SIZES, CommitError, DivideTerm, FactorLeaf, FetchError, MAX_SEQUENCER_ENTRIES, PadError,
-    RelaxedDivision, StreamSequencerConfig, SwitchAxis, SwitchConfig, SwitchError, SwitchFrame, TileError,
-    TransposeConfig, TransposeError,
+    COMMIT_VALID_PACKET_SIZES, CommitError, DivideTerm, FETCH_BASE_BYTES, FactorLeaf, FetchBaseError, FetchError,
+    MAX_SEQUENCER_ENTRIES, PadError, RelaxedDivision, StreamSequencerConfig, SwitchAxis, SwitchConfig, SwitchError,
+    SwitchFrame, TileError, TransposeConfig, TransposeError,
 };
 
 mod verify;
 pub use verify::{
     BITS_PER_BYTE, CastError, CollectError, CommitCastError, CommitTrimError, ContractLaneError, ContractPacketError,
-    ContractTimeError, FLIT_BYTES, LaneMode, StreamAdapterError, TEMPORAL_ACCUMULATOR_COLS, ToTrfError, ToVrfError,
-    UnreadableCause, VRF_BYTES, VRF_CACHE_BYTES, VectorError, VrfOperandError, config_cast, config_collect,
-    config_commit_cast, config_commit_trim, config_contract_lane, config_contract_packet, config_contract_time,
-    config_reduce_label, config_stream_adapter, config_to_trf, config_to_vrf, config_vector_intra_slice_unzip,
-    config_vector_narrow_split, config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad,
-    config_vrf_operand,
+    ContractTimeError, FLIT_BYTES, FetchLiftDimension, FetchLiftMappingError, LaneMode, StreamAdapterError,
+    TEMPORAL_ACCUMULATOR_COLS, ToTrfError, ToVrfError, UnreadableCause, VRF_BYTES, VRF_CACHE_BYTES, VectorError,
+    VrfOperandError, config_cast, config_collect, config_commit_cast, config_commit_trim, config_contract_lane,
+    config_contract_packet, config_contract_time, config_fetch_lift_mapping, config_reduce_label,
+    config_stream_adapter, config_to_trf, config_to_vrf, config_vector_intra_slice_unzip, config_vector_narrow_split,
+    config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad, config_vrf_operand,
 };
 
 /// Raw `extern "C-unwind"` decls for the prebuilt impl's exports.
@@ -46,7 +46,15 @@ mod sys {
             in_packet: &Mapping,
             out_time: &Mapping,
             out_packet: &Mapping,
+            lifted: ROption<&Mapping>,
         ) -> RResult<StreamSequencerConfig, FetchError>;
+
+        pub(super) fn config_fetch_lift_bases(grid: &Mapping, dm: &Mapping) -> RResult<RVec<usize>, FetchBaseError>;
+
+        pub(super) fn config_fetch_base_aligned(
+            bases: abi_stable::std_types::RSlice<'_, usize>,
+            element_bits: usize,
+        ) -> RResult<(), FetchBaseError>;
 
         pub(super) fn config_commit(
             in_time: &Mapping,
@@ -92,14 +100,27 @@ pub fn config_transpose(
     unsafe { sys::config_transpose(time, packet, out_time, out_packet, element_bits) }.into_result()
 }
 
-/// Synthesize the fetch read descriptors, or the [`FetchError`].
+/// Synthesize the Fetch engine's `(time, packet)` descriptors, or the [`FetchError`].
 pub fn config_fetch(
     in_time: &Mapping,
     in_packet: &Mapping,
     out_time: &Mapping,
     out_packet: &Mapping,
+    lifted: Option<&Mapping>,
 ) -> Result<StreamSequencerConfig, FetchError> {
-    unsafe { sys::config_fetch(in_time, in_packet, out_time, out_packet) }.into_result()
+    unsafe { sys::config_fetch(in_time, in_packet, out_time, out_packet, lifted.into()) }.into_result()
+}
+
+/// Return the DM offset read at each placement-grid position, in elements.
+pub fn config_fetch_lift_bases(grid: &Mapping, dm: &Mapping) -> Result<Vec<usize>, FetchBaseError> {
+    unsafe { sys::config_fetch_lift_bases(grid, dm) }
+        .into_result()
+        .map(Vec::from)
+}
+
+/// Check that fetch-base addresses satisfy the supported alignment.
+pub fn config_fetch_base_aligned(bases: &[usize], element_bits: usize) -> Result<(), FetchBaseError> {
+    unsafe { sys::config_fetch_base_aligned(bases.into(), element_bits) }.into_result()
 }
 
 /// Synthesize the commit write descriptors, or the [`CommitError`].

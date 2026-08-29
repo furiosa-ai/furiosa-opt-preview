@@ -66,6 +66,7 @@
 use std::marker::PhantomData;
 
 use furiosa_mapping::M;
+use furiosa_opt_lower::{VrfOperandInput, config_vrf_operand};
 use furiosa_opt_macro::primitive;
 
 // From the modules that define these, not through this crate's own prelude: the prelude is the
@@ -642,9 +643,11 @@ pub trait PortArg<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>>: sealed:
 fn verify_vrf_operand<Element: M, Time: M, Packet: M>() {
     // Not `unwrap_or_else`: a closure does not inherit `#[track_caller]`, so panicking inside one
     // reports this line rather than whatever the chain below forwarded.
-    if let Err(error) =
-        furiosa_opt_lower::config_vrf_operand(&Element::to_value(), &Time::to_value(), &Packet::to_value())
-    {
+    if let Err(error) = config_vrf_operand(VrfOperandInput {
+        vrf_element: Element::to_value(),
+        stream_time: Time::to_value(),
+        stream_packet: Packet::to_value(),
+    }) {
         panic!("{error}");
     }
 }

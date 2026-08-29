@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-opt-examples"
-version = "0.6.0+gd0f33ffd"
+version = "0.6.0+g5cfb422c"
 edition = "2024"
 license = "Apache-2.0"
 publish = false

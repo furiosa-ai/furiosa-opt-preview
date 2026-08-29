@@ -17,21 +17,74 @@
 //! than split as they are in the frontend.
 
 use std::collections::BTreeMap;
+use std::fmt::{self, Display, Formatter};
 
 use furiosa_mapping::{Mapping, MappingExt};
 
-use crate::DivideTerm;
+use crate::{DivideError, DivideInput, DivideTerm};
 
 pub mod engine;
 
 pub use engine::{
-    CastError, CollectError, CommitCastError, CommitTrimError, ContractLaneError, ContractPacketError,
-    ContractTimeError, FetchLiftDimension, FetchLiftMappingError, LaneMode, StreamAdapterError, ToTrfError, ToVrfError,
-    UnreadableCause, VectorError, VrfOperandError, config_cast, config_collect, config_commit_cast, config_commit_trim,
-    config_contract_lane, config_contract_packet, config_contract_time, config_fetch_lift_mapping, config_reduce_label,
-    config_stream_adapter, config_to_trf, config_to_vrf, config_vector_intra_slice_unzip, config_vector_narrow_split,
-    config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad, config_vrf_operand,
+    CastError, CastInput, CastKind, CollectError, CollectInput, CommitCastError, CommitCastInput, CommitCastKind,
+    CommitTrimError, CommitTrimInput, ContractLaneError, ContractLaneInput, ContractPacketError, ContractPacketInput,
+    ContractTimeError, ContractTimeInput, FetchDimensionsInput, FetchLiftDimension, FetchLiftError, FetchLiftInput,
+    LaneMode, ReduceLabelInput, StreamAdapterError, StreamAdapterInput, ToTrfError, ToTrfInput, ToVrfError, ToVrfInput,
+    UnreadableCause, VectorError, VectorIntraSliceUnzipInput, VectorNarrowSplitInput, VectorNarrowTrimInput,
+    VectorWidenConcatInput, VectorWidenPadInput, VrfOperandError, VrfOperandInput, config_cast, config_collect,
+    config_commit_cast, config_commit_trim, config_contract_lane, config_contract_packet, config_contract_time,
+    config_fetch_dimensions, config_fetch_lift, config_reduce_label, config_stream_adapter, config_to_trf,
+    config_to_vrf, config_vector_intra_slice_unzip, config_vector_narrow_split, config_vector_narrow_trim,
+    config_vector_widen_concat, config_vector_widen_pad, config_vrf_operand,
 };
+
+/// Why an element count cannot be represented as an exact byte count.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ElementSizeError {
+    /// Element width is zero.
+    #[error("element width must be nonzero")]
+    ZeroWidth,
+    /// Multiplying the element count by its width overflowed.
+    #[error("{elements} elements x {element_bits} bits overflows usize")]
+    BitCountOverflow { elements: usize, element_bits: usize },
+    /// Multiplying element extents overflowed.
+    #[error("{left} x {right} elements overflows usize")]
+    ElementCountOverflow { left: usize, right: usize },
+    /// The element sequence ends inside a byte.
+    #[error("{elements} elements x {element_bits} bits is not byte-aligned")]
+    NotByteAligned { elements: usize, element_bits: usize },
+    /// Multiplying a byte count by eight overflowed.
+    #[error("a byte-count calculation starting from {bytes} bytes overflows usize")]
+    ByteCountOverflow { bytes: usize },
+    /// The byte sequence ends inside an element.
+    #[error("{bytes} bytes does not contain a whole number of {element_bits}-bit elements")]
+    NotElementAligned { bytes: usize, element_bits: usize },
+}
+
+/// Packet endpoint checked against a one-flit size constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketSide {
+    Input,
+    Output,
+}
+
+impl Display for PacketSide {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        })
+    }
+}
+
+/// A packet whose byte size is not exactly one flit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{side} packet must be exactly {FLIT_BYTES} bytes (one flit): {elements} elements = {bytes} bytes")]
+pub struct OneFlitPacketError {
+    pub side: PacketSide,
+    pub elements: usize,
+    pub bytes: usize,
+}
 
 /// Bits in a byte.
 pub const BITS_PER_BYTE: usize = 8;
@@ -53,19 +106,39 @@ pub(crate) const ONE_FLIT_ELEMENTS: usize = 8;
 /// `Way4`'s ALU access width).
 pub(crate) const HALF_FLIT_ELEMENTS: usize = 4;
 
-/// Byte size of `length` elements of an `element_bits`-wide type. Assumes the total bit count is
-/// byte-aligned; sub-byte types must supply a length that fills whole bytes.
-pub(crate) fn size_in_bytes(element_bits: usize, length: usize) -> usize {
-    debug_assert!(
-        (length * element_bits).is_multiple_of(BITS_PER_BYTE),
-        "size_in_bytes: {length} x {element_bits} bits is not byte-aligned"
-    );
-    length * element_bits / BITS_PER_BYTE
+/// Returns the exact byte size of an element sequence.
+pub(crate) fn size_in_bytes(element_bits: usize, elements: usize) -> Result<usize, ElementSizeError> {
+    if element_bits == 0 {
+        return Err(ElementSizeError::ZeroWidth);
+    }
+    let bits = elements
+        .checked_mul(element_bits)
+        .ok_or(ElementSizeError::BitCountOverflow { elements, element_bits })?;
+    if !bits.is_multiple_of(BITS_PER_BYTE) {
+        return Err(ElementSizeError::NotByteAligned { elements, element_bits });
+    }
+    Ok(bits / BITS_PER_BYTE)
 }
 
-/// Element count that fills `bytes` bytes of an `element_bits`-wide type.
-pub(crate) fn length_from_bytes(element_bits: usize, bytes: usize) -> usize {
-    bytes * BITS_PER_BYTE / element_bits
+pub(crate) fn require_one_flit(side: PacketSide, elements: usize, bytes: usize) -> Result<(), OneFlitPacketError> {
+    if bytes != FLIT_BYTES {
+        return Err(OneFlitPacketError { side, elements, bytes });
+    }
+    Ok(())
+}
+
+/// Returns the exact element count contained in a byte sequence.
+pub(crate) fn length_from_bytes(element_bits: usize, bytes: usize) -> Result<usize, ElementSizeError> {
+    if element_bits == 0 {
+        return Err(ElementSizeError::ZeroWidth);
+    }
+    let bits = bytes
+        .checked_mul(BITS_PER_BYTE)
+        .ok_or(ElementSizeError::ByteCountOverflow { bytes })?;
+    if !bits.is_multiple_of(element_bits) {
+        return Err(ElementSizeError::NotElementAligned { bytes, element_bits });
+    }
+    Ok(bits / element_bits)
 }
 
 /// `a` rounded up to a multiple of `b`.
@@ -122,8 +195,11 @@ fn collect_axis_leaves(m: &Mapping, out: &mut Vec<Mapping>) {
 ///
 /// The division matches the retained axes; the reduced ones are the gaps between them. Padded
 /// extents count, since a padded position still takes its slot.
-pub(crate) fn inner_reduce_extent(pre_reduce: &Mapping, post_reduce: &Mapping) -> Result<usize, String> {
-    let division_terms = crate::config_divide_exact(pre_reduce, post_reduce)?;
+pub(crate) fn inner_reduce_extent(pre_reduce: &Mapping, post_reduce: &Mapping) -> Result<usize, DivideError> {
+    let division_terms = crate::config_divide_exact(DivideInput {
+        dividend: pre_reduce.clone(),
+        divisor: post_reduce.clone(),
+    })?;
     let padded_extents = padding_per_stride(pre_reduce);
     // A sub-term is dropped before the walk, not skipped inside it: the walk compares adjacent
     // boundaries, and skipping in place would still compare across the sub-term.

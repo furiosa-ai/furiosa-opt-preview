@@ -5,12 +5,70 @@ use std::iter::zip;
 
 use furiosa_mapping::{Mapping, MappingExt, into_slots_of_size_two};
 
+use crate::{FETCH_VALID_CLUSTER_SIZES, FETCH_VALID_SLICE_SIZES, FetchError};
+
 /// The placement dimension receiving a lifted fetch axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchLiftDimension {
     Chip,
     Cluster,
     Slice,
+}
+
+/// Why a placement change cannot provide axes for a Fetch lift.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FetchLiftError {
+    #[error("{dimension} lift changes no placement axis; use a plain fetch")]
+    NoAxisLifted { dimension: FetchLiftDimension },
+    #[error("{dimension} lift placement size must be a power of two, got {size}: {placement}")]
+    UnsupportedPlacementSize {
+        dimension: FetchLiftDimension,
+        size: usize,
+        placement: Mapping,
+    },
+    #[error(
+        "{dimension} lift placement size differs: input {in_size}, output {out_size}: \
+         DM {in_placement}, stream {out_placement}"
+    )]
+    PlacementSizeMismatch {
+        dimension: FetchLiftDimension,
+        in_size: usize,
+        out_size: usize,
+        in_placement: Mapping,
+        out_placement: Mapping,
+    },
+    #[error(
+        "{dimension} lift placement differs at stride {stride}: input {in_slot}, output \
+         {out_slot}; only an input size-2 broadcast may differ"
+    )]
+    PlacementMismatch {
+        dimension: FetchLiftDimension,
+        stride: usize,
+        in_slot: Mapping,
+        out_slot: Mapping,
+    },
+    #[error(
+        "{dimension} lift replaces the input broadcast at stride {stride} with padding {padding}; \
+         reshape the DM placement and leave the corresponding input padding unread instead"
+    )]
+    PaddingLift {
+        dimension: FetchLiftDimension,
+        stride: usize,
+        padding: Mapping,
+    },
+}
+
+/// Placement mappings used to configure one Fetch lift.
+pub struct FetchLiftInput {
+    pub dimension: FetchLiftDimension,
+    pub in_placement: Mapping,
+    pub out_placement: Mapping,
+}
+
+/// Dimensions used to configure the Fetch engine.
+pub struct FetchDimensionsInput {
+    pub cluster_size: usize,
+    pub slice_size: usize,
 }
 
 impl Display for FetchLiftDimension {
@@ -23,88 +81,79 @@ impl Display for FetchLiftDimension {
     }
 }
 
-/// Why a placement change cannot provide axes for a Fetch lift.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum FetchLiftMappingError {
-    #[error(
-        "{dimension} lift placement size differs: input {input_size}, output {output_size}: \
-         DM {placement}, stream {out_placement}"
-    )]
-    PlacementSizeMismatch {
-        dimension: FetchLiftDimension,
-        input_size: usize,
-        output_size: usize,
-        placement: Mapping,
-        out_placement: Mapping,
-    },
-    #[error(
-        "{dimension} lift placement differs at stride {stride}: input {input}, output \
-         {output}; only an input size-2 broadcast may differ"
-    )]
-    PlacementMismatch {
-        dimension: FetchLiftDimension,
-        stride: usize,
-        input: Mapping,
-        output: Mapping,
-    },
-    #[error(
-        "{dimension} lift replaces the input broadcast at stride {stride} with padding {output}; \
-         reshape the DM placement and leave the corresponding input padding unread instead"
-    )]
-    PaddingLift {
-        dimension: FetchLiftDimension,
-        stride: usize,
-        output: Mapping,
-    },
+/// Checks the Fetch engine's cluster and slice dimensions.
+pub fn config_fetch_dimensions(input: FetchDimensionsInput) -> Result<(), FetchError> {
+    let FetchDimensionsInput {
+        cluster_size,
+        slice_size,
+    } = input;
+    if !FETCH_VALID_CLUSTER_SIZES.contains(&cluster_size) {
+        return Err(FetchError::ClusterSize(cluster_size));
+    }
+    if !FETCH_VALID_SLICE_SIZES.contains(&slice_size) {
+        return Err(FetchError::SliceSize(slice_size));
+    }
+    Ok(())
 }
 
 /// Returns the axes replacing size-2 broadcasts in one placement dimension.
-pub fn config_fetch_lift_mapping(
-    dimension: FetchLiftDimension,
-    placement: &Mapping,
-    out_placement: &Mapping,
-) -> Result<Mapping, FetchLiftMappingError> {
-    if placement.size() != out_placement.size() {
-        return Err(FetchLiftMappingError::PlacementSizeMismatch {
+pub fn config_fetch_lift(input: FetchLiftInput) -> Result<Mapping, FetchLiftError> {
+    let FetchLiftInput {
+        dimension,
+        in_placement,
+        out_placement,
+    } = input;
+    if in_placement.size() != out_placement.size() {
+        return Err(FetchLiftError::PlacementSizeMismatch {
             dimension,
-            input_size: placement.size(),
-            output_size: out_placement.size(),
-            placement: placement.clone(),
-            out_placement: out_placement.clone(),
+            in_size: in_placement.size(),
+            out_size: out_placement.size(),
+            in_placement,
+            out_placement,
         });
     }
-    // A stream that repeats its DM placement lifts nothing, which is every plain fetch.
-    if placement == out_placement {
-        return Ok(Mapping::identity());
+    if in_placement == out_placement {
+        return Err(FetchLiftError::NoAxisLifted { dimension });
     }
-    let input_slots = into_slots_of_size_two(placement);
-    let output_slots = into_slots_of_size_two(out_placement);
+    if !in_placement.size().is_power_of_two() {
+        return Err(FetchLiftError::UnsupportedPlacementSize {
+            dimension,
+            size: in_placement.size(),
+            placement: in_placement,
+        });
+    }
+    let input_slots = into_slots_of_size_two(&in_placement);
+    let output_slots = into_slots_of_size_two(&out_placement);
     let mut lifted = Mapping::identity();
-    let mut stride = placement.size() / 2;
+    let mut stride = in_placement.size() / 2;
     for (input, output) in zip(input_slots, output_slots) {
         if input == output {
             stride /= 2;
             continue;
         }
         if !matches!(&input, Mapping::Broadcast { size: 2 }) {
-            return Err(FetchLiftMappingError::PlacementMismatch {
+            return Err(FetchLiftError::PlacementMismatch {
                 dimension,
                 stride,
-                input,
-                output,
+                in_slot: input,
+                out_slot: output,
             });
         }
         if output.idents().is_empty() {
-            return Err(FetchLiftMappingError::PaddingLift {
+            return Err(FetchLiftError::PaddingLift {
                 dimension,
                 stride,
-                output,
+                padding: output,
             });
         }
         lifted = lifted.pair(output);
         stride /= 2;
     }
-    Ok(lifted.normalize())
+    let lifted = lifted.normalize();
+    if lifted.idents().is_empty() {
+        return Err(FetchLiftError::NoAxisLifted { dimension });
+    }
+    Ok(lifted)
 }
 
 #[cfg(test)]
@@ -114,7 +163,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        FetchBaseError, FetchError, MAX_SEQUENCER_ENTRIES, config_fetch_base_aligned, config_fetch_lift_bases,
+        FetchBaseAlignedInput, FetchBaseError, FetchError, FetchInput, FetchLiftBasesInput, MAX_SEQUENCER_ENTRIES,
+        config_fetch, config_fetch_base_aligned, config_fetch_lift_bases,
     };
 
     axes![Feat = 128, Quad = 4, Half = 2, Other = 2, Third = 3, Oct = 8];
@@ -124,19 +174,48 @@ mod tests {
 
     const TEST_DIMENSION: FetchLiftDimension = FetchLiftDimension::Slice;
 
-    fn config_fetch_lift_mapping(
-        placement: &Mapping,
-        out_placement: &Mapping,
-    ) -> Result<Mapping, FetchLiftMappingError> {
-        super::config_fetch_lift_mapping(TEST_DIMENSION, placement, out_placement)
+    #[test]
+    fn unchanged_placement_rejects() {
+        let placement = <m![Feat, 2]>::to_value();
+        assert_eq!(
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: placement.clone(),
+                out_placement: placement,
+            }),
+            Err(FetchLiftError::NoAxisLifted {
+                dimension: TEST_DIMENSION,
+            })
+        );
     }
 
     #[test]
-    fn unchanged_placement_lifts_nothing() {
-        let placement = <m![Feat, 2]>::to_value();
+    fn equivalent_placement_spelling_rejects() {
         assert_eq!(
-            config_fetch_lift_mapping(&placement, &placement).unwrap(),
-            Mapping::identity()
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![Quad]>::to_value(),
+                out_placement: <m![Quad / 2, Quad % 2]>::to_value(),
+            }),
+            Err(FetchLiftError::NoAxisLifted {
+                dimension: TEST_DIMENSION,
+            })
+        );
+    }
+
+    #[test]
+    fn non_binary_placement_rejects() {
+        assert_eq!(
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![3]>::to_value(),
+                out_placement: <m![Third]>::to_value(),
+            }),
+            Err(FetchLiftError::UnsupportedPlacementSize {
+                dimension: TEST_DIMENSION,
+                size: 3,
+                placement: <m![3]>::to_value(),
+            })
         );
     }
 
@@ -144,20 +223,30 @@ mod tests {
     #[test]
     fn filled_broadcast_lifts_its_axis() {
         assert_eq!(
-            config_fetch_lift_mapping(&<m![Feat, 2]>::to_value(), &<m![Feat, Quad / 2]>::to_value()).unwrap(),
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![Feat, 2]>::to_value(),
+                out_placement: <m![Feat, Quad / 2]>::to_value(),
+            })
+            .unwrap(),
             <m![Quad / 2]>::to_value()
         );
     }
 
     #[test]
     fn padding_lift_recommends_reshape() {
-        let error = config_fetch_lift_mapping(&<m![Feat, 2]>::to_value(), &<m![Feat, 1 # 2]>::to_value()).unwrap_err();
+        let error = config_fetch_lift(FetchLiftInput {
+            dimension: TEST_DIMENSION,
+            in_placement: <m![Feat, 2]>::to_value(),
+            out_placement: <m![Feat, 1 # 2]>::to_value(),
+        })
+        .unwrap_err();
         assert_eq!(
             error,
-            FetchLiftMappingError::PaddingLift {
+            FetchLiftError::PaddingLift {
                 dimension: FetchLiftDimension::Slice,
                 stride: 1,
-                output: <m![1 # 2]>::to_value(),
+                padding: <m![1 # 2]>::to_value(),
             }
         );
         assert_eq!(
@@ -170,13 +259,13 @@ mod tests {
     #[test]
     fn plain_fetch_may_leave_padding_unread() {
         assert!(
-            crate::config_fetch(
-                &<m![1 # 2]>::to_value(),
-                &<m![Oct]>::to_value(),
-                &<m![1]>::to_value(),
-                &<m![Oct]>::to_value(),
-                None,
-            )
+            config_fetch(FetchInput {
+                in_time: <m![1 # 2]>::to_value(),
+                in_packet: <m![Oct]>::to_value(),
+                out_time: <m![1]>::to_value(),
+                out_packet: <m![Oct]>::to_value(),
+                lifted: None,
+            })
             .is_ok()
         );
     }
@@ -184,21 +273,24 @@ mod tests {
     #[test]
     fn input_padding_cannot_change() {
         assert!(matches!(
-            config_fetch_lift_mapping(&<m![Feat, 1 # 2]>::to_value(), &<m![Feat, Half]>::to_value()),
-            Err(FetchLiftMappingError::PlacementMismatch { .. })
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![Feat, 1 # 2]>::to_value(),
+                out_placement: <m![Feat, Half]>::to_value(),
+            }),
+            Err(FetchLiftError::PlacementMismatch { .. })
         ));
-        // A padded placement the stream repeats is a plain fetch, as any unchanged placement is.
-        let padded = <m![Feat, 1 # 2]>::to_value();
-        assert_eq!(
-            config_fetch_lift_mapping(&padded, &padded).unwrap(),
-            Mapping::identity()
-        );
     }
 
     #[test]
     fn only_changed_broadcast_slots_are_lifted() {
         assert_eq!(
-            config_fetch_lift_mapping(&<m![Feat, 2, 2]>::to_value(), &<m![Feat, Half, 2]>::to_value()).unwrap(),
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![Feat, 2, 2]>::to_value(),
+                out_placement: <m![Feat, Half, 2]>::to_value(),
+            })
+            .unwrap(),
             <m![Half]>::to_value()
         );
     }
@@ -206,10 +298,11 @@ mod tests {
     #[test]
     fn padded_binary_broadcast_lifts() {
         assert_eq!(
-            config_fetch_lift_mapping(
-                &<m![[Rows, 2] # 256]>::to_value(),
-                &<m![[Rows, Half] # 256]>::to_value(),
-            )
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![[Rows, 2] # 256]>::to_value(),
+                out_placement: <m![[Rows, Half] # 256]>::to_value(),
+            })
             .unwrap(),
             <m![Half]>::to_value()
         );
@@ -218,7 +311,12 @@ mod tests {
     #[test]
     fn two_broadcasts_lift_together() {
         assert_eq!(
-            config_fetch_lift_mapping(&<m![2, Feat, 2]>::to_value(), &<m![Half, Feat, Other]>::to_value()).unwrap(),
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![2, Feat, 2]>::to_value(),
+                out_placement: <m![Half, Feat, Other]>::to_value(),
+            })
+            .unwrap(),
             <m![Half, Other]>::to_value()
         );
     }
@@ -226,7 +324,12 @@ mod tests {
     #[test]
     fn one_broadcast_holds_two_axes() {
         assert_eq!(
-            config_fetch_lift_mapping(&<m![Feat, 4]>::to_value(), &<m![Feat, Half, Other]>::to_value()).unwrap(),
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![Feat, 4]>::to_value(),
+                out_placement: <m![Feat, Half, Other]>::to_value(),
+            })
+            .unwrap(),
             <m![Half, Other]>::to_value()
         );
     }
@@ -234,11 +337,12 @@ mod tests {
     #[test]
     fn padded_odd_broadcast_rejects() {
         assert!(matches!(
-            config_fetch_lift_mapping(
-                &<m![[OddRows, 3] # 256]>::to_value(),
-                &<m![[OddRows, Third] # 256]>::to_value(),
-            ),
-            Err(FetchLiftMappingError::PlacementMismatch { .. })
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![[OddRows, 3] # 256]>::to_value(),
+                out_placement: <m![[OddRows, Third] # 256]>::to_value(),
+            }),
+            Err(FetchLiftError::PlacementMismatch { .. })
         ));
     }
 
@@ -247,12 +351,16 @@ mod tests {
     #[test]
     fn wrong_sized_fill_rejects() {
         assert_eq!(
-            config_fetch_lift_mapping(&<m![Feat, 2]>::to_value(), &<m![Feat, Quad]>::to_value()),
-            Err(FetchLiftMappingError::PlacementSizeMismatch {
+            config_fetch_lift(FetchLiftInput {
                 dimension: TEST_DIMENSION,
-                input_size: 256,
-                output_size: 512,
-                placement: <m![Feat, 2]>::to_value(),
+                in_placement: <m![Feat, 2]>::to_value(),
+                out_placement: <m![Feat, Quad]>::to_value(),
+            }),
+            Err(FetchLiftError::PlacementSizeMismatch {
+                dimension: TEST_DIMENSION,
+                in_size: 256,
+                out_size: 512,
+                in_placement: <m![Feat, 2]>::to_value(),
                 out_placement: <m![Feat, Quad]>::to_value(),
             })
         );
@@ -262,21 +370,25 @@ mod tests {
     #[test]
     fn relabelled_live_axis_rejects() {
         assert!(matches!(
-            config_fetch_lift_mapping(&<m![Feat, Half]>::to_value(), &<m![Feat, Quad / 2]>::to_value()),
-            Err(FetchLiftMappingError::PlacementMismatch { .. })
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![Feat, Half]>::to_value(),
+                out_placement: <m![Feat, Quad / 2]>::to_value(),
+            }),
+            Err(FetchLiftError::PlacementMismatch { .. })
         ));
     }
 
     /// A lifted outer digit leaves a contiguous inner packet.
     #[test]
     fn lifted_axis_leaves_contiguous_packet() {
-        let config = crate::config_fetch(
-            &<m![1]>::to_value(),
-            &<m![Quad]>::to_value(),
-            &<m![1]>::to_value(),
-            &<m![Quad % 2]>::to_value(),
-            Some(&<m![Quad / 2]>::to_value()),
-        )
+        let config = config_fetch(FetchInput {
+            in_time: <m![1]>::to_value(),
+            in_packet: <m![Quad]>::to_value(),
+            out_time: <m![1]>::to_value(),
+            out_packet: <m![Quad % 2]>::to_value(),
+            lifted: Some(<m![Quad / 2]>::to_value()),
+        })
         .unwrap();
 
         assert_eq!(
@@ -289,17 +401,32 @@ mod tests {
     #[test]
     fn unaligned_base_rejects() {
         let bases = [0, 16];
-        assert!(config_fetch_base_aligned(&bases, 16).is_ok());
+        assert!(
+            config_fetch_base_aligned(FetchBaseAlignedInput {
+                bases: bases.to_vec(),
+                element_bits: 16,
+            })
+            .is_ok()
+        );
         assert_eq!(
-            config_fetch_base_aligned(&bases, 2),
+            config_fetch_base_aligned(FetchBaseAlignedInput {
+                bases: bases.to_vec(),
+                element_bits: 2,
+            }),
             Err(FetchBaseError::UnalignedBase { position: 1, bits: 32 })
         );
         assert_eq!(
-            config_fetch_base_aligned(&[0, 1], 4),
+            config_fetch_base_aligned(FetchBaseAlignedInput {
+                bases: vec![0, 1],
+                element_bits: 4,
+            }),
             Err(FetchBaseError::UnalignedBase { position: 1, bits: 4 })
         );
         assert_eq!(
-            config_fetch_base_aligned(&[usize::MAX / 2 + 1], 2),
+            config_fetch_base_aligned(FetchBaseAlignedInput {
+                bases: vec![usize::MAX / 2 + 1],
+                element_bits: 2,
+            }),
             Err(FetchBaseError::BaseOffsetOverflow {
                 position: 0,
                 base: usize::MAX / 2 + 1,
@@ -317,11 +444,24 @@ mod tests {
         let packet = <m![V]>::to_value();
 
         assert_eq!(
-            crate::config_fetch(&dm, &packet, &one_lifted, &packet, Some(&<m![A]>::to_value())),
+            config_fetch(FetchInput {
+                in_time: dm.clone(),
+                in_packet: packet.clone(),
+                out_time: one_lifted,
+                out_packet: packet.clone(),
+                lifted: Some(<m![A]>::to_value()),
+            }),
             Err(FetchError::TooManyEntries { needed: 9 })
         );
 
-        let config = crate::config_fetch(&dm, &packet, &two_lifted, &packet, Some(&<m![A, B]>::to_value())).unwrap();
+        let config = config_fetch(FetchInput {
+            in_time: dm,
+            in_packet: packet.clone(),
+            out_time: two_lifted,
+            out_packet: packet,
+            lifted: Some(<m![A, B]>::to_value()),
+        })
+        .unwrap();
         assert_eq!(config.time.0.len() + config.packet.0.len(), MAX_SEQUENCER_ENTRIES);
     }
 
@@ -329,7 +469,11 @@ mod tests {
     #[test]
     fn grid_bases_step_by_the_lifted_stride() {
         let grid = <m![1, 2]>::to_value().pair(<m![Feat, Quad / 2]>::to_value());
-        let bases = config_fetch_lift_bases(&grid, &<m![Quad, Oct]>::to_value()).unwrap();
+        let bases = config_fetch_lift_bases(FetchLiftBasesInput {
+            grid,
+            dm: <m![Quad, Oct]>::to_value(),
+        })
+        .unwrap();
 
         assert_eq!(bases.len(), 512);
         assert!(bases.chunks(2).all(|pair| pair == [0, 16]), "{bases:?}");
@@ -338,7 +482,12 @@ mod tests {
     #[test]
     fn rings_hold_reordered_axes() {
         assert_eq!(
-            config_fetch_lift_mapping(&<m![4, X, 4]>::to_value(), &<m![D, A, X, C, B]>::to_value()).unwrap(),
+            config_fetch_lift(FetchLiftInput {
+                dimension: TEST_DIMENSION,
+                in_placement: <m![4, X, 4]>::to_value(),
+                out_placement: <m![D, A, X, C, B]>::to_value(),
+            })
+            .unwrap(),
             <m![D, A, C, B]>::to_value()
         );
     }
@@ -349,7 +498,11 @@ mod tests {
     #[test]
     fn reordered_broadcasts_locate_their_own_base() {
         let grid = <m![D, A, X, C, B]>::to_value();
-        let bases = config_fetch_lift_bases(&grid, &<m![A, B, C, D, V]>::to_value()).unwrap();
+        let bases = config_fetch_lift_bases(FetchLiftBasesInput {
+            grid,
+            dm: <m![A, B, C, D, V]>::to_value(),
+        })
+        .unwrap();
 
         assert_eq!(bases.len(), 256);
         for (position, &base) in bases.iter().enumerate() {
@@ -372,13 +525,13 @@ mod tests {
     /// stride 0 replicates the cell rather than shadowing another read.
     #[test]
     fn unbacked_axis_still_broadcasts() {
-        let config = crate::config_fetch(
-            &<m![1]>::to_value(),
-            &<m![Quad]>::to_value(),
-            &<m![Half]>::to_value(),
-            &<m![Quad % 2]>::to_value(),
-            Some(&<m![Quad / 2]>::to_value()),
-        );
+        let config = config_fetch(FetchInput {
+            in_time: <m![1]>::to_value(),
+            in_packet: <m![Quad]>::to_value(),
+            out_time: <m![Half]>::to_value(),
+            out_packet: <m![Quad % 2]>::to_value(),
+            lifted: Some(<m![Quad / 2]>::to_value()),
+        });
         let config = config.unwrap();
 
         assert_eq!(
@@ -404,13 +557,13 @@ mod tests {
     #[test]
     fn innermost_packet_broadcast_rejects() {
         assert_eq!(
-            crate::config_fetch(
-                &<m![1]>::to_value(),
-                &<m![Quad]>::to_value(),
-                &<m![1]>::to_value(),
-                &<m![Quad % 2, Half]>::to_value(),
-                Some(&<m![Quad / 2]>::to_value()),
-            ),
+            config_fetch(FetchInput {
+                in_time: <m![1]>::to_value(),
+                in_packet: <m![Quad]>::to_value(),
+                out_time: <m![1]>::to_value(),
+                out_packet: <m![Quad % 2, Half]>::to_value(),
+                lifted: Some(<m![Quad / 2]>::to_value()),
+            }),
             Err(FetchError::NonContiguousPacket {
                 innermost: <m![Half]>::to_value(),
                 memory_stride: 0,
@@ -421,13 +574,13 @@ mod tests {
     #[test]
     fn uncovered_element_rejects() {
         assert!(matches!(
-            crate::config_fetch(
-                &<m![1]>::to_value(),
-                &<m![Quad, Half]>::to_value(),
-                &<m![1]>::to_value(),
-                &<m![Half]>::to_value(),
-                Some(&<m![Quad / 2]>::to_value()),
-            ),
+            config_fetch(FetchInput {
+                in_time: <m![1]>::to_value(),
+                in_packet: <m![Quad, Half]>::to_value(),
+                out_time: <m![1]>::to_value(),
+                out_packet: <m![Half]>::to_value(),
+                lifted: Some(<m![Quad / 2]>::to_value()),
+            }),
             Err(FetchError::Unread { .. })
         ));
     }

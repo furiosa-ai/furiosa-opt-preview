@@ -4,6 +4,7 @@
 #![feature(adt_const_params)]
 #![feature(float_erf)]
 #![feature(inherent_associated_types)]
+#![feature(impl_trait_in_assoc_type)]
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 #![forbid(unused_must_use)]

@@ -45,6 +45,34 @@ pub fn fetch_slice_lift_axis(
     result.to_hbm::<m![A, H, V]>(&mut ctx.tdma)
 }
 
+#[device(chip = 1)]
+pub fn fetch_slice_lift_axis_twice(
+    ctx: &mut Context,
+    input: &HbmTensor<bf16, Chip, m![A, H, V]>,
+) -> (HbmTensor<bf16, Chip, m![A, H, V]>, HbmTensor<bf16, Chip, m![A, H, V]>) {
+    let dm: DmTensor<bf16, Chip, Cluster, Slice, m![H, V]> = input.to_dm::<Cluster, Slice, m![H, V]>(&mut ctx.tdma);
+    let output0: DmTensor<bf16, Chip, Cluster, m![A, H], m![V]> = ctx
+        .main
+        .begin(dm.view())
+        .fetch::<m![H], m![V]>()
+        .fetch_slice_lift::<m![A, H], m![1]>()
+        .collect::<m![1], m![V]>()
+        .commit_trim::<m![V]>()
+        .commit();
+    let output1: DmTensor<bf16, Chip, Cluster, m![A, H], m![V]> = ctx
+        .main
+        .begin(dm.view())
+        .fetch::<m![H], m![V]>()
+        .fetch_slice_lift::<m![A, H], m![1]>()
+        .collect::<m![1], m![V]>()
+        .commit_trim::<m![V]>()
+        .commit();
+    (
+        output0.to_hbm::<m![A, H, V]>(&mut ctx.tdma),
+        output1.to_hbm::<m![A, H, V]>(&mut ctx.tdma),
+    )
+}
+
 /// Lifts the outer binary digit of `Q` from fetch time onto `Slice`.
 #[device(chip = 1)]
 pub fn fetch_slice_lift_digit(

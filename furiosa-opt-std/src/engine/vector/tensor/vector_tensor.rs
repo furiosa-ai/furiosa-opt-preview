@@ -21,6 +21,7 @@
 use std::marker::PhantomData;
 
 use furiosa_mapping::*;
+use furiosa_opt_lower::{ReduceLabelInput, config_reduce_label};
 use furiosa_opt_macro::primitive;
 
 use super::VeTensorShape;
@@ -1401,8 +1402,14 @@ where
 
 /// Verifies that all reduced axes (quotient of input / output shape) match the expected ident.
 fn verify_reduce_label(time: Mapping, packet: Mapping, out_time: Mapping, out_packet: Mapping, reduce_label: &Ident) {
-    furiosa_opt_lower::config_reduce_label(&time, &packet, &out_time, &out_packet, reduce_label)
-        .unwrap_or_else(|message| panic!("{message}"));
+    config_reduce_label(ReduceLabelInput {
+        in_time: time,
+        in_packet: packet,
+        out_time,
+        out_packet,
+        reduce_label: *reduce_label,
+    })
+    .unwrap_or_else(|message| panic!("{message}"));
 }
 
 /// Reduces tag tensor by keeping the last value (hardware semantics: all reduced

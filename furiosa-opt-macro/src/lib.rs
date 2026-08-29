@@ -268,6 +268,21 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
             __furiosa_opt_kernel.run(&__furiosa_opt_bufs, &[]).await;
         },
     };
+    let run_into_body = quote! {
+        let mut __furiosa_opt_outs = ::std::vec::Vec::with_capacity(
+            <Self::Output as furiosa_opt_std::backend::npu::KernelOutputDestination>::output_count(),
+        );
+        furiosa_opt_std::backend::npu::KernelOutputDestination::extend_buffers(
+            __furiosa_opt_output,
+            &mut __furiosa_opt_outs,
+        );
+        assert_eq!(
+            __furiosa_opt_outs.len(),
+            <Self::Output as furiosa_opt_std::backend::npu::KernelOutputDestination>::output_count(),
+            "kernel output destination returned the wrong number of buffers",
+        );
+        __furiosa_opt_kernel.run(&__furiosa_opt_bufs, &__furiosa_opt_outs).await;
+    };
 
     let tuple_type = if types.len() == 1 {
         quote!(#(#types)*)
@@ -315,7 +330,7 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // The launch selects its kernel from the binary's `furiosa_kernels` registry by the fn's
     // path and its numeric axis/const values. A concrete fn is the empty-key case.
-    let npu_body = quote! {
+    let kernel_stmts = quote! {
         static __FURIOSA_OPT_KERNELS: furiosa_opt_std::backend::npu::Kernels =
             furiosa_opt_std::backend::npu::Kernels::new();
         let __furiosa_opt_kernel = furiosa_opt_std::backend::npu::kernel(
@@ -324,10 +339,19 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
             &[#(#generic_keys),*],
         )
         .await;
+    };
+    let npu_body = quote! {
+        #kernel_stmts
         #tensor_stmts
         #run_body
     };
-    let cpu_body = quote! { #hidden(#(#param_names),*) };
+    let npu_into_body = quote! {
+        #kernel_stmts
+        #tensor_stmts
+        #run_into_body
+    };
+    let cpu_body = quote! { self::#hidden(#(#param_names),*) };
+    let cpu_into_body = quote! { *__furiosa_opt_output = #cpu_body; };
 
     let rev = rev();
     quote! {
@@ -372,6 +396,18 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
                     { #npu_body }
                     #[cfg(not(backend = "npu"))]
                     { #cpu_body }
+                }
+            }
+
+            fn execute_into(
+                #body_destructure: #tuple_type,
+                __furiosa_opt_output: &mut Self::Output,
+            ) -> impl std::future::Future<Output = ()> {
+                async move {
+                    #[cfg(backend = "npu")]
+                    { #npu_into_body }
+                    #[cfg(not(backend = "npu"))]
+                    { #cpu_into_body }
                 }
             }
         }

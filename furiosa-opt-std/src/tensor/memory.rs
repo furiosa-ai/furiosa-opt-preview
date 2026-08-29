@@ -6,7 +6,7 @@ use std::any::Any;
 use std::marker::PhantomData;
 
 use furiosa_mapping::*;
-use furiosa_opt_lower::{config_pad, config_tile};
+use furiosa_opt_lower::{PadInput, TileInput, config_pad, config_tile};
 use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
@@ -534,13 +534,13 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         &self,
         start: usize,
     ) -> HbmTensorView<'l, D, Chip2, Element, B> {
-        config_tile(
-            &Index::to_value(),
-            &Chip::to_value(),
-            &Chip2::to_value(),
-            LEN,
-            PaddingKind::Top,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Chip::to_value(),
+            expected: Chip2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Top,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         HbmTensorView {
@@ -555,13 +555,13 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         &self,
         start: usize,
     ) -> HbmTensorView<'l, D, Chip, Element2, B> {
-        config_tile(
-            &Index::to_value(),
-            &Element::to_value(),
-            &Element2::to_value(),
-            LEN,
-            PaddingKind::Top,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Element::to_value(),
+            expected: Element2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Top,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         HbmTensorView {
@@ -594,7 +594,11 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
     /// read packet is allowed to do -- `Pad::extent` trims to the live cells on the SINK side only.
     #[primitive(HbmTensorView::pad)]
     pub fn pad<Element2: M>(self) -> HbmTensorView<'l, D, Chip, Element2, B> {
-        config_pad(&Element::to_value(), &Element2::to_value()).unwrap_or_else(|e| panic!("{e}"));
+        config_pad(PadInput {
+            element: Element::to_value(),
+            expected: Element2::to_value(),
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
         HbmTensorView {
             inner: self.inner.redeclare::<m![{ Chip }, { Element2 }]>(),
             address: self.address,
@@ -718,13 +722,13 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
         self,
         start: usize,
     ) -> HbmTensorViewMut<'l, D, Chip2, Element, B> {
-        config_tile(
-            &Index::to_value(),
-            &Chip::to_value(),
-            &Chip2::to_value(),
-            LEN,
-            PaddingKind::Bottom,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Chip::to_value(),
+            expected: Chip2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Bottom,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         HbmTensorViewMut {
@@ -739,13 +743,13 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
         self,
         start: usize,
     ) -> HbmTensorViewMut<'l, D, Chip, Element2, B> {
-        config_tile(
-            &Index::to_value(),
-            &Element::to_value(),
-            &Element2::to_value(),
-            LEN,
-            PaddingKind::Bottom,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Element::to_value(),
+            expected: Element2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Bottom,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         HbmTensorViewMut {
@@ -1029,13 +1033,13 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Chip2, Cluster, Slice, Element, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster, Slice, Slice>();
-        config_tile(
-            &Index::to_value(),
-            &Chip::to_value(),
-            &Chip2::to_value(),
-            LEN,
-            PaddingKind::Top,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Chip::to_value(),
+            expected: Chip2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Top,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         DmTensorView { inner }
@@ -1048,13 +1052,13 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Cluster2, Slice, Element, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster2, Slice, Slice>();
-        config_tile(
-            &Index::to_value(),
-            &Cluster::to_value(),
-            &Cluster2::to_value(),
-            LEN,
-            PaddingKind::Top,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Cluster::to_value(),
+            expected: Cluster2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Top,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         DmTensorView { inner }
@@ -1067,13 +1071,13 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Cluster, Slice2, Element, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
-        config_tile(
-            &Index::to_value(),
-            &Slice::to_value(),
-            &Slice2::to_value(),
-            LEN,
-            PaddingKind::Top,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Slice::to_value(),
+            expected: Slice2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Top,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         DmTensorView { inner }
@@ -1085,13 +1089,13 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         &self,
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Cluster, Slice, Element2, B> {
-        config_tile(
-            &Index::to_value(),
-            &Element::to_value(),
-            &Element2::to_value(),
-            LEN,
-            PaddingKind::Top,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Element::to_value(),
+            expected: Element2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Top,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         DmTensorView { inner }
@@ -1137,7 +1141,11 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     pub fn pad<Element2: M>(self) -> DmTensorView<'l, D, Chip, Cluster, Slice, Element2, B> {
         // `Element` alone: the buffer a pad re-declares is the per-slice region, so the padding is
         // outermost within `Element`. The distribution classes ride through untouched.
-        config_pad(&Element::to_value(), &Element2::to_value()).unwrap_or_else(|e| panic!("{e}"));
+        config_pad(PadInput {
+            element: Element::to_value(),
+            expected: Element2::to_value(),
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
         DmTensorView {
             inner: self
                 .inner
@@ -1150,7 +1158,11 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     /// [`TensorView::unpad`] for why it is address-preserving and why a `tile` is not a substitute.
     #[primitive(DmTensorView::unpad)]
     pub fn unpad<Element2: M>(self) -> DmTensorView<'l, D, Chip, Cluster, Slice, Element2, B> {
-        config_pad(&Element2::to_value(), &Element::to_value()).unwrap_or_else(|e| panic!("{e}"));
+        config_pad(PadInput {
+            element: Element2::to_value(),
+            expected: Element::to_value(),
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
         DmTensorView {
             inner: self
                 .inner
@@ -1213,13 +1225,13 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorViewMut<'l, D, Chip2, Cluster, Slice, Element, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster, Slice, Slice>();
-        config_tile(
-            &Index::to_value(),
-            &Chip::to_value(),
-            &Chip2::to_value(),
-            LEN,
-            PaddingKind::Bottom,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Chip::to_value(),
+            expected: Chip2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Bottom,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         DmTensorViewMut { inner }
@@ -1232,13 +1244,13 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorViewMut<'l, D, Chip, Cluster2, Slice, Element, B> {
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster2, Slice, Slice>();
-        config_tile(
-            &Index::to_value(),
-            &Cluster::to_value(),
-            &Cluster2::to_value(),
-            LEN,
-            PaddingKind::Bottom,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Cluster::to_value(),
+            expected: Cluster2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Bottom,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         DmTensorViewMut { inner }
@@ -1250,13 +1262,13 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         self,
         start: usize,
     ) -> DmTensorViewMut<'l, D, Chip, Cluster, Slice, Element2, B> {
-        config_tile(
-            &Index::to_value(),
-            &Element::to_value(),
-            &Element2::to_value(),
-            LEN,
-            PaddingKind::Bottom,
-        )
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Element::to_value(),
+            expected: Element2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Bottom,
+        })
         .unwrap_or_else(|e| panic!("{e}"));
         let inner = self.inner.retile::<Index, _>(start);
         DmTensorViewMut { inner }

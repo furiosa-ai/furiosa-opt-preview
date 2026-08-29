@@ -37,31 +37,34 @@ pub enum UnreadableCause {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VrfOperandError {
     /// The stream does not read the operand.
-    #[error("VRF operand {element} is not readable by the stream {stream}: {cause}")]
+    #[error("VRF operand {vrf_element} is not readable by the stream {stream}: {cause}")]
     Unreadable {
-        /// The operand's `Element` mapping.
-        element: Mapping,
-        /// The stream's `[Time, Packet]`.
+        vrf_element: Mapping,
         stream: Mapping,
         /// Which way the read failed.
         cause: UnreadableCause,
     },
     /// The packet-sized access is neither one broadcast address nor one contiguous run.
     #[error(
-        "VRF operand {element} cannot feed the {}-element packet {packet}: the indexer reads one \
+        "VRF operand {vrf_element} cannot feed the {}-element packet {stream_packet}: the indexer reads one \
          access as a single broadcast address or as {} consecutive elements, and this operand gives \
          it neither. Write the operand with the packet axes innermost and contiguous (change the \
          `collect` / `to_vrf` that produced it), or drop them from it entirely (broadcast). \
          `reshape` cannot fix this: it may not permute axes.",
-        packet.size(),
-        packet.size()
+        stream_packet.size(),
+        stream_packet.size()
     )]
     PacketNotIndexable {
-        /// The operand's `Element` mapping.
-        element: Mapping,
-        /// The stream's `Packet`, whose size is the access window.
-        packet: Mapping,
+        vrf_element: Mapping,
+        stream_packet: Mapping,
     },
+}
+
+/// Inputs used to validate a VRF operand access.
+pub struct VrfOperandInput {
+    pub vrf_element: Mapping,
+    pub stream_time: Mapping,
+    pub stream_packet: Mapping,
 }
 
 /// Judges an operand against both rules the [module docs](self) state, one sequencing each.
@@ -69,34 +72,39 @@ pub enum VrfOperandError {
 /// Indexability asks about the packet alone, since the access IS the packet: cutting the operand at
 /// the access width would assume it steps once per stream position, which `m![A / 16]` under a
 /// stream over `m![A]` does not.
-pub fn config_vrf_operand(element: &Mapping, time: &Mapping, packet: &Mapping) -> Result<(), VrfOperandError> {
-    let access = packet.size();
+pub fn config_vrf_operand(input: VrfOperandInput) -> Result<(), VrfOperandError> {
+    let VrfOperandInput {
+        vrf_element,
+        stream_time,
+        stream_packet,
+    } = input;
+    let access = stream_packet.size();
     assert!(
         matches!(access, HALF_FLIT_ELEMENTS | ONE_FLIT_ELEMENTS),
         "the access window is the ALU width ({HALF_FLIT_ELEMENTS} or {ONE_FLIT_ELEMENTS}), \
-         got a {access}-element packet {packet}"
+         got a {access}-element packet {stream_packet}"
     );
-    let stream = time.clone().pair(packet.clone());
+    let stream = stream_time.pair(stream_packet.clone());
     let unreadable = |cause| VrfOperandError::Unreadable {
-        element: element.clone(),
+        vrf_element: vrf_element.clone(),
         stream: stream.clone(),
         cause,
     };
 
     // On the whole operand: a hole the carve folds into a stride goes unseen below.
-    if has_write_hole(element) {
+    if has_write_hole(&vrf_element) {
         return Err(unreadable(UnreadableCause::WriteHole));
     }
 
-    if !packet_reads_one_access(element, packet) {
+    if !packet_reads_one_access(&vrf_element, &stream_packet) {
         return Err(VrfOperandError::PacketNotIndexable {
-            element: element.clone(),
-            packet: packet.clone(),
+            vrf_element: vrf_element.clone(),
+            stream_packet,
         });
     }
 
     // Coverage: a live operand cell no stream position reaches comes back as `Unconsumed`.
-    sequence(&[element], &[&stream], SequencerMode::Read).map_err(|error| {
+    sequence(&[&vrf_element], &[&stream], SequencerMode::Read).map_err(|error| {
         unreadable(match error {
             SequencerError::Unconsumed(memories) => UnreadableCause::Unread(memories.into_iter().collect()),
             SequencerError::StreamUnmatchedSegment => UnreadableCause::Unmatched,
@@ -221,7 +229,11 @@ mod tests {
     /// base. Returns the verdict, so a rejection test pins the error too.
     #[track_caller]
     fn assert_verdict<Element: M, Time: M, Packet: M>(legal: bool) -> Result<(), VrfOperandError> {
-        let verdict = config_vrf_operand(&Element::to_value(), &Time::to_value(), &Packet::to_value());
+        let verdict = config_vrf_operand(VrfOperandInput {
+            vrf_element: Element::to_value(),
+            stream_time: Time::to_value(),
+            stream_packet: Packet::to_value(),
+        });
         assert_eq!(verdict.is_ok(), legal, "the rule says {verdict:?}");
 
         let reads = simulate::<Element, Time, Packet>();
@@ -394,11 +406,11 @@ mod tests {
     /// indexer question.
     #[test]
     fn write_hole_operand_rejects() {
-        let error = config_vrf_operand(
-            &<m![G #{!} 8]>::to_value(),
-            &<m![1]>::to_value(),
-            &<m![G #{!} 8]>::to_value(),
-        )
+        let error = config_vrf_operand(VrfOperandInput {
+            vrf_element: <m![G #{!} 8]>::to_value(),
+            stream_time: <m![1]>::to_value(),
+            stream_packet: <m![G #{!} 8]>::to_value(),
+        })
         .unwrap_err();
         assert!(
             matches!(

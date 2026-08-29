@@ -16,8 +16,8 @@ mod tile;
 mod transpose;
 
 pub use commit::{COMMIT_BASE_SIZE, COMMIT_VALID_PACKET_SIZES, CommitError};
-pub use divide::{DivideTerm, FactorLeaf, RelaxedDivision};
-pub use fetch::{FETCH_BASE_BYTES, FetchBaseError, FetchError};
+pub use divide::{DivideError, DivideTerm, FactorLeaf, RelaxedDivision};
+pub use fetch::{FETCH_BASE_BYTES, FETCH_VALID_CLUSTER_SIZES, FETCH_VALID_SLICE_SIZES, FetchBaseError, FetchError};
 pub use sequencer::{MAX_SEQUENCER_ENTRIES, StreamSequencerConfig};
 pub use switch::{SwitchAxis, SwitchConfig, SwitchError, SwitchFrame};
 pub use tile::{PadError, TileError};

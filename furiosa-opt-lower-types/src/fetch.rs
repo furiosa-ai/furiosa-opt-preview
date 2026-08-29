@@ -7,6 +7,10 @@ use crate::MAX_SEQUENCER_ENTRIES;
 
 /// Supported fetch-base alignment for efficient SRAM access.
 pub const FETCH_BASE_BYTES: usize = 8;
+/// Supported Fetch cluster sizes.
+pub const FETCH_VALID_CLUSTER_SIZES: [usize; 2] = [1, 2];
+/// Supported Fetch slice sizes.
+pub const FETCH_VALID_SLICE_SIZES: [usize; 3] = [64, 128, 256];
 
 /// Why fetch bases cannot be materialized for the placement grid.
 #[repr(C)]
@@ -39,23 +43,18 @@ pub enum FetchBaseError {
 #[repr(C)]
 #[derive(StableAbi, Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FetchError {
-    /// Cluster size is not 1 or 2.
-    #[error("Fetch: Cluster size must be 1 or 2, got {0}")]
+    /// Cluster size is unsupported.
+    #[error("Fetch: Cluster size must be one of {FETCH_VALID_CLUSTER_SIZES:?}, got {0}")]
     ClusterSize(usize),
-    /// Slice size is not one of 64/128/256.
-    #[error("Fetch: Slice size must be one of 64/128/256, got {0}")]
+    /// Slice size is unsupported.
+    #[error("Fetch: Slice size must be one of {FETCH_VALID_SLICE_SIZES:?}, got {0}")]
     SliceSize(usize),
     /// The matcher could not place an output axis against the DM memories.
     #[error("Fetch: cannot read an output axis from DM ({0:?})")]
     Unreadable(SequencerError),
     /// A live input axis was left unread (the carved-down DM remainders).
     #[error("Fetch: a live input axis is left unread (Time {time}, Packet {packet})")]
-    Unread {
-        /// The carved-down `Time` memory remainder.
-        time: Mapping,
-        /// The carved-down `Packet` memory remainder.
-        packet: Mapping,
-    },
+    Unread { time: Mapping, packet: Mapping },
     /// The packet's innermost axis is not contiguous in DM.
     #[error(
         "Fetch: the packet's innermost axis must be contiguous in DM, but {innermost} has memory \
@@ -63,7 +62,6 @@ pub enum FetchError {
          fetch"
     )]
     NonContiguousPacket {
-        /// The innermost packet entry.
         innermost: Mapping,
         /// Its stride in DM elements.
         memory_stride: usize,

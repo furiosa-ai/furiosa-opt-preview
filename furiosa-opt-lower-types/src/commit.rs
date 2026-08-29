@@ -32,26 +32,22 @@ pub enum CommitError {
          element's innermost {} cells are {}. If the element's layout is the intended one, the stream \
          has to reach the commit in that order: run it through the transpose engine so the packet \
          becomes the element's innermost run",
-        &**packet, &**element, packet.size(), &**element_inner
+        &**packet, &**dm_element, packet.size(), &**dm_element_inner
     )]
     PacketNotInnermost {
-        /// The post-`commit_trim` packet.
         packet: RBox<Mapping>,
-        /// The DM element the commit writes into.
-        element: RBox<Mapping>,
-        /// The element's own innermost run, split off at the packet size.
-        element_inner: RBox<Mapping>,
+        dm_element: RBox<Mapping>,
+        dm_element_inner: RBox<Mapping>,
     },
     /// The matcher could not place a time axis into the DM `element` layout (the packet placed fine).
     /// The mappings are boxed to keep the whole error under the large-`Err` budget.
-    #[error("Commit: cannot write the time axes {} into the DM element {} ({reason:?})", &**in_time, &**element)]
+    #[error("Commit: cannot write the time axes {} into the DM element {} ({reason:?})", &**time, &**dm_element)]
     Unwritable {
         /// Why the matcher gave up.
         reason: SequencerError,
         /// The stream's time axes.
-        in_time: RBox<Mapping>,
-        /// The DM element the commit writes into.
-        element: RBox<Mapping>,
+        time: RBox<Mapping>,
+        dm_element: RBox<Mapping>,
     },
     /// A DM cell is left unwritten (the carved-down memory remainders).
     #[error("Commit: a DM cell is left unwritten ({0:?})")]

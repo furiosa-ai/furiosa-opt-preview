@@ -9,6 +9,9 @@
 //! - `to_vrf`: store to the Vector Register File.
 
 use furiosa_mapping::*;
+use furiosa_opt_lower::{
+    CollectInput, ToTrfError, ToTrfInput, ToVrfInput, config_collect, config_to_trf, config_to_vrf,
+};
 use furiosa_opt_macro::primitive;
 use std::marker::PhantomData;
 
@@ -117,20 +120,25 @@ impl<'l, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, 
 /// Validates the Collect engine via [`furiosa_opt_lower::config_collect`] (packet / time rules
 /// documented there).
 pub(crate) fn verify_collect<D: Scalar, Time: M, Packet: M, Time2: M, Packet2: M>() {
-    furiosa_opt_lower::config_collect(
-        &Time::to_value(),
-        &Packet::to_value(),
-        &Time2::to_value(),
-        &Packet2::to_value(),
-        D::BITS,
-    )
+    config_collect(CollectInput {
+        in_time: Time::to_value(),
+        in_packet: Packet::to_value(),
+        out_time: Time2::to_value(),
+        out_packet: Packet2::to_value(),
+        element_bits: D::BITS,
+    })
     .unwrap_or_else(|message| panic!("{message}"));
 }
 
 /// Validates `to_vrf` via [`furiosa_opt_lower::config_to_vrf`] (element rule documented there).
 pub(crate) fn verify_to_vrf<D: Scalar, Time: M, Packet: M, Element: M>() {
-    furiosa_opt_lower::config_to_vrf(&Time::to_value(), &Packet::to_value(), &Element::to_value(), D::BITS)
-        .unwrap_or_else(|error| panic!("{error}"));
+    config_to_vrf(ToVrfInput {
+        stream_time: Time::to_value(),
+        stream_packet: Packet::to_value(),
+        vrf_element: Element::to_value(),
+        element_bits: D::BITS,
+    })
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// Total TRF capacity in bytes: 8 lanes x 2 banks x 128 rows x 32 bytes. Where a tensor lands in the
@@ -140,15 +148,14 @@ pub const TRF_CAPACITY_BYTES: usize = 65_536;
 /// Validates `to_trf` via [`furiosa_opt_lower::config_to_trf`] (lane / capacity / element rules
 /// documented there).
 pub(crate) fn verify_to_trf<D: Scalar, Lane: M, Time: M, Packet: M, Element: M>() {
-    use furiosa_opt_lower::ToTrfError;
-    furiosa_opt_lower::config_to_trf(
-        &Lane::to_value(),
-        &Time::to_value(),
-        &Packet::to_value(),
-        &Element::to_value(),
-        TRF_CAPACITY_BYTES,
-        D::BITS,
-    )
+    config_to_trf(ToTrfInput {
+        stream_lane: Lane::to_value(),
+        stream_time: Time::to_value(),
+        stream_packet: Packet::to_value(),
+        trf_element: Element::to_value(),
+        capacity: TRF_CAPACITY_BYTES,
+        element_bits: D::BITS,
+    })
     .unwrap_or_else(|error| match error {
         ToTrfError::ExceedsCapacity {
             total_bytes,

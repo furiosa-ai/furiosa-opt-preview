@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-mapping"
-version = "0.6.0+g5cfb422c"
+version = "0.6.0+g636b58f6"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/furiosa-ai/furiosa-opt"

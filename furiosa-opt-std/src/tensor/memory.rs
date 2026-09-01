@@ -242,16 +242,6 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> std::fmt::Debug for HbmTensor<D
     }
 }
 
-// Manual impl: inner `Tensor` is not DeviceSend
-impl<D: Scalar, Chip: M, Element: M, B: Backend> crate::runtime::DeviceSend for HbmTensor<D, Chip, Element, B> {}
-impl<D: Scalar, Chip: M, Element: M, B: Backend> crate::runtime::DeviceSend for &HbmTensor<D, Chip, Element, B> {}
-impl<D: Scalar, Chip: M, Element: M, B: Backend> crate::runtime::DeviceSend for &mut HbmTensor<D, Chip, Element, B> {}
-impl<D: Scalar, Chip: M, Element: M, B: Backend> crate::runtime::DeviceSend for HbmTensorView<'_, D, Chip, Element, B> {}
-impl<D: Scalar, Chip: M, Element: M, B: Backend> crate::runtime::DeviceSend
-    for HbmTensorViewMut<'_, D, Chip, Element, B>
-{
-}
-
 impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> {
     /// Logical shape (mapping) of this tensor.
     pub type Mapping = m![{ Chip }, { Element }];
@@ -471,9 +461,8 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
 #[derive(Debug, Clone)]
 pub struct HbmTensorView<'l, D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend> {
     inner: TensorView<'l, D, Pair<Chip, Element>, B>,
-    // The BASE tensor's concrete address (always present, so `Address`, not `Option`). A tile is
-    // recorded in `inner`'s offset, not here; `address()` adds it back. Keeping the base means
-    // repeated tiles cannot double-count their offsets.
+    // The base tensor's host-visible address, absent for Cpu and compiler-placed tensors. A tile's
+    // offset lives in `inner`; `address()` adds it once, so repeated tiles cannot double-count it.
     address: Option<Address>,
 }
 
@@ -1630,7 +1619,7 @@ mod tests {
     /// `reshape` consumes `self`, so it must hand the backend resource (`owner`) to the reshaped
     /// handle. Releasing it here would free the device allocation while the returned handle still
     /// names its address, so the next `launch` would drive a kernel over freed HBM. Only a handle
-    /// that owns its allocation (`Kernel::write`, `From<Buffer>`) can show this, which is why the
+    /// that owns its allocation (`Kernel::write`, `From<Binding>`) can show this, which is why the
     /// owner is observed through its `Drop`.
     #[test]
     fn reshape_hands_owner_to_reshaped_handle() {

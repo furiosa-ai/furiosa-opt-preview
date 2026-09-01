@@ -3,8 +3,8 @@ mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-pub use bindings::NpuDesc;
 pub(crate) use bindings::*;
+pub use bindings::{NpuBuffer, NpuDesc};
 
 use std::ffi::c_void;
 use std::sync::OnceLock;
@@ -17,21 +17,21 @@ use crate::context::Device;
 const TRACING_TARGET_NPU: &str = "span::npu";
 const TRACING_CATEGORY_NPU: &str = "NPU";
 
-/// Run a loaded kernel over its I/O buffers, arming on-device profiling only when
+/// Run a loaded kernel over its I/O bindings, arming on-device profiling only when
 /// a subscriber listens on the `span::npu` target. Returns the runtime status
 /// (0 on success). The enable check is the sole hot-path cost when profiling is
 /// off; read-back and decode are deferred by the runtime, so the launch itself
 /// never blocks.
-pub(super) fn run(kernel: *mut Kernel, inputs: &[*const NpuBuffer], outputs: &[*const NpuBuffer]) -> i32 {
+pub(super) fn run(kernel: *mut Kernel, inputs: &[*const c_void], outputs: &[*const c_void]) -> i32 {
     if !tracing::enabled!(target: TRACING_TARGET_NPU, tracing::Level::INFO) {
         // SAFETY: the kernel handle and pointer arrays stay live across this synchronous call.
         return unsafe {
             furiosa_kernel_run(
                 kernel,
                 rt(),
-                inputs.as_ptr(),
+                inputs.as_ptr().cast(),
                 inputs.len(),
-                outputs.as_ptr(),
+                outputs.as_ptr().cast(),
                 outputs.len(),
             )
         };
@@ -62,9 +62,9 @@ pub(super) fn run(kernel: *mut Kernel, inputs: &[*const NpuBuffer], outputs: &[*
         furiosa_profiled_run(
             rt(),
             kernel,
-            inputs.as_ptr(),
+            inputs.as_ptr().cast(),
             inputs.len(),
-            outputs.as_ptr(),
+            outputs.as_ptr().cast(),
             outputs.len(),
             Some(sink),
             Some(done),

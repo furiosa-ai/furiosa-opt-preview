@@ -26,6 +26,12 @@ mod tensor;
 pub mod backend;
 pub mod runtime;
 
+/// Internal APIs used by generated code.
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::backend::npu::__private::{Bindings, DeviceOutput, empty, join, run, run_into};
+}
+
 pub use tokio::sync::OnceCell;
 
 pub use context::Device;

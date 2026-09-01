@@ -1,128 +1,86 @@
 use furiosa_mapping::M;
 
 use super::ffi::furiosa_npu_buffer_offset;
-use super::{Buffer, Kernel};
+use super::{Binding, Kernel};
+use crate::runtime::DeviceSend;
 use crate::scalar::Scalar;
 use crate::tensor::Tensor;
 use crate::tensor::memory::HbmTensor;
 
-impl<D: Scalar, Chip: M, Element: M> From<Buffer> for HbmTensor<D, Chip, Element> {
-    fn from(buf: Buffer) -> Self {
-        let addr = unsafe { furiosa_npu_buffer_offset(buf.as_ptr()) };
-        Self::from_parts(Tensor::zeroed(), Some(addr)).owns(buf)
+impl<D: Scalar, Chip: M, Element: M> From<Binding> for HbmTensor<D, Chip, Element> {
+    fn from(binding: Binding) -> Self {
+        let addr = unsafe { furiosa_npu_buffer_offset(binding.as_ptr()) };
+        Self::from_parts(Tensor::zeroed(), Some(addr)).owns(binding)
     }
 }
 
-/// Reconstructs a kernel return value from output buffers in declaration order.
-pub trait KernelOutput: Sized {
-    /// Number of leaf output buffers this value owns.
-    fn output_count() -> usize;
-    /// Allocates this value's output buffers on `kernel`.
-    fn alloc_outputs_into(kernel: &Kernel, out: &mut Vec<Buffer>);
-    /// Rebuilds the value by taking buffers in output order.
-    fn take_from(buffers: &mut impl Iterator<Item = Buffer>) -> Self;
+/// Reconstructs a device-function return value from output bindings in declaration order.
+pub trait DeviceOutput: DeviceSend + Sized {
+    /// Number of leaf output bindings this value owns.
+    fn count() -> usize;
+    /// Allocates this value's output bindings on `kernel`.
+    fn alloc_into(kernel: &Kernel, bindings: &mut Vec<Binding>);
+    /// Rebuilds the value by taking bindings in output order.
+    fn take(bindings: &mut impl Iterator<Item = Binding>) -> Self;
 
-    /// Allocates all output buffers.
-    fn alloc_outputs(kernel: &Kernel) -> Vec<Buffer> {
-        let mut out = Vec::with_capacity(Self::output_count());
-        Self::alloc_outputs_into(kernel, &mut out);
-        out
-    }
-
-    /// Rebuilds the value from exactly its output buffers.
-    fn from_buffers(buffers: Vec<Buffer>) -> Self {
-        assert_eq!(
-            buffers.len(),
-            Self::output_count(),
-            "expected {} output buffers, got {}",
-            Self::output_count(),
-            buffers.len(),
-        );
-        Self::take_from(&mut buffers.into_iter())
+    /// Allocates all output bindings.
+    fn alloc(kernel: &Kernel) -> Vec<Binding> {
+        let mut bindings = Vec::with_capacity(Self::count());
+        Self::alloc_into(kernel, &mut bindings);
+        bindings
     }
 }
 
-/// Binds a logical return value to existing device buffers without allocating new HBM.
-pub trait KernelOutputDestination {
-    /// Number of leaf output buffers in this value.
-    fn output_count() -> usize;
-    /// Appends one existing buffer per output leaf in positional order.
-    fn extend_buffers(&mut self, buffers: &mut Vec<Buffer>);
-}
-
-impl KernelOutputDestination for () {
-    fn output_count() -> usize {
+impl DeviceOutput for () {
+    fn count() -> usize {
         0
     }
 
-    fn extend_buffers(&mut self, _buffers: &mut Vec<Buffer>) {}
+    fn alloc_into(_: &Kernel, _: &mut Vec<Binding>) {}
+
+    fn take(_: &mut impl Iterator<Item = Binding>) {}
 }
 
-impl<D: Scalar, Chip: M, Element: M> KernelOutputDestination for HbmTensor<D, Chip, Element> {
-    fn output_count() -> usize {
+impl<D: Scalar, Chip: M, Element: M> DeviceOutput for HbmTensor<D, Chip, Element> {
+    fn count() -> usize {
         1
     }
 
-    fn extend_buffers(&mut self, buffers: &mut Vec<Buffer>) {
-        buffers.push((&*self).into());
+    fn alloc_into(kernel: &Kernel, bindings: &mut Vec<Binding>) {
+        bindings.push(kernel.alloc_binding(Self::size()));
+    }
+
+    fn take(bindings: &mut impl Iterator<Item = Binding>) -> Self {
+        bindings.next().expect("HbmTensor output is missing its binding").into()
     }
 }
 
-impl<D: Scalar, Chip: M, Element: M> KernelOutput for HbmTensor<D, Chip, Element> {
-    fn output_count() -> usize {
-        1
-    }
-
-    fn alloc_outputs_into(kernel: &Kernel, out: &mut Vec<Buffer>) {
-        out.push(kernel.alloc(Self::size()));
-    }
-
-    fn take_from(buffers: &mut impl Iterator<Item = Buffer>) -> Self {
-        buffers.next().expect("HbmTensor output is missing its buffer").into()
-    }
-}
-
-macro_rules! impl_kernel_output_tuple {
+macro_rules! impl_device_output_tuple {
     () => {};
     (($T0:ident, $t0:ident) $(, ($T:ident, $t:ident))*) => {
-        impl<$T0 $(, $T)*> KernelOutput for ($T0, $($T,)*)
+        impl<$T0 $(, $T)*> DeviceOutput for ($T0, $($T,)*)
         where
-            $T0: KernelOutput $(, $T: KernelOutput)*,
+            $T0: DeviceOutput $(, $T: DeviceOutput)*,
         {
-            fn output_count() -> usize {
-                $T0::output_count() $(+ $T::output_count())*
+            fn count() -> usize {
+                $T0::count() $(+ $T::count())*
             }
 
-            fn alloc_outputs_into(kernel: &Kernel, out: &mut Vec<Buffer>) {
-                $T0::alloc_outputs_into(kernel, out);
-                $( $T::alloc_outputs_into(kernel, out); )*
+            fn alloc_into(kernel: &Kernel, bindings: &mut Vec<Binding>) {
+                $T0::alloc_into(kernel, bindings);
+                $( $T::alloc_into(kernel, bindings); )*
             }
 
-            fn take_from(buffers: &mut impl Iterator<Item = Buffer>) -> Self {
-                ($T0::take_from(buffers), $($T::take_from(buffers),)*)
+            fn take(bindings: &mut impl Iterator<Item = Binding>) -> Self {
+                ($T0::take(bindings), $($T::take(bindings),)*)
             }
         }
 
-        impl<$T0 $(, $T)*> KernelOutputDestination for ($T0, $($T,)*)
-        where
-            $T0: KernelOutputDestination $(, $T: KernelOutputDestination)*,
-        {
-            fn output_count() -> usize {
-                $T0::output_count() $(+ $T::output_count())*
-            }
-
-            fn extend_buffers(&mut self, buffers: &mut Vec<Buffer>) {
-                let ($t0, $($t,)*) = self;
-                $t0.extend_buffers(buffers);
-                $( $t.extend_buffers(buffers); )*
-            }
-        }
-
-        impl_kernel_output_tuple!($(($T, $t)),*);
+        impl_device_output_tuple!($(($T, $t)),*);
     };
 }
 
-impl_kernel_output_tuple!(
+impl_device_output_tuple!(
     (T0, t0),
     (T1, t1),
     (T2, t2),

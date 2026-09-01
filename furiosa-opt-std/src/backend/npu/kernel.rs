@@ -1,3 +1,4 @@
+use std::ffi::c_void;
 use std::fmt;
 use std::ptr;
 use std::slice;
@@ -18,18 +19,19 @@ use crate::tensor::memory::HbmTensor;
 use super::Npu;
 use super::ffi;
 
-/// Opaque handle to a device-runtime buffer.
+/// Opaque handle to one device-runtime binding.
 ///
 /// Wraps a raw pointer returned by the FFI layer. Automatically freed on drop.
+#[repr(transparent)]
 #[derive(Debug)]
-pub struct Buffer(*mut ffi::NpuBuffer);
+pub struct Binding(*mut ffi::NpuBuffer);
 
 // SAFETY: The runtime owns synchronization for this opaque device handle, which may move across threads.
-unsafe impl Send for Buffer {}
-// SAFETY: Shared access exposes only runtime operations that accept an immutable buffer handle.
-unsafe impl Sync for Buffer {}
+unsafe impl Send for Binding {}
+// SAFETY: Shared access exposes only runtime operations that accept an immutable binding handle.
+unsafe impl Sync for Binding {}
 
-impl Drop for Buffer {
+impl Drop for Binding {
     fn drop(&mut self) {
         if !self.0.is_null() {
             // SAFETY: This handle came from the runtime and this Drop is its unique owner.
@@ -38,16 +40,16 @@ impl Drop for Buffer {
     }
 }
 
-impl Clone for Buffer {
+impl Clone for Binding {
     fn clone(&self) -> Self {
         // SAFETY: The runtime clone accepts a live handle and returns an independently owned handle.
-        Buffer(unsafe { ffi::furiosa_npu_buffer_clone(self.0) })
+        Binding(unsafe { ffi::furiosa_npu_buffer_clone(self.0) })
     }
 }
 
-impl Buffer {
+impl Binding {
     pub(super) fn from_raw(ptr: *mut ffi::NpuBuffer) -> Self {
-        Buffer(ptr)
+        Binding(ptr)
     }
 
     pub(super) fn as_ptr(&self) -> *const ffi::NpuBuffer {
@@ -56,18 +58,18 @@ impl Buffer {
 
     pub(crate) fn npu(addr: u64, len: usize) -> Self {
         // SAFETY: The caller supplies a device address and length for the synchronous runtime operation.
-        Buffer::from_raw(unsafe { ffi::furiosa_npu_buffer_from(ffi::rt(), addr, len) })
+        Binding::from_raw(unsafe { ffi::furiosa_npu_buffer_from(ffi::rt(), addr, len) })
     }
 
     pub(crate) fn alloc(size: usize) -> Self {
         // SAFETY: The runtime allocator accepts any byte length and returns an owned opaque handle.
         let ptr = unsafe { ffi::furiosa_npu_buffer(ffi::rt(), size) };
-        assert!(!ptr.is_null(), "failed to allocate buffer");
-        Buffer::from_raw(ptr)
+        assert!(!ptr.is_null(), "failed to allocate binding");
+        Binding::from_raw(ptr)
     }
 
     pub(crate) fn offset(&self) -> u64 {
-        // SAFETY: `self.0` is a live runtime buffer handle for the lifetime of `self`.
+        // SAFETY: `self.0` is a live runtime binding handle for the lifetime of `self`.
         unsafe { ffi::furiosa_npu_buffer_offset(self.0) }
     }
 }
@@ -208,28 +210,26 @@ impl Kernel {
     /// Execute the kernel. When a `tracing` subscriber listens on the `span::npu`
     /// target, profiling is armed and each decoded TUC span is emitted off the
     /// launch hot path as an `info_span!` (see [`ffi::run`]).
-    pub async fn run(&self, inputs: &[Buffer], outputs: &[Buffer]) {
+    pub(crate) async fn run(&self, inputs: &[*const c_void], outputs: &[*const c_void]) {
         log::debug!("run: inputs={}, outputs={}", inputs.len(), outputs.len());
-        let in_ptrs = inputs.iter().map(|b| b.as_ptr()).collect::<Vec<_>>();
-        let out_ptrs = outputs.iter().map(|b| b.as_ptr()).collect::<Vec<_>>();
-        assert!(ffi::run(self.ptr, &in_ptrs, &out_ptrs) == 0, "kernel execution failed");
+        assert!(ffi::run(self.ptr, inputs, outputs) == 0, "kernel execution failed");
     }
 
-    /// Allocate a buffer on the device.
-    pub fn alloc(&self, size: usize) -> Buffer {
-        Buffer::alloc(size)
+    /// Allocates one binding on the device.
+    pub fn alloc_binding(&self, size: usize) -> Binding {
+        Binding::alloc(size)
     }
 
     /// Wraps a device allocation as the tensor that owns it, so the handle names real HBM and frees it
     /// on drop. The single place an `Npu` tensor gets its address.
-    fn place<D: Scalar, Chip: M, Element: M>(buffer: Buffer) -> HbmTensor<D, Chip, Element, Npu> {
-        HbmTensor::from_parts(Tensor::zeroed(), Some(buffer.offset())).owns(buffer)
+    fn place<D: Scalar, Chip: M, Element: M>(binding: Binding) -> HbmTensor<D, Chip, Element, Npu> {
+        HbmTensor::from_parts(Tensor::zeroed(), Some(binding.offset())).owns(binding)
     }
 
     /// Allocates the HBM an `HbmTensor<D, Chip, Element>` needs, returning the tensor that owns it.
     /// [`Self::write`] is this plus the DMA that fills it.
     pub(crate) fn alloc_hbm<D: Scalar, Chip: M, Element: M>() -> HbmTensor<D, Chip, Element, Npu> {
-        Self::place(Buffer::alloc(HbmTensor::<D, Chip, Element, Npu>::size()))
+        Self::place(Binding::alloc(HbmTensor::<D, Chip, Element, Npu>::size()))
     }
 
     /// Copies a host staging tensor to NPU HBM via DMA.
@@ -241,11 +241,11 @@ impl Kernel {
     ) -> HbmTensor<D, Chip, Element2, Npu> {
         let src = host.storage().inner();
         let len = src.len();
-        let dst = Buffer::alloc(len);
+        let dst = Binding::alloc(len);
         let addr = dst.offset();
         log::debug!("write: addr=0x{addr:x}, len={len}");
         assert!(
-            // SAFETY: Both owned runtime buffers remain live for the synchronous DMA operation.
+            // SAFETY: Both owned runtime bindings remain live for the synchronous DMA operation.
             unsafe { ffi::furiosa_write(ffi::rt(), src.as_ptr(), dst.as_ptr()) } == 0,
             "DMA write failed"
         );
@@ -265,10 +265,10 @@ impl Kernel {
             .expect("reading a tensor the compiled program never placed");
         log::debug!("read: addr=0x{hbm_addr:x}, len={len}");
 
-        let src = Buffer::npu(hbm_addr, len);
+        let src = Binding::npu(hbm_addr, len);
         let cpu = CpuBuffer::alloc(len);
         assert!(
-            // SAFETY: Both owned runtime buffers remain live for the synchronous DMA operation.
+            // SAFETY: Both owned runtime bindings remain live for the synchronous DMA operation.
             unsafe { ffi::furiosa_read(ffi::rt(), src.as_ptr(), cpu.as_ptr()) } == 0,
             "DMA read failed"
         );

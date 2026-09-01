@@ -28,6 +28,7 @@
 //! `compile_fail` doctests in that module's docs, so `cargo test --doc` is their whole gate, and they
 //! appear in neither `snapshot.toml` nor the refused / compiled counts.
 
+pub mod array_index;
 pub mod contract_outer_assertions;
 pub mod dma;
 pub mod fetch_lift;

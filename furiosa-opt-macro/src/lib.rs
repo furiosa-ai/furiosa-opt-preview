@@ -3,7 +3,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Data, DeriveInput, Item, Type, Variant, parse_macro_input, parse_quote};
+use syn::{Data, DeriveInput, Item, Variant, parse_macro_input, parse_quote};
 
 /// The rev of this macro's source tree, read at first expansion so no build script has to
 /// stamp it (a build-script trigger on the macro would rebuild every dependent crate).
@@ -56,39 +56,12 @@ pub fn primitive(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Derive macro for DeviceSend trait.
 ///
-/// Generates implementation with bounds requiring all fields to be `DeviceSend`.
+/// Generates an owned implementation for structs whose fields are `DeviceSend`.
 ///
 /// # Compile-time Checks
 ///
-/// All fields must implement `DeviceSend`. This ensures:
-/// - Reference fields are rejected (references don't impl DeviceSend)
-/// - Nested types must also be DeviceSend
+/// Nested derived structs and arrays flatten their fields recursively.
 ///
-/// # Example
-///
-/// ```ignore
-/// #[derive(DeviceSend)]
-/// struct MyTensor<D: Scalar, Chip: M, Element: M> {
-///     inner: Tensor<D, Pair<Chip, Element>>,  // Tensor must impl DeviceSend
-/// }
-/// // Generates:
-/// // impl<...> DeviceSend for MyTensor<...>
-/// // where
-/// //     Tensor<...>: DeviceSend,
-/// // {}
-/// //
-/// // impl<...> ExtendBuffers<MyTensor<...>> for Vec<Buffer>
-/// // where
-/// //     Vec<Buffer>: ExtendBuffers<...>,
-/// // {
-/// //     fn extend<__I: IntoIterator<Item = MyTensor<...>>(&mut self, iter: __I) {
-/// //         for value in iter {
-/// //             ExtendBuffers::extend(self, core::iter::once(value.accessor));
-/// //             ...
-/// //         }
-/// //     }
-/// // }
-/// ```
 #[proc_macro_derive(DeviceSend)]
 pub fn device_send(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -106,7 +79,7 @@ pub fn device_send(input: TokenStream) -> TokenStream {
         }
     };
 
-    let tys: Vec<&Type> = fields.iter().map(|f| &f.ty).collect();
+    let tys: Vec<_> = fields.iter().map(|f| &f.ty).collect();
     let accessors: Vec<TokenStream2> = fields
         .iter()
         .enumerate()
@@ -120,48 +93,35 @@ pub fn device_send(input: TokenStream) -> TokenStream {
         .collect();
 
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let augment = |bounds: Vec<TokenStream2>| match (where_clause, bounds.is_empty()) {
-        (Some(clause), true) => quote!(#clause),
-        (Some(clause), false) => quote!(#clause, #(#bounds),*),
-        (None, true) => quote!(),
-        (None, false) => quote!(where #(#bounds),*),
-    };
+    let augment =
+        |where_clause: Option<&syn::WhereClause>, bounds: Vec<TokenStream2>| match (where_clause, bounds.is_empty()) {
+            (Some(clause), true) => quote!(#clause),
+            (Some(clause), false) => quote!(#clause, #(#bounds),*),
+            (None, true) => quote!(),
+            (None, false) => quote!(where #(#bounds),*),
+        };
 
     let sendable = augment(
+        where_clause,
         tys.iter()
             .map(|ty| quote!(#ty: ::furiosa_opt_std::runtime::DeviceSend))
             .collect(),
     );
-    let bufferable = augment(
-        tys.iter()
-            .map(|ty| {
-                quote! {
-                    ::std::vec::Vec<::furiosa_opt_std::backend::npu::Buffer>:
-                        ::furiosa_opt_std::backend::npu::ExtendBuffers<#ty>
-                }
-            })
-            .collect(),
-    );
+    let values = accessors
+        .iter()
+        .rev()
+        .fold(quote!(::furiosa_opt_std::__private::empty()), |tail, accessor| {
+            quote!(::furiosa_opt_std::__private::join(
+                ::furiosa_opt_std::runtime::DeviceSend::bind(&self.#accessor),
+                #tail,
+            ))
+        });
 
     quote! {
         impl #impl_generics ::furiosa_opt_std::runtime::DeviceSend for #name #ty_generics
-        #sendable {}
-
-        // Flatten fields into buffers in declaration order (must match the compiler's
-        // parameter lowering).
-        impl #impl_generics ::furiosa_opt_std::backend::npu::ExtendBuffers<#name #ty_generics>
-            for ::std::vec::Vec<::furiosa_opt_std::backend::npu::Buffer>
-        #bufferable
-        {
-            fn extend<__I: ::core::iter::IntoIterator<Item = #name #ty_generics>>(&mut self, iter: __I) {
-                for value in iter {
-                    #(
-                        ::furiosa_opt_std::backend::npu::ExtendBuffers::extend(
-                            self,
-                            ::core::iter::once(value.#accessors),
-                        );
-                    )*
-                }
+        #sendable {
+            fn bind(&self) -> impl ::furiosa_opt_std::__private::Bindings {
+                #values
             }
         }
     }
@@ -238,9 +198,6 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let types: Vec<_> = params.iter().map(|(_, t, _)| t).collect();
 
-    // Convert tensor params to DMA Buffers via `ExtendBuffers`, whose trait dispatch
-    // recursively flattens tuple params (e.g. `(&HbmTensor, &HbmTensor)`) into one buffer
-    // per leaf tensor, in field order.
     let tensor_param_names: Vec<&syn::Ident> = params
         .iter()
         .filter(|(_, _, k)| *k == Kind::Tensor)
@@ -248,50 +205,40 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
         .collect();
 
     let tensor_stmts: TokenStream2 = quote! {
-        let mut __furiosa_opt_bufs: ::std::vec::Vec<furiosa_opt_std::backend::npu::Buffer> =
-            ::std::vec::Vec::new();
-        furiosa_opt_std::backend::npu::ExtendBuffers::extend(
-            &mut __furiosa_opt_bufs,
-            ::std::iter::once((#(#tensor_param_names,)*)),
-        );
+        let __furiosa_opt_args = (#(#tensor_param_names,)*);
+        let __furiosa_opt_bindings = furiosa_opt_std::runtime::DeviceSend::bind(&__furiosa_opt_args);
     };
 
-    // Allocate one buffer per output, run, then rebuild the return value from the filled buffers.
-    let run_body = match output {
-        syn::ReturnType::Type(_, ty) => quote! {
-            let __furiosa_opt_outs =
-                <#ty as furiosa_opt_std::backend::npu::KernelOutput>::alloc_outputs(__furiosa_opt_kernel);
-            __furiosa_opt_kernel.run(&__furiosa_opt_bufs, &__furiosa_opt_outs).await;
-            <#ty as furiosa_opt_std::backend::npu::KernelOutput>::from_buffers(__furiosa_opt_outs)
-        },
-        syn::ReturnType::Default => quote! {
-            __furiosa_opt_kernel.run(&__furiosa_opt_bufs, &[]).await;
-        },
+    let return_ty = match output {
+        syn::ReturnType::Default => quote!(()),
+        syn::ReturnType::Type(_, ty) => quote!(#ty),
+    };
+    let run_body = quote! {
+        let __furiosa_opt_output_bindings =
+            <#return_ty as furiosa_opt_std::__private::DeviceOutput>::alloc(__furiosa_opt_kernel);
+        furiosa_opt_std::__private::run_into(
+            __furiosa_opt_kernel,
+            &__furiosa_opt_bindings,
+            &__furiosa_opt_output_bindings,
+        )
+        .await;
+        <#return_ty as furiosa_opt_std::__private::DeviceOutput>::take(&mut __furiosa_opt_output_bindings.into_iter())
     };
     let run_into_body = quote! {
-        let mut __furiosa_opt_outs = ::std::vec::Vec::with_capacity(
-            <Self::Output as furiosa_opt_std::backend::npu::KernelOutputDestination>::output_count(),
-        );
-        furiosa_opt_std::backend::npu::KernelOutputDestination::extend_buffers(
-            __furiosa_opt_output,
-            &mut __furiosa_opt_outs,
-        );
-        assert_eq!(
-            __furiosa_opt_outs.len(),
-            <Self::Output as furiosa_opt_std::backend::npu::KernelOutputDestination>::output_count(),
-            "kernel output destination returned the wrong number of buffers",
-        );
-        __furiosa_opt_kernel.run(&__furiosa_opt_bufs, &__furiosa_opt_outs).await;
+        let __furiosa_opt_output_bindings =
+            furiosa_opt_std::runtime::DeviceSend::bind(&*__furiosa_opt_destination);
+        furiosa_opt_std::__private::run(
+            __furiosa_opt_kernel,
+            &__furiosa_opt_bindings,
+            &__furiosa_opt_output_bindings,
+        )
+        .await;
     };
 
     let tuple_type = if types.len() == 1 {
         quote!(#(#types)*)
     } else {
         quote!((#(#types),*))
-    };
-    let return_ty = match output {
-        syn::ReturnType::Default => quote!(()),
-        syn::ReturnType::Type(_, ty) => quote!(#ty),
     };
     let block = &func.block;
 
@@ -351,7 +298,7 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
         #run_into_body
     };
     let cpu_body = quote! { self::#hidden(#(#param_names),*) };
-    let cpu_into_body = quote! { *__furiosa_opt_output = #cpu_body; };
+    let cpu_into_body = quote! { *__furiosa_opt_destination = #cpu_body; };
 
     let rev = rev();
     quote! {
@@ -401,7 +348,7 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             fn execute_into(
                 #body_destructure: #tuple_type,
-                __furiosa_opt_output: &mut Self::Output,
+                __furiosa_opt_destination: &mut Self::Output,
             ) -> impl std::future::Future<Output = ()> {
                 async move {
                     #[cfg(backend = "npu")]

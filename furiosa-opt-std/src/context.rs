@@ -43,7 +43,11 @@ pub struct TuContext<const T: Tu> {
     _marker: PhantomData<()>,
 }
 
-impl<const T: Tu> crate::runtime::DeviceSend for &mut TuContext<T> {}
+impl<const T: Tu> crate::runtime::DeviceSend for TuContext<T> {
+    fn bind(&self) -> impl crate::__private::Bindings {
+        crate::__private::empty()
+    }
+}
 
 /// Context for a specific DMA engine.
 #[primitive(DmaContext)]
@@ -52,7 +56,11 @@ pub struct DmaContext<const DMA: Dma> {
     _marker: PhantomData<()>,
 }
 
-impl<const DMA: Dma> crate::runtime::DeviceSend for &mut DmaContext<DMA> {}
+impl<const DMA: Dma> crate::runtime::DeviceSend for DmaContext<DMA> {
+    fn bind(&self) -> impl crate::__private::Bindings {
+        crate::__private::empty()
+    }
+}
 
 /// Logical device a kernel runs on, declared by `#[device(chip, pe)]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +85,11 @@ pub struct Context {
     pub pdma: DmaContext<{ Dma::Pcie }>,
 }
 
-impl crate::runtime::DeviceSend for &mut Context {}
+impl crate::runtime::DeviceSend for Context {
+    fn bind(&self) -> impl crate::__private::Bindings {
+        crate::__private::empty()
+    }
+}
 
 impl Context {
     /// Acquire the tensor units. Chain [`Acquired::bind`] to fix the NPU device before any host

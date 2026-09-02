@@ -40,4 +40,5 @@ pub mod scalar_cast_diag;
 pub mod scatter_gather;
 pub mod switch_assertions;
 pub mod transpose;
+pub mod unroll_loop;
 pub mod vector_engine;

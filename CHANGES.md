@@ -44,6 +44,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   such as a Python wheel's extension module), and launches of kernels another crate defines.
 - `DmTensorView::dm_cluster_swap` swaps two clusters and lowers to EDF, with
   VISA/LIR/EDF regression coverage.
+- `#[unroll]` fully expands a static `for` loop before scheduling. See [Unroll a loop](https://furiosa-ai.github.io/furiosa-opt/scheduling/tuning.html#unroll-a-loop).
 - The Transpose Engine accepts doubled input packing for 8-bit and 16-bit elements. A packet can
   now contribute 16 valid elements per cycle, and vISA lowering emits the corresponding
   `fetch_in_width_shift`; 4-bit and 32-bit doubled packing remain unsupported.
@@ -150,6 +151,7 @@ Breaking changes come first, each with what to write instead.
 - `TagMode::AxisToggle` does not lower. `vector_intra_slice_unzip()` is the supported route to a group split.
 - A DMA cannot place a tile whose padded axis is an inner digit of a split. The reduced case is pinned in the examples as `mre/dma_padded_inner_digit`.
 - An inner-digit tile is supported on an axis the HBM argument names directly. A tile reaching into an axis nested under another is still refused at compile time.
+
 ## [v0.5.1]
 
 ### Changed

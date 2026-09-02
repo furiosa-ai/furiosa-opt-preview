@@ -17,6 +17,7 @@ mod array_vec;
 mod cast;
 mod constraints;
 mod context;
+mod control;
 mod engine;
 mod float;
 mod scalar;
@@ -30,6 +31,7 @@ pub mod runtime;
 #[doc(hidden)]
 pub mod __private {
     pub use crate::backend::npu::__private::{Bindings, DeviceOutput, empty, join, run, run_into};
+    pub use crate::control::__loop_hint_unroll;
 }
 
 pub use tokio::sync::OnceCell;
@@ -51,5 +53,5 @@ pub mod prelude {
     pub use super::tensor::tu::*;
     pub use super::{array_vec::*, backend::*, context::*, runtime::*, scalar::*, storage::*, tensor::*};
     pub use furiosa_mapping::*;
-    pub use furiosa_opt_macro::{DeviceSend, device};
+    pub use furiosa_opt_macro::{DeviceSend, device, unroll};
 }

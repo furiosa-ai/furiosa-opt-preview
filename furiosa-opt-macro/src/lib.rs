@@ -3,7 +3,8 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Data, DeriveInput, Item, Variant, parse_macro_input, parse_quote};
+use syn::visit_mut::{self, VisitMut};
+use syn::{Attribute, Data, DeriveInput, Error, ExprForLoop, Item, Meta, Variant, parse_macro_input, parse_quote};
 
 /// The rev of this macro's source tree, read at first expansion so no build script has to
 /// stamp it (a build-script trigger on the macro would rebuild every dependent crate).
@@ -33,6 +34,77 @@ fn rev() -> &'static str {
             })
             .unwrap_or_else(|| "unknown".into())
     })
+}
+
+/// Fully unrolls the annotated `for` loop before device scheduling.
+///
+/// The loop may be in a [`device`] function or any function reachable from one.
+#[proc_macro_attribute]
+pub fn unroll(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return Error::new_spanned(TokenStream2::from(attr), "`unroll` takes no arguments")
+            .to_compile_error()
+            .into();
+    }
+
+    let mut loop_expr = parse_macro_input!(item as ExprForLoop);
+    let mut errors = Vec::new();
+    apply_unroll(&mut loop_expr, true, &mut errors);
+    if !errors.is_empty() {
+        let errors = errors.iter().map(Error::to_compile_error);
+        return quote!(#(#errors)*).into();
+    }
+    quote!(#loop_expr).into()
+}
+
+fn insert_unroll_marker(loop_expr: &mut ExprForLoop) {
+    loop_expr
+        .body
+        .stmts
+        .insert(0, parse_quote!(::furiosa_opt_std::__private::__loop_hint_unroll();));
+}
+
+#[derive(Default)]
+struct UnrollMarkerInserter {
+    errors: Vec<Error>,
+}
+
+impl VisitMut for UnrollMarkerInserter {
+    fn visit_expr_for_loop_mut(&mut self, loop_expr: &mut ExprForLoop) {
+        // Consume loop-owned attributes before the generic visitor rejects misplaced ones.
+        apply_unroll(loop_expr, false, &mut self.errors);
+        visit_mut::visit_expr_for_loop_mut(self, loop_expr);
+    }
+
+    fn visit_attribute_mut(&mut self, attribute: &mut Attribute) {
+        if is_unroll(attribute) {
+            self.errors.push(Error::new_spanned(
+                attribute,
+                "`unroll` goes on a `for` loop, and this is not one",
+            ));
+        }
+    }
+}
+
+fn apply_unroll(loop_expr: &mut ExprForLoop, mut requested: bool, errors: &mut Vec<Error>) {
+    loop_expr.attrs.retain(|attribute| {
+        if !is_unroll(attribute) {
+            return true;
+        }
+        match attribute.meta {
+            Meta::Path(_) if !requested => requested = true,
+            Meta::Path(_) => errors.push(Error::new_spanned(attribute, "duplicate `unroll` attribute")),
+            _ => errors.push(Error::new_spanned(attribute, "`unroll` takes no arguments")),
+        }
+        false
+    });
+    if requested {
+        insert_unroll_marker(loop_expr);
+    }
+}
+
+fn is_unroll(attribute: &Attribute) -> bool {
+    attribute.path().is_ident("unroll")
 }
 
 #[proc_macro_attribute]
@@ -146,7 +218,7 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     let device_chip = attr_int("chip", 1) as u8;
     let device_pe = attr_int("pe", 8) as u8;
-    let func = match parse_macro_input!(item as Item) {
+    let mut func = match parse_macro_input!(item as Item) {
         Item::Fn(f) => f,
         other => {
             return syn::Error::new_spanned(other, "#[device] can only be applied to functions")
@@ -154,6 +226,13 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .into();
         }
     };
+
+    let mut unroll_markers = UnrollMarkerInserter::default();
+    unroll_markers.visit_block_mut(&mut func.block);
+    if !unroll_markers.errors.is_empty() {
+        let errors = unroll_markers.errors.iter().map(Error::to_compile_error);
+        return quote!(#(#errors)*).into();
+    }
 
     let vis = &func.vis;
     let name = &func.sig.ident;
@@ -360,4 +439,24 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_unroll_is_rejected_during_macro_expansion() {
+        let mut block = parse_quote!({
+            #[unroll]
+            #[unroll]
+            for _ in 0..4 {}
+        });
+        let mut inserter = UnrollMarkerInserter::default();
+
+        inserter.visit_block_mut(&mut block);
+
+        assert_eq!(inserter.errors.len(), 1);
+        assert_eq!(inserter.errors[0].to_string(), "duplicate `unroll` attribute");
+    }
 }

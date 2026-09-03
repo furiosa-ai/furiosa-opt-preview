@@ -28,7 +28,7 @@ Sigmoid and GeLU can also be expressed directly in the [Vector Engine](./vector-
 {{#include ../../../furiosa-opt-std/src/engine/fetch_adapter.rs:fetch_table_lookup_impl}}
 ```
 
-The decode table is selected by the input scalar type (via the `TableLookup` trait), not by a runtime argument, exactly as `fetch_cast` selects its conversion by the input type.
+The decode table is selected by the input scalar type (via the `TableLookupCast` trait), not by a runtime argument, exactly as `fetch_cast` selects its conversion by the input type.
 The key width picks the table and the requested output type picks the entry encoding:
 
 | Input | Output |

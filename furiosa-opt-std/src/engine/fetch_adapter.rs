@@ -21,7 +21,7 @@ use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
-use crate::cast::{FetchCast, FetchZeroPointSub, TableLookup};
+use crate::cast::{FetchCast, FetchZeroPointSub, TableLookupCast};
 use crate::constraints;
 use crate::context::*;
 use crate::engine::{CanApplyFetchCast, CanApplyFetchMask, CanApplyFetchTableLookup, CanApplyFetchZeroPointSub};
@@ -194,7 +194,7 @@ impl<
 {
     /// Runs the Fetch Adapter's table-lookup stage (main context only).
     ///
-    /// Each input value indexes a decode table selected by the `TableLookup` impl,
+    /// Each input value indexes a decode table selected by the `TableLookupCast` impl,
     /// not by a runtime argument: `f4e2m1` decodes to either 8-bit float through the
     /// paired 4b->8b table (the NVFP4 / MXFP4 weight path), and either 8-bit float
     /// decodes to `bf16` through the non-paired table. Chain a
@@ -210,7 +210,7 @@ impl<
         self,
     ) -> FetchTableLookupTensor<'l, { Tu::Main }, OutD, Chip, Cluster, Slice, Time, Packet, B>
     where
-        D: TableLookup<OutD>,
+        D: TableLookupCast<OutD>,
     {
         FetchTableLookupTensor::new(self.ctx, self.inner.map(|v| v.lookup()))
     }
@@ -330,7 +330,7 @@ fn verify_fetch_mask<Time: M, Packet: M, OutTime: M, OutPacket: M>() {
 mod tests {
     use super::*;
     use crate::backend::Cpu;
-    use crate::cast::TableLookup;
+    use crate::cast::TableLookupCast;
     use crate::scalar::{f4e2m1, f8e4m3};
     use crate::tensor::Tensor;
 
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn table_lookup_decodes_e2m1_to_f8e4m3_matching_spec() {
         for code in 0..16u8 {
-            let decoded: f8e4m3 = TableLookup::lookup(f4e2m1::from_bits(code));
+            let decoded: f8e4m3 = TableLookupCast::lookup(f4e2m1::from_bits(code));
             let expected = E2M1_F32_ORACLE[code as usize];
             assert_eq!(
                 decoded.to_f32().to_bits(),

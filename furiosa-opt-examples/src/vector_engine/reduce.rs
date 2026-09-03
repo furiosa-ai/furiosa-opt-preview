@@ -270,6 +270,28 @@ pub fn ve_inter_slice_reduce_add_f32(
     result.to_hbm(&mut ctx.tdma)
 }
 
+#[device(chip = 1)]
+pub fn ve_inter_slice_reduce_add_padded_f32(
+    ctx: &mut Context,
+    input: &HbmTensor<f32, Chip, m![R3, A]>,
+) -> HbmTensor<f32, Chip, m![A]> {
+    let input_dm = input.to_dm::<Cluster, m![A / 8, R3 = 3 # 4], m![A % 8]>(&mut ctx.tdma);
+
+    let result: DmTensor<f32, Chip, Cluster, m![A / 8, 1 # 4], m![A % 8]> = ctx
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![1], m![A % 8]>()
+        .fetch_cast::<f32>()
+        .collect::<m![1], m![A % 8]>()
+        .vector_init()
+        .vector_inter_slice_reduce::<m![A / 8, 1 # 4], m![1]>(InterSliceReduceOpF32::Add)
+        .vector_final()
+        .commit_trim::<m![A % 8]>()
+        .commit();
+
+    result.to_hbm(&mut ctx.tdma)
+}
+
 // =============================================================================
 // inter-slice reducer → intra-slice chain (vector_inter_slice_reduce → vector_intra_slice_tag → intra-slice chain ops)
 // =============================================================================

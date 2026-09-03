@@ -44,7 +44,7 @@ pub use tensor::pseudo;
 pub mod prelude {
     pub use super::cast::{
         Cast, CastEngineCast, CommitCast, ContractionAccumulator, ContractionCast, ContractionWeight, FetchCast,
-        FetchZeroPointSub, TableLookup,
+        FetchZeroPointSub, TableLookupCast,
     };
     pub use super::engine::vector::stash_slot::*;
     pub use super::engine::vector::{alu::*, branch::*, layer::*, op::*, operand::*, scalar::*, stage, tensor::*};

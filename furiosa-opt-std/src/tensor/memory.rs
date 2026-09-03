@@ -1245,6 +1245,25 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         DmTensorViewMut { inner }
     }
 
+    /// Creates mutable views by splitting along a tile expression over Slice.
+    #[primitive(DmTensorViewMut::slice_tile)]
+    pub fn slice_tile<Index: M, const LEN: usize, Slice2: M>(
+        self,
+        start: usize,
+    ) -> DmTensorViewMut<'l, D, Chip, Cluster, Slice2, Element, B> {
+        constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
+        config_tile(TileInput {
+            index: Index::to_value(),
+            element: Slice::to_value(),
+            expected: Slice2::to_value(),
+            len: LEN,
+            hole_fill: PaddingKind::Bottom,
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        let inner = self.inner.retile::<Index, _>(start);
+        DmTensorViewMut { inner }
+    }
+
     /// Creates mutable views by splitting along a tile expression over Element.
     #[primitive(DmTensorViewMut::tile)]
     pub fn tile<Index: M, const LEN: usize, Element2: M>(

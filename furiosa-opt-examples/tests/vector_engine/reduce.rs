@@ -1,9 +1,9 @@
 use crate::common::assert_f32_vec_eq;
 use furiosa_opt_examples::vector_engine::{
-    A, R, ve_inter_slice_reduce_add_f32, ve_inter_slice_reduce_add_sat_i32, ve_inter_slice_reduce_max_i32,
-    ve_intra_slice_reduce_add_f32, ve_intra_slice_reduce_add_fxp_sat, ve_intra_slice_reduce_max_f32,
-    ve_intra_slice_reduce_max_i32, ve_intra_slice_reduce_min_f32, ve_intra_slice_reduce_min_i32,
-    ve_intra_slice_reduce_split_time_packet, ve_vru_then_vau_i32,
+    A, R, R3, ve_inter_slice_reduce_add_f32, ve_inter_slice_reduce_add_padded_f32, ve_inter_slice_reduce_add_sat_i32,
+    ve_inter_slice_reduce_max_i32, ve_intra_slice_reduce_add_f32, ve_intra_slice_reduce_add_fxp_sat,
+    ve_intra_slice_reduce_max_f32, ve_intra_slice_reduce_max_i32, ve_intra_slice_reduce_min_f32,
+    ve_intra_slice_reduce_min_i32, ve_intra_slice_reduce_split_time_packet, ve_vru_then_vau_i32,
 };
 use furiosa_opt_std::prelude::*;
 use rand::SeedableRng;
@@ -170,6 +170,21 @@ async fn test_ve_inter_slice_reduce_add_f32() {
     let input_hbm = input.to_hbm(&mut ctx.pdma).await;
 
     let out_hbm = launch(ve_inter_slice_reduce_add_f32, (&mut *ctx, &input_hbm)).await;
+    let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
+
+    let expected: Tensor<f32, m![A]> = input.into_inner().reduce_add();
+    assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
+}
+
+#[tokio::test]
+async fn test_ve_inter_slice_reduce_add_padded_f32() {
+    let mut ctx = Context::acquire();
+
+    let mut rng = SmallRng::seed_from_u64(42);
+    let input = HostTensor::<f32, m![R3, A]>::rand(&mut rng);
+    let input_hbm = input.to_hbm(&mut ctx.pdma).await;
+
+    let out_hbm = launch(ve_inter_slice_reduce_add_padded_f32, (&mut *ctx, &input_hbm)).await;
     let result = out_hbm.to_host::<m![A]>(&mut ctx.pdma).await;
 
     let expected: Tensor<f32, m![A]> = input.into_inner().reduce_add();

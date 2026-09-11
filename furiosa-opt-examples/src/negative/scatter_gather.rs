@@ -1,33 +1,27 @@
-//! Rejection fixture for the per-PE SPM budget an unscaled gather's index list must fit.
+//! Rejection fixtures for the two bounds an unscaled gather's SPM index must meet: the per-PE
+//! budget its list has to fit, and the PE-0 placement the gather reads it off.
 
 use furiosa_opt_std::prelude::*;
 
-pub use crate::scatter_gather::{IdxRows, Indices, Rows, Width};
+pub use crate::scatter_gather::{D, G, K};
 
 type Chip = m![1];
-type Cluster = m![1 # 2];
+type PaddedCluster = m![1 # 2];
+type BroadcastCluster = m![2];
+type PlacedPE = m![G / 128];
 
-/// The same gather as [`crate::scatter_gather::gather_scaled_from_raw_index`] written as an unscaled
-/// gather, which cannot be compiled: the unscaled index list lives in ONE PE's SPM, and
-/// `IdxRows * Indices = 2048` i32 entries is 8 KiB against a 4 KiB per-PE budget. Pinned as a
-/// rejection so the diagnostic keeps naming the limit
-/// (`OperatorVerifier::verify_indirect_tensor_dma`) instead of degenerating into a scheduler that
-/// finds no SPM (`V1 failed for all operator schedule heuristics`).
-///
-/// The two ways out are [`crate::scatter_gather::gather_scaled_from_raw_index`], which scales the
-/// raw index on-device and gathers from DRAM, and
-/// [`crate::scatter_gather::gather_unscaled_split_index`], which stays unscaled and splits the index
-/// into SPM-sized chunks.
+/// The index spread across the PEs instead of kept in PE 0.
+/// A legal `SpmTensor` -- 4 PEs, 512 B each -- but not a legal unscaled index: the gather reads the
+/// whole list off PE 0, so a real partition hides three quarters of it.
 #[device(chip = 1)]
-pub fn invalid_gather_unscaled_index_over_spm(
+pub fn invalid_gather_unscaled_index_across_pes(
     device: &mut Device,
-    table: &HbmTensor<bf16, Chip, m![Rows, Width]>,
-    index: &HbmTensor<i32, Chip, m![IdxRows, Indices]>,
-) -> HbmTensor<bf16, Chip, m![IdxRows, Indices, Width]> {
-    type Slice = m![IdxRows, Indices / 8];
+    table: &HbmTensor<bf16, Chip, m![K, D]>,
+    index: &HbmTensor<i32, Chip, m![G]>,
+) -> HbmTensor<bf16, Chip, m![G, D]> {
+    let index_dm: DmTensor<i32, Chip, BroadcastCluster, m![G / 2], m![G % 2]> = index.to_dm(&mut device.tdma);
+    let index_spm: SpmTensor<i32, Chip, BroadcastCluster, PlacedPE, m![G % 128]> = index_dm.to_spm(&mut device.tdma);
+    let values_dm: DmTensor<bf16, Chip, PaddedCluster, m![G / 2], m![G % 2, D]> = table.dma_gather_unscaled(&index_spm);
 
-    let index: DmTensor<i32, Chip, Cluster, Slice, m![Indices % 8]> = index.to_dm(&mut device.tdma);
-    let values: DmTensor<bf16, Chip, Cluster, Slice, m![Indices % 8, Width]> = table.dma_gather_unscaled(&index);
-
-    values.to_hbm(&mut device.tdma)
+    values_dm.to_hbm(&mut device.tdma)
 }

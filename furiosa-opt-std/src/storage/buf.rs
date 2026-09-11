@@ -564,7 +564,8 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
         .expect("gather: Src table factors into payload x gather-axis")[0]
             .iter()
             .collect();
-        let dst_off: Vec<usize> = sequence(&[&Dst::to_value()], &[&payload.pair(idx_residue)], SequencerMode::Read)
+        let stream = payload.pair(idx_residue);
+        let dst_off: Vec<usize> = sequence(&[&Dst::to_value()], &[&stream], SequencerMode::Read)
             .expect("gather: Dst factors into payload x idx-residue")[0]
             .iter()
             .collect();
@@ -575,8 +576,10 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
         // `writer[dst_elem]` is the `(payload_pos, r)` flat index that writes `dst_elem`, or `None` for a
         // dst position the gather does not touch (which then keeps its prior value).
         let mut writer: Vec<Option<usize>> = vec![None; dst.len()];
-        for (flat, &dst_elem) in dst_off.iter().enumerate() {
-            writer[dst_elem] = Some(flat);
+        for ((flat, &dst_elem), live) in dst_off.iter().enumerate().zip(stream.iter_positions()) {
+            if live.is_some() {
+                writer[dst_elem] = Some(flat);
+            }
         }
         // Range-partition the dst: each rayon job owns a contiguous, byte-aligned element range, reads its
         // permuted source through the shared `&` source (a race-free read), and writes only positions it

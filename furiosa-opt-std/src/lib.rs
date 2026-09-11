@@ -83,7 +83,9 @@ pub mod prelude {
     pub use super::runtime::{Device, Topology};
     pub use super::tensor::memory::*;
     pub use super::tensor::tu::*;
-    pub use super::{Error, array_vec::*, backend::*, runtime::*, scalar::*, storage::*, tensor::*};
+    pub use super::{
+        Error, array_vec::*, backend::*, constraints::SLICES_PER_PE, runtime::*, scalar::*, storage::*, tensor::*,
+    };
     pub use furiosa_mapping::*;
     pub use furiosa_opt_macro::{DeviceSend, device, unroll};
 }

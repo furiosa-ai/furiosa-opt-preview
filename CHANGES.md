@@ -18,6 +18,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   `to_dm_view` fuses into one SRAM DMA. Repeated slice calls can remove independently located axes.
 - `DmTensor::{asymmetric_chip_slice,asymmetric_cluster_slice}` select one local slice per dimension index
   through the sub-context.
+- `SpmTensor<D, Chip, Cluster, Pe, Element>` places a value in scratchpad memory, with `Pe` naming
+  the fused PEs a cluster's 64-slice groups form. `DmTensor::to_spm` and `SpmTensor::to_dm` move a
+  dense tensor between DM and SPM through Tensor DMA, and require `Pe::SIZE == Slice::SIZE / 64`.
+  `Element` must fit the 4 KiB scratchpad one PE holds, checked at compile time.
 - `furiosa-opt-examples` provides separate chip- and cluster-reduction examples for ReduceScatter,
   AllGather, ring-style AllReduce, and Butterfly AllReduce.
 - The fetch-size rule is published as `config_fetch_volume` / `FetchContext` in `furiosa-opt-lower`.
@@ -67,6 +71,10 @@ Breaking changes come first, each with what to write instead.
 - One `Topology`, in `furiosa-opt-rt` and re-exported by `furiosa-opt-std`, which held a second
   copy of the same two fields. Naming exact chips is `Builder::among`'s, so the variant that
   carried a chip list is gone with the conversion that was its only constructor.
+- `HbmTensor::dma_gather_unscaled` takes its raw row-position index as an `SpmTensor<i32>` instead
+  of a `DmTensor<i32>`: the kernel now stages the index into SPM itself with `to_spm` rather than
+  leaving the compiler to insert that transfer. The index's `Pe` must be padding-only (`m![1 # 4]`),
+  since the gather reads the whole list off PE 0.
 - `TuContext::{parallel_copy_chip_slice,parallel_copy_cluster_slice}` are replaced by
   `DmTensor::{asymmetric_chip_slice,asymmetric_cluster_slice}`. The input tensor is now the receiver,
   the sub-context is the first argument, and the input scalar and dimension types plus the number of

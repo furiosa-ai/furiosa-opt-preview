@@ -97,6 +97,8 @@ pub const BITS_PER_BYTE: usize = 8;
 pub const FLIT_BYTES: usize = 32;
 /// Vector register file capacity in bytes, per slice. One `to_vrf` operand must fit this.
 pub const VRF_BYTES: usize = 8 * 1024;
+/// Scratchpad memory capacity in bytes, per fused PE. One `SpmTensor`'s `Element` must fit this.
+pub const SPM_BYTES_PER_PE: usize = 4 * 1024;
 /// Vector register-file cache capacity in bytes. One interleaved unzip group must fit this.
 pub const VRF_CACHE_BYTES: usize = 1024;
 /// Vector-engine element width in bits: the engine computes on 32-bit lanes only.

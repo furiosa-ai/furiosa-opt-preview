@@ -2,7 +2,7 @@
 
 The DMA Engine moves tensors directly between memory tiers without engaging the Tensor Unit pipeline, so use it for residency or layout changes that require no compute stage.
 
-Choose DMA for HBM↔HBM, HBM↔DM, or DM↔DM movement when no Fetch, compute, or Commit stage is needed.
+Choose DMA for HBM↔HBM, HBM↔DM, DM↔DM, or DM↔SPM movement when no Fetch, compute, or Commit stage is needed.
 The Interface examples show how source tensors, destination mappings, and `tdma` or `pdma` contexts combine.
 Each transfer pairs two coordinated stages:
 - **[Read Sequencer](#architecture)**: Reads from the source tier.
@@ -11,14 +11,13 @@ Each transfer pairs two coordinated stages:
 A DMA transfer is a [mathematical tensor move](../mapping-tensors/tensor-semantics.md#mathematical-tensor-move): the output holds the same mathematical tensor as the input even when the layouts differ.
 Tensor DMA spans cross-DMN, cross-cluster, and cross-chip transfers, with chip IDs globally agreed across the system.
 
-
 See [Optimizations](#optimizations) for transfer throughput considerations.
 
 ## Interface
 
 A DMA transfer takes a tensor in one memory tier and produces a tensor in another (or the same) tier.
 The kernel writer calls `.to_dm()`, `.to_hbm()`, or related methods on the source tensor, passing in a `DmaContext`:
-- `Device::tdma`: Tensor DMA context for on-chip transfers (HBM ↔ HBM, HBM ↔ DM, DM ↔ DM).
+- `Device::tdma`: Tensor DMA context for on-chip transfers (HBM ↔ HBM, HBM ↔ DM, DM ↔ DM, DM ↔ SPM).
 - `Device::pdma`: PCIe DMA context for host ↔ HBM transfers (see [PCIe DMA](#pcie-dma)).
 
 ```rust,ignore
@@ -47,9 +46,13 @@ fn transpose_simple(
     intermediate.to_hbm(&mut device.tdma)
 }
 #
-# let mut device = Device::new(Topology { chips: 1, pes: 8 }).unwrap();
+# fn main() -> Result<(), Error> {
+# let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
 # let in_hbm = HbmTensor::<f32, m![1], m![A, B, C]>::new();
 # let _out_hbm = transpose_simple(&mut device, &in_hbm);
+#
+# Ok(())
+# }
 ```
 
 A transfer that crosses tiers also takes a layout transformation through the destination type's mapping.
@@ -67,9 +70,13 @@ fn hbm_to_dm(
     input.to_dm::<m![1 # 2], m![A / 8], m![A % 8]>(&mut device.tdma)
 }
 #
-# let mut device = Device::new(Topology { chips: 1, pes: 8 }).unwrap();
+# fn main() -> Result<(), Error> {
+# let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
 # let in_hbm = HbmTensor::<i8, m![1], m![A]>::new();
 # let _out_dm = hbm_to_dm(&mut device, &in_hbm);
+#
+# Ok(())
+# }
 ```
 
 Here the 2,048-element vector is distributed as 256 elements per slice (`Slice = m![A / 8]`) with 8 elements per slice (`Element = m![A % 8]`), spread across 2 clusters.
@@ -188,6 +195,7 @@ Violations cause correctness errors or hardware exceptions, not just performance
   |------|------|-------|
   | HBM | 1 byte | 1 byte |
   | DM (SRAM) | 1 byte | 8 bytes |
+  | SPM | 1 byte | 1 byte |
 
   HBM ↔ DM transfers additionally require 8-byte alignment for the read address, write address, and packet size, regardless of the table above.
   The asymmetric DM rule reflects asymmetric SRAM hardware.
@@ -210,6 +218,7 @@ Each tier has a peak bandwidth that bounds achievable throughput, and the actual
 |------|----------------|
 | HBM | 1.5 TB/s per chip (32 channels × 48 GB/s per channel at 0.75 GHz) |
 | DM | 256 B/cycle per cluster (with DMN interleaving, 128 B/cycle per DMN) |
+| SPM | 128 B/cycle per cluster (same-chip only) |
 | PCIe | 30 B/cycle for both reads and writes (see [PCIe DMA](#pcie-dma)) |
 
 Each DMA Engine moves up to 256 B/cycle on its own.
@@ -775,34 +784,44 @@ fn gather_minimal(
 fn gather_unscaled(
     device: &mut Device,
     table: &HbmTensor<bf16, m![1], m![K, D]>,
-    // Raw row positions per cluster. The kernel stages the index on-chip with `to_dm`;
-    // a real per-cluster (`CL`) partition avoids broadcast padding.
+    // Raw row positions per cluster.
+    // The kernel stages the index in DM with `to_dm`, then re-lays it into SPM with `to_spm`:
+    // a real per-cluster (`CL`) partition avoids broadcast padding, while `Pe` is padding-only
+    // (`m![1 # 4]`) because the gather reads the whole list off PE 0.
     index: &HbmTensor<i32, m![1], m![CL, G]>,
 ) -> DmTensor<bf16, m![1], m![CL], m![G / 2], m![G % 2, D]> {
     let index_dm: DmTensor<i32, m![1], m![CL], m![G / 2], m![G % 2]> =
         index.to_dm(&mut device.tdma);
-    table.dma_gather_unscaled(&index_dm)
+    let index_spm: SpmTensor<i32, m![1], m![CL], m![1 # 4], m![G]> =
+        index_dm.to_spm(&mut device.tdma);
+
+    table.dma_gather_unscaled(&index_spm)
 }
 #
 # #[tokio::main]
-# async fn main() {
-#     let mut device = Device::new(Topology { chips: 1, pes: 8 }).unwrap();
+# async fn main() -> Result<(), Error> {
+#     let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
 # 
-#     let index = &(HostTensor::<i32, m![K]>::zero().to_hbm(&mut device.pdma).await.unwrap());
+#     let index = &(HostTensor::<i32, m![K]>::zero().to_hbm(&mut device.pdma).await?);
 #     let data = HbmTensor::<bf16, m![1], m![K, D]>::new();
 #     let mut output_hbm = HbmTensor::<bf16, m![1], m![C, D]>::new();
 # 
 #     scatter_minimal(&mut device, &data, &index, &mut output_hbm);
-#     gather_minimal(&data, &(HostTensor::<i32, m![G]>::zero().to_hbm(&mut device.pdma).await.unwrap()));
-#     let placed_index = &(HostTensor::<i32, m![CL, G]>::zero().to_hbm(&mut device.pdma).await.unwrap());
+#     gather_minimal(&data, &(HostTensor::<i32, m![G]>::zero().to_hbm(&mut device.pdma).await?));
+#     let placed_index = &(HostTensor::<i32, m![CL, G]>::zero().to_hbm(&mut device.pdma).await?);
 #     gather_unscaled(&mut device, &data, placed_index);
+#
+#     Ok(())
 # }
 ```
 
-
 The scaled variants (`dma_gather_scaled`, `dma_scatter`) take the index from an `HbmTensor` in DRAM and read its values as byte offsets along the gather/scatter axis.
 To address row `r`, pass `r` times one row's byte size (its element count times the element's byte size, for example `128 * 2 = 256` for a 128-wide `bf16` row).
-`dma_gather_unscaled` instead takes an on-chip `DmTensor` index, staged from DRAM with `to_dm`, and reads its values as raw row positions, for indices computed on-chip such as paged-attention block tables.
+`dma_gather_unscaled` instead takes an on-chip `SpmTensor<i32>` index and reads its values as raw row positions, for indices computed on-chip such as paged-attention block tables.
+Stage that index with `DmTensor::to_spm`, and bring an SPM value back with `SpmTensor::to_dm`.
+The gather reads the whole index list off PE 0, so the index's `Pe` must be padding-only (`m![1 # 4]`).
+A `m![4]` replica is refused because PE 1 to 3 would then hold copies the gather never reads, and a `m![X % 4]` partition because it would hide most of the list from it.
+What reaches SPM is therefore exactly the rows the gather visits: the list's `Element` extent counts real index entries, with no padding cell to reason about.
 
 ## PCIe DMA
 
@@ -828,6 +847,7 @@ async fn upload_and_download(device: &mut Device) -> Result<(), Error> {
 
     // HBM → host (back to system memory)
     let _round_tripped: HostTensor<i8, m![A, B]> = hbm.to_host(&mut device.pdma).await?;
+
     Ok(())
 }
 ```

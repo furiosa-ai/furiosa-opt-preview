@@ -10,19 +10,21 @@ fn input_host() -> HostTensor<i32, m![W]> {
 
 /// Statement form: the two arms write two separate output tensors, `input + 1` and `input + 2`.
 #[tokio::test]
-async fn test_runtime_if_two_outputs() {
-    let mut device = Device::new(runtime_if_two_outputs.topology()).unwrap();
+async fn test_runtime_if_two_outputs() -> eyre::Result<()> {
+    let mut device = Device::new(runtime_if_two_outputs.topology())?;
     let input = input_host();
-    let input_hbm = input.to_hbm(&mut device.pdma).await.unwrap();
+    let input_hbm = input.to_hbm(&mut device.pdma).await?;
 
-    let (out_then, out_else) = launch(runtime_if_two_outputs, (&mut device, &input_hbm)).await.unwrap();
+    let (out_then, out_else) = launch(runtime_if_two_outputs, (&mut device, &input_hbm)).await?;
 
     assert_eq!(
         input.clone().into_inner().map(|x| x + 1).into_vec(),
-        out_then.to_host::<m![W]>(&mut device.pdma).await.unwrap().into_vec()
+        out_then.to_host::<m![W]>(&mut device.pdma).await?.into_vec()
     );
     assert_eq!(
         input.clone().into_inner().map(|x| x + 2).into_vec(),
-        out_else.to_host::<m![W]>(&mut device.pdma).await.unwrap().into_vec()
+        out_else.to_host::<m![W]>(&mut device.pdma).await?.into_vec()
     );
+
+    Ok(())
 }

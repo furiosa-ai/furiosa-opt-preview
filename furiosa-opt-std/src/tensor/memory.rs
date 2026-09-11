@@ -352,14 +352,23 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
     /// interpreting index values as raw row positions.
     ///
     /// Complements [`Self::dma_gather_scaled`] for indices computed on-chip (paged-attention block
-    /// tables, unscaled embedding lookups): the index is an SPM-resident `DmTensor` rather than
+    /// tables, unscaled embedding lookups): the index is an SPM-resident [`SpmTensor`] rather than
     /// an `HbmTensor` in DRAM, and its values are raw row positions rather than the byte offsets
     /// [`Self::dma_gather_scaled`] expects.
+    ///
+    /// The unscaled gather reads the whole index list off PE 0, so `IdxPe` must be padding-only,
+    /// padded to the PE count the index's slices span (`m![1 # {Slice::SIZE / SLICES_PER_PE}]`, 4 on
+    /// a full cluster): the list lives in PE 0 and no other PE takes part.
     #[primitive(HbmTensor::dma_gather_unscaled)]
-    pub fn dma_gather_unscaled<IdxCluster: M, IdxSlice: M, IdxElement: M, Cluster2: M, Slice2: M, Element2: M>(
+    pub fn dma_gather_unscaled<IdxCluster: M, IdxPe: M, IdxElement: M, Cluster2: M, Slice2: M, Element2: M>(
         &self,
-        index: &DmTensor<i32, Chip, IdxCluster, IdxSlice, IdxElement, B>,
+        index: &SpmTensor<i32, Chip, IdxCluster, IdxPe, IdxElement, B>,
     ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
+        assert!(
+            (1..IdxPe::SIZE).all(|pe| matches!(IdxPe::map(pe), Cell::Padding(_))),
+            "unscaled gather index must be padding-only across PEs (`m![1 # {}]`), read off PE 0 alone",
+            IdxPe::SIZE
+        );
         let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::from_parts(Tensor::zeroed(), None);
         self.inner.gather::<_, _>(&mut output.inner, &index.inner, false);
         output
@@ -747,6 +756,49 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
     }
 }
 
+/// Tensor stored in scratchpad memory. `Pe` places the payload across the cluster's fused PEs.
+#[primitive(SpmTensor)]
+#[derive(Debug)]
+pub struct SpmTensor<D: Scalar, Chip: M, Cluster: M, Pe: M, Element: M, B: Backend = CurrentBackend> {
+    inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Pe, Element>>>, B>,
+    _marker: PhantomData<(D, Chip, Cluster, Pe, Element)>,
+}
+
+impl<D: Scalar, Chip: M, Cluster: M, Pe: M, Element: M, B: Backend> SpmTensor<D, Chip, Cluster, Pe, Element, B> {
+    /// Logical SPM mapping, including the explicit fused PE axis.
+    pub type Mapping = m![{ Chip }, { Cluster }, { Pe }, { Element }];
+
+    /// Constructs an SPM tensor after checking, at compile time, that `Cluster` and `Pe` name
+    /// hardware counts and that `Element` fits the scratchpad one PE holds. The over-budget case is
+    /// a `compile_fail` doctest in `furiosa-opt-examples`' `negative::scatter_gather`.
+    pub(crate) fn new(inner: Tensor<D, Self::Mapping, B>) -> Self {
+        constraints::assert_cluster_size::<Cluster>();
+        constraints::assert_pe_size::<Pe>();
+        constraints::assert_spm_capacity::<D, Element>();
+        Self {
+            inner,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Converts to a fresh DM tensor.
+    #[primitive(SpmTensor::to_dm)]
+    pub fn to_dm<Slice2: M, Element2: M>(
+        &self,
+        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+    ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
+        constraints::assert_pe_matches_slice::<Pe, Slice2>();
+        assert_dma_layout::<
+            D,
+            m![{ Cluster }, { Pe }, { Element }],
+            Element,
+            m![{ Cluster }, { Slice2 }, { Element2 }],
+            Element2,
+        >(DM_WRITE_ALIGN_BYTES);
+        DmTensor::from_parts(self.inner.transpose(true), None)
+    }
+}
+
 /// Tensor stored in data memory.
 #[primitive(DmTensor)]
 #[derive(Debug)]
@@ -893,6 +945,26 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     #[primitive(DmTensor::to_hbm)]
     pub fn to_hbm<Element2: M>(&self, _dma: &mut DmaContext<{ Dma::Tensor }, B>) -> HbmTensor<D, Chip, Element2, B> {
         HbmTensor::from_parts(self.inner.transpose(true))
+    }
+
+    /// Converts to a fresh SPM tensor with the caller-provided PE and element mappings.
+    ///
+    /// `npu_config`'s `dma_write_width` counts SPM as non-SRAM, so an SPM destination takes the
+    /// DRAM access width of 1 rather than [`DM_WRITE_ALIGN_BYTES`].
+    #[primitive(DmTensor::to_spm)]
+    pub fn to_spm<Pe2: M, Element2: M>(
+        &self,
+        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+    ) -> SpmTensor<D, Chip, Cluster, Pe2, Element2, B> {
+        constraints::assert_pe_matches_slice::<Pe2, Slice>();
+        assert_dma_layout::<
+            D,
+            m![{ Cluster }, { Slice }, { Element }],
+            Element,
+            m![{ Cluster }, { Pe2 }, { Element2 }],
+            Element2,
+        >(1);
+        SpmTensor::new(self.inner.transpose(true))
     }
 
     /// Scatter SRAM values to DRAM at positions given by index tensor.
@@ -1573,14 +1645,17 @@ mod tests {
     use crate::runtime::{Device, Topology};
 
     /// Builds the shared `dma_gather_unscaled` fixture for backend `B`: an HBM table `[W=8, V=2]`
-    /// (row `r` = `[10r, 10r + 1]`) and an SPM-resident (`DmTensor`) block-table index of `K=64`
+    /// (row `r` = `[10r, 10r + 1]`) and an SPM block-table index of `K=64`
     /// raw row positions. The index is a fixed non-monotonic permutation of `0..W` tiled across
     /// the `K` rows, so the gathered value cannot be reproduced from the destination position
     /// alone (this pins that the index is actually read) nor by assuming ascending indices.
-    /// Returns the gathered output and the hand-derived oracle. `K=64` is the smallest legal
-    /// `Slice` (see `SLICE_SIZES`).
+    /// Returns the gathered output and the hand-derived oracle. `K / 2=64` is the smallest legal
+    /// `Slice`, while the two-element tail supplies the DMA's minimum 8-byte packet.
     fn run_dma_gather_unscaled<B: Backend>() -> (Vec<i32>, Vec<i32>) {
-        axes![W = 8, V = 2, K = 64];
+        axes![W = 8, V = 2, K = 128];
+        type Slice = m![K / 2];
+        // Padding-only PE axis spanning the PEs those slices cover: one PE here, 4 on a full cluster.
+        type DummyPe = m![1 # { Slice::SIZE / constraints::SLICES_PER_PE }];
         // Non-monotonic, hits row 0 and the max row W-1, and is decoupled from the position `k`.
         const PERM: [i32; 8] = [3, 7, 1, 5, 0, 6, 2, 4];
         let row = |k: usize| PERM[k % W::SIZE];
@@ -1590,10 +1665,11 @@ mod tests {
         let expected: Vec<i32> = (0..K::SIZE).flat_map(|k| [10 * row(k), 10 * row(k) + 1]).collect();
 
         let table = HbmTensor::<i32, m![1], m![W, V], B>::from_parts(Tensor::from_vec(table_buf));
-        // The index lives in DM (SPM): `Slice = K`, the residue axis the gather iterates.
-        let index = DmTensor::<i32, m![1], m![1], m![K], m![1], B>::from_parts(Tensor::from_vec(idx_buf), None);
+        let index_dm = DmTensor::<i32, m![1], m![1], Slice, m![K % 2], B>::from_parts(Tensor::from_vec(idx_buf), None);
+        let mut device = Device::<B>::on(B::open(Topology { chips: 1, pes: 4 }).unwrap());
+        let index: SpmTensor<i32, m![1], m![1], DummyPe, m![K], B> = index_dm.to_spm(&mut device.tdma);
 
-        let output: DmTensor<i32, m![1], m![1], m![K], m![V], B> = table.dma_gather_unscaled(&index);
+        let output: DmTensor<i32, m![1], m![1], Slice, m![K % 2, V], B> = table.dma_gather_unscaled(&index);
         (output.inner.into_vec(), expected)
     }
 

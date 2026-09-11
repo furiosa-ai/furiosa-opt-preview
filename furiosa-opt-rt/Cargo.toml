@@ -1,8 +1,9 @@
 [package]
 name = "furiosa-opt-rt"
-version = "0.1.0+ga31451a4"
+version = "0.1.0+gadf108b1"
 edition = "2024"
 license = "Apache-2.0"
+description = "Host runtime for executing Furiosa Opt device functions on Furiosa NPUs."
 include = ["Cargo.toml", "README.md", "DESIGN.md", "build.rs", "src/", "prebuilt/"]
 
 [dependencies]

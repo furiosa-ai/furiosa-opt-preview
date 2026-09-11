@@ -8,25 +8,26 @@ type Slice = m![Tok % 8 # 256];
 /// Exposes every weight group by fully unrolling the group loop.
 #[device(chip = 1)]
 pub fn unrolled(
-    ctx: &mut Context,
+    device: &mut Device,
     activation: &HbmTensor<bf16, Chip, m![Tok, Red]>,
     weight: &HbmTensor<bf16, Chip, m![Group, Out, Red]>,
 ) -> HbmTensor<bf16, Chip, m![Tok, Group, Out]> {
-    let activation: DmTensor<bf16, Chip, Cluster, Slice, m![Red]> = activation.to_dm(&mut ctx.tdma);
-    let weight: DmTensor<bf16, Chip, Cluster, Slice, m![Group, Out, Red]> = weight.to_dm(&mut ctx.tdma);
+    let activation: DmTensor<bf16, Chip, Cluster, Slice, m![Red]> = activation.to_dm(&mut device.tdma);
+    let weight: DmTensor<bf16, Chip, Cluster, Slice, m![Group, Out, Red]> = weight.to_dm(&mut device.tdma);
     let mut output: DmTensor<bf16, Chip, Cluster, Slice, m![Group, Out]> = DmTensor::new();
 
     #[unroll]
     for g in 0..Group::SIZE {
         let weight_group = weight.view().tile::<m![Group], 1, m![1 # 20, Out, Red]>(g);
-        let weight_trf: TrfTensor<bf16, Chip, Cluster, Slice, m![Out], m![Red]> = ctx
+        let weight_trf: TrfTensor<bf16, Chip, Cluster, Slice, m![Out], m![Red]> = device
             .sub
             .begin(weight_group)
             .fetch::<m![Out, Red / 16], m![Red % 16]>()
             .collect::<m![Out, Red / 16], m![Red % 16]>()
             .to_trf();
 
-        ctx.main
+        device
+            .main
             .begin(activation.view())
             .fetch::<m![Red / 16], m![Red % 16]>()
             .collect::<m![Red / 16], m![Red % 16]>()
@@ -40,6 +41,6 @@ pub fn unrolled(
     }
 
     let mut result = HbmTensor::<bf16, Chip, m![Tok, Group, Out]>::new();
-    output.view().to_hbm_view(&mut ctx.tdma, result.view_mut());
+    output.view().to_hbm_view(&mut device.tdma, result.view_mut());
     result
 }

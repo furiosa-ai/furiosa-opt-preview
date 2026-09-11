@@ -109,8 +109,8 @@ fn fetch_with_type_cast<'l, const T: Tu>(
     input.fetch::<m![1], m![A]>().fetch_cast::<i32>()
 }
 #
-# let mut ctx = Context::acquire();
-# let x: BeginTensor<'_, _, i8, m![1], m![1], m![1], m![1], m![A]> = BeginTensor::new(&mut ctx.main, Tensor::zero());
+# let mut device = Device::new(Topology { chips: 1, pes: 8 }).unwrap();
+# let x: BeginTensor<'_, _, i8, m![1], m![1], m![1], m![1], m![A]> = BeginTensor::new(&mut device.main, Tensor::zero());
 # let _o = fetch_with_type_cast(x);
 ```
 

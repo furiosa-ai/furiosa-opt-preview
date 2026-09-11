@@ -1,108 +1,64 @@
 use furiosa_mapping::M;
+use furiosa_opt_rt::Buffer;
 
-use super::ffi::furiosa_npu_buffer_offset;
-use super::{Binding, Kernel};
-use crate::runtime::DeviceSend;
+use super::Function;
+use crate::Error;
+use crate::runtime::{Buffers, DeviceSend};
 use crate::scalar::Scalar;
-use crate::tensor::Tensor;
 use crate::tensor::memory::HbmTensor;
 
-impl<D: Scalar, Chip: M, Element: M> From<Binding> for HbmTensor<D, Chip, Element> {
-    fn from(binding: Binding) -> Self {
-        let addr = unsafe { furiosa_npu_buffer_offset(binding.as_ptr()) };
-        Self::from_parts(Tensor::zeroed(), Some(addr)).owns(binding)
+impl<D: Scalar, Chip: M, Element: M> From<Buffer> for HbmTensor<D, Chip, Element> {
+    fn from(buffer: Buffer) -> Self {
+        HbmTensor::unbacked().placed(buffer)
     }
 }
 
-/// Reconstructs a device-function return value from output bindings in declaration order.
+/// Reconstructs a device-function return value from output buffers in declaration order.
 pub trait DeviceOutput: DeviceSend + Sized {
-    /// Number of leaf output bindings this value owns.
-    fn count() -> usize;
-    /// Allocates this value's output bindings on `kernel`.
-    fn alloc_into(kernel: &Kernel, bindings: &mut Vec<Binding>);
-    /// Rebuilds the value by taking bindings in output order.
-    fn take(bindings: &mut impl Iterator<Item = Binding>) -> Self;
-
-    /// Allocates all output bindings.
-    fn alloc(kernel: &Kernel) -> Vec<Binding> {
-        let mut bindings = Vec::with_capacity(Self::count());
-        Self::alloc_into(kernel, &mut bindings);
-        bindings
-    }
+    /// Allocates this value's output buffers on `function`, pushing them onto `buffers`.
+    fn alloc_into(function: &Function, buffers: &mut Buffers) -> Result<(), Error>;
+    /// Rebuilds the value by taking buffers in output order.
+    fn take(buffers: &mut impl Iterator<Item = Buffer>) -> Self;
 }
 
 impl DeviceOutput for () {
-    fn count() -> usize {
-        0
+    fn alloc_into(_: &Function, _: &mut Buffers) -> Result<(), Error> {
+        Ok(())
     }
 
-    fn alloc_into(_: &Kernel, _: &mut Vec<Binding>) {}
-
-    fn take(_: &mut impl Iterator<Item = Binding>) {}
+    fn take(_: &mut impl Iterator<Item = Buffer>) {}
 }
 
 impl<D: Scalar, Chip: M, Element: M> DeviceOutput for HbmTensor<D, Chip, Element> {
-    fn count() -> usize {
-        1
+    fn alloc_into(function: &Function, buffers: &mut Buffers) -> Result<(), Error> {
+        buffers.push(function.alloc(Function::device_bytes::<Chip>(Self::size()))?);
+        Ok(())
     }
 
-    fn alloc_into(kernel: &Kernel, bindings: &mut Vec<Binding>) {
-        bindings.push(kernel.alloc_binding(Self::size()));
-    }
-
-    fn take(bindings: &mut impl Iterator<Item = Binding>) -> Self {
-        bindings.next().expect("HbmTensor output is missing its binding").into()
+    fn take(buffers: &mut impl Iterator<Item = Buffer>) -> Self {
+        buffers.next().expect("HbmTensor output is missing its buffer").into()
     }
 }
 
 macro_rules! impl_device_output_tuple {
     () => {};
-    (($T0:ident, $t0:ident) $(, ($T:ident, $t:ident))*) => {
-        impl<$T0 $(, $T)*> DeviceOutput for ($T0, $($T,)*)
-        where
-            $T0: DeviceOutput $(, $T: DeviceOutput)*,
-        {
-            fn count() -> usize {
-                $T0::count() $(+ $T::count())*
+    ($T0:ident $(, $T:ident)*) => {
+        impl<$T0: DeviceOutput $(, $T: DeviceOutput)*> DeviceOutput for ($T0, $($T,)*) {
+            fn alloc_into(function: &Function, buffers: &mut Buffers) -> Result<(), Error> {
+                $T0::alloc_into(function, buffers)?;
+                $( $T::alloc_into(function, buffers)?; )*
+                Ok(())
             }
 
-            fn alloc_into(kernel: &Kernel, bindings: &mut Vec<Binding>) {
-                $T0::alloc_into(kernel, bindings);
-                $( $T::alloc_into(kernel, bindings); )*
-            }
-
-            fn take(bindings: &mut impl Iterator<Item = Binding>) -> Self {
-                ($T0::take(bindings), $($T::take(bindings),)*)
+            fn take(buffers: &mut impl Iterator<Item = Buffer>) -> Self {
+                ($T0::take(buffers), $($T::take(buffers),)*)
             }
         }
 
-        impl_device_output_tuple!($(($T, $t)),*);
+        impl_device_output_tuple!($($T),*);
     };
 }
 
 impl_device_output_tuple!(
-    (T0, t0),
-    (T1, t1),
-    (T2, t2),
-    (T3, t3),
-    (T4, t4),
-    (T5, t5),
-    (T6, t6),
-    (T7, t7),
-    (T8, t8),
-    (T9, t9),
-    (T10, t10),
-    (T11, t11),
-    (T12, t12),
-    (T13, t13),
-    (T14, t14),
-    (T15, t15),
-    (T16, t16),
-    (T17, t17),
-    (T18, t18),
-    (T19, t19),
-    (T20, t20),
-    (T21, t21),
-    (T22, t22),
-    (T23, t23)
+    T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, T22, T23
 );

@@ -6,20 +6,143 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
-## [v0.7.0]
+## [v0.8.0]
+
+### Added
+
+- `HbmTensor::hbm_chip_shuffle` and `HbmTensorView::hbm_chip_shuffle` compile; only the view API
+  existed before, and it reached MIR only.
+- `DmTensor` and `DmTensorView` provide `chip_shuffle`, `cluster_swap`,
+  `chip_slice::<Axis, Output>`, and `cluster_slice::<Axis, Output>`. Each slice call declares its
+  resulting `Element` mapping, and these methods build a redistribution that `to_dm` or
+  `to_dm_view` fuses into one SRAM DMA. Repeated slice calls can remove independently located axes.
+- `DmTensor::{asymmetric_chip_slice,asymmetric_cluster_slice}` select one local slice per dimension index
+  through the sub-context.
+- `furiosa-opt-examples` provides separate chip- and cluster-reduction examples for ReduceScatter,
+  AllGather, ring-style AllReduce, and Butterfly AllReduce.
+- The fetch-size rule is published as `config_fetch_volume` / `FetchContext` in `furiosa-opt-lower`.
+  A fetch narrower than one SRAM access word is legal when the cast widens the payload back to
+  whole words, which the compiler used to reject.
+- `furiosa-opt-rt`: `Device::open(topology)` for a set of chips and
+  `Device::builder(topology)` to set the per-launch `timeout`; `Function::load` from a device
+  function's image; `Function::launch(inputs, outputs)` awaiting a `Launch`; and
+  `Function::profiled(level)` returning the spans of one launch. Host memory goes through
+  `Pinned<[T]>` and `Device::write`/`read` over `(bytes, view)` pairs, where a `Buffer` view is
+  a `slice`, the buffer `on` one chip, or `on_all`.
+- `Device::launch(function, args)` launches with the context as the function's first parameter:
+  `device.launch(f, (&a, &b))` is `launch(f, (&mut device, &a, &b))`.
+- A task panic reports its message: the firmware sends it with the failing code, and the host error
+  shows it.
+- `HostTensor::pinned()` moves a tensor into page-locked memory, and `to_hbm(..).output(&mut hbm)` /
+  `to_host(..).output(&mut host)` transfer into an existing tensor. A transfer to or from pinned
+  memory is the DMA's direct source or destination; pageable memory has its pages pinned on every
+  call, which costs a few microseconds per page.
+- The firmware on each cluster logs through `log`, at the level the host process's logger allows
+  for the `furiosa_opt_firmware` target; the lines appear in the driver's `pe_log` debugfs files.
+  At `debug` every launch reports its setup time and its tasks' time.
+- Device parameters support fixed-size arrays and borrowed, nested structs.
+  Runtime loop indices can select tensor references such as `model.layers[index].weight.x`.
+- Mapping factors accept generic axes and parenthesized counts, such as `m![Width / Factor]`
+  and `m![Width / (Width / 256)]`.
+- `#[unroll]` fully expands a static `for` loop before scheduling. See [Unroll a loop](https://furiosa-ai.github.io/furiosa-opt/scheduling/tuning.html#unroll-a-loop).
+- `DmTensorViewMut::slice_tile` creates mutable slice views.
+  Indexed writes through these views are not yet supported by NPU compilation.
 
 ### Changed
 
+Breaking changes come first, each with what to write instead.
+
+- A chip is a chip and a device is a device. `#[device(chip, pe)]` declares chips of PEs, so the
+  runtime counts `Topology { chips, pes }` where it said `devices`, ranks a `ChipRank` where it said
+  `DeviceRank`, holds `CHIP_PES` where it held `DEVICE_PES`, and reads `FURIOSA_VISIBLE_CHIPS` where
+  it read `FURIOSA_VISIBLE_DEVICES`.
+- `Error::Chips` is what a failure to open the chips is called, where it was `Error::Group`.
+- `FunctionError::WrongTopology` names its `image_chips` the chips its message already called
+  chips, where the field said `image_devices`.
+- `Device` is what a process opens and what a device function runs on, replacing both `Context` and
+  the `DeviceGroup` that only existed because `Device` named a chip. `Device::new(topology)` opens
+  chips of its own, so two devices of one topology hold different PEs, and a device function's first
+  parameter is `&mut Device`. `Context` survives where it is one: the tensor-unit and DMA contexts a
+  device carries, `main`, `sub`, `tdma` and `pdma`.
+- One `Topology`, in `furiosa-opt-rt` and re-exported by `furiosa-opt-std`, which held a second
+  copy of the same two fields. Naming exact chips is `Builder::among`'s, so the variant that
+  carried a chip list is gone with the conversion that was its only constructor.
+- `TuContext::{parallel_copy_chip_slice,parallel_copy_cluster_slice}` are replaced by
+  `DmTensor::{asymmetric_chip_slice,asymmetric_cluster_slice}`. The input tensor is now the receiver,
+  the sub-context is the first argument, and the input scalar and dimension types plus the number of
+  slice indices are inferred instead of supplied as generic arguments.
+- `DmTensorView::{dm_chip_shuffle,dm_cluster_swap}` are replaced by the staged
+  `chip_shuffle(...).to_dm(...)` and `cluster_swap().to_dm(...)` forms. Use `to_dm_view` as the
+  terminal operation to write into an existing view, and start the same operations directly from a
+  `DmTensor` when no explicit view is needed.
+- `VectorInitTensor::vector_intra_slice_unzip` infers the group-tiled input `Time` mapping. Calls now
+  provide only the axis name and output `Time` mapping, for example
+  `vector_intra_slice_unzip::<I, m![R]>()` instead of
+  `vector_intra_slice_unzip::<I, m![R, 1 # 2], m![R]>()`.
+- `DmTensor::to_dm` can relayout every DM dimension. Its generic arguments are now
+  `<Chip2, Cluster2, Slice2, Element2>` instead of `<Slice2, Element2>`; unchanged dimensions can be
+  repeated explicitly or inferred with `_` from the expected output type.
 - The device-call ABI now uses `Binding`, structural `Bindings`, and `DeviceOutput`; `Buffer`,
   `BufferList`, `FixedBufferList`, `KernelOutput`, and `KernelOutputDestination` are gone. Derived
   `DeviceSend` implementations update automatically. Manual implementations must return
   `impl __private::Bindings` from `bind()`, and manual `DeviceFn` output types must implement both
   `DeviceSend` and `__private::DeviceOutput`.
+- A DM-producing slice now requires an 8-byte-aligned `AxisToSlice` stride. An asymmetric slice
+  additionally requires that axis to be outermost in `Element`, and a chip shuffle requires a
+  permutation of the tensor's chips. Redistribution source and slice indices must be compile-time
+  constants. Invalid mappings no longer reach hardware as a different operation than the kernel
+  declared.
+- A launch and a transfer return `Result`: `launch(f, args).await`, `device.launch`, `to_hbm`,
+  `to_host`, their `.output(..)` forms and `Device::acquire` are `Result<_, furiosa_opt_std::Error>`
+  on every backend. A queue that is full, a device that fails or times out, memory that runs out,
+  an HBM tensor never placed by `to_hbm`, or a device function the binary has no image for is an
+  error the caller handles, not a panic. `#[derive(DeviceSend)]` follows: `bind` returns `Result`.
+- `Device::new(function.topology())` names the device group it opens, where
+  `Device::new()` returned a process-wide context and left the device to `Acquired::bind`.
+  `#[device]` gives every function a `topology()`, and `Acquired` is gone with the singleton it
+  guarded. Each acquisition opens a group of its own, so two contexts of one topology hold
+  different PEs.
+- A device function's image records the topology it was compiled for and what each argument slot
+  must hold; a runtime rejects an image for another topology at load and a smaller buffer at
+  launch.
+- Device functions run on the standalone `furiosa-opt-rt` runtime instead of the vendored device
+  runtime. Each NPU boots a signed bootloader and the runtime's own firmware, so a launch no longer
+  crosses a runtime process; a launch from an idle device takes tens of microseconds.
+  `furiosa-opt-rt` is a dependency of `furiosa-opt-std` on Linux NPU builds. The public runtime
+  embeds the vendor-built firmware image; its source is not part of the public distribution.
+- Profiling turns on with `FURIOSA_OPT_PROFILE`, not `TUC_PROFILE_LEVEL`; the `span::npu` tracing
+  target is unchanged. An invalid level or one the image cannot provide emits a warning and runs
+  the function unprofiled instead of panicking.
+- The device function image format is ABI 1 of the new runtime: chunked tasks aligned to 256 bytes
+  with a 1 MiB chunk limit, and a profile section sized by depth. `cargo furiosa-opt` lowers the
+  limit with `FURIOSA_OPT_CHUNK_LIMIT` for tests that need several chunks.
+- Primitive scalars no longer implement `DeviceSend`. Pass runtime data through HBM tensors
+  and use const generics for compile-time values.
+- `Kernel::alloc` is renamed to `alloc_binding`; use `launch` in place of `Kernel::run`.
+- `Stride`, `Modulo`, `Resize`, and `Padding` take a mapping type as their factor: replace `N`
+  with `Broadcast<N>`. Existing literal and escaped-constant `m!` / `i!` syntax is unchanged.
+- `TableLookup` is renamed to `TableLookupCast`; update imports and trait bounds.
+  Calls to `fetch_table_lookup()` are unchanged.
+- Replace `commit_view::<Element>(dst)` with `commit_view::<_, Element>(dst)` or `commit_view(dst)`.
+  Compatible destination slice mappings may now use different padding kinds.
+- `Mapping` debug output uses the same mapping notation as `Display`.
+
+### Fixed
+
+- Fixed incorrect rejection of custom broadcasts with padded destination slices.
+- Fixed a compilation failure during cycle estimation for some contraction kernels.
+- Unsupported scalar conversions report the supported types at the call site.
+- Empty or malformed `m!` and `i!` expressions report errors at the macro invocation.
+
+## [v0.7.0]
+
+### Changed
+
 - `launch(function, args)` now returns a `Launch` builder that runs when awaited. Existing
   `launch(function, args).await` calls are unchanged; code that passes the un-awaited value to an
   API requiring `Future` must call `.into_future()`. `DeviceFn` implementations generated by
   `#[device]` also support `launch(function, args).output(&mut output).await`, which binds existing
-  output HBM in NPU builds instead of allocating new output bindings for each launch. Manual
+  output HBM in NPU builds instead of allocating new output buffers for each launch. Manual
   `DeviceFn` implementations keep working through the default allocate-and-assign implementation.
 - `vector_intra_slice_reduce` is no longer available in pair mode, before or after the `_zip`. The
   reducer takes no group condition, so it cannot fold only the group a `_zip` wrote. The call no
@@ -44,7 +167,6 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   such as a Python wheel's extension module), and launches of kernels another crate defines.
 - `DmTensorView::dm_cluster_swap` swaps two clusters and lowers to EDF, with
   VISA/LIR/EDF regression coverage.
-- `#[unroll]` fully expands a static `for` loop before scheduling. See [Unroll a loop](https://furiosa-ai.github.io/furiosa-opt/scheduling/tuning.html#unroll-a-loop).
 - The Transpose Engine accepts doubled input packing for 8-bit and 16-bit elements. A packet can
   now contribute 16 valid elements per cycle, and vISA lowering emits the corresponding
   `fetch_in_width_shift`; 4-bit and 32-bit doubled packing remain unsupported.
@@ -100,7 +222,7 @@ Breaking changes come first, each with what to write instead.
   (`cargo furiosa-opt build`/`test`); `compile` stays the direct artifact tool for concrete fns.
 
 - `furiosa-opt-examples` now holds only kernels that compile end to end, plus a `negative` module of
-  fixtures that must be refused. Legal programs the compiler cannot lower to an EDF yet (`matmul`,
+  fixtures that must be refused. Legal functions the compiler cannot lower to an EDF yet (`matmul`,
   `attention`, `vrf_add`, the value-form `runtime_if`, and the parallel-copy and shuffle transfers)
   moved out of the crate, so an example you find here compiles unless it is under `negative`.
 
@@ -128,7 +250,7 @@ Breaking changes come first, each with what to write instead.
 - All four baked table-lookup conversions work: `f4e2m1` to `f8e4m3` or `f8e5m2`, and `f8e4m3` to `bf16` or `f8e5m2` to `f32`. Two of the four used to fail to compile.
 - `FetchCast` gains `i16 -> i32` and `f32 -> bf16`.
 - `Tensor::contraction_prewidened`, for writing a host answer key whose operands are already at the accumulator width. `Tensor::contraction` still takes operand-width input and accumulates at `ContractionCast::Output`.
-- `FURIOSA_VISIBLE_DEVICES` (comma-separated chip ids) restricts which chips a process will acquire, so two runs can pin disjoint chips instead of racing for the lowest free one. Unset or empty keeps every exposed chip a candidate.
+- `FURIOSA_VISIBLE_CHIPS` (comma-separated chip ids) restricts which chips a process will acquire, so two runs can pin disjoint chips instead of racing for the lowest free one. Unset or empty keeps every exposed chip a candidate.
 
 ### Fixed
 

@@ -82,11 +82,11 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
     }
 
     #[doc(hidden)]
-    pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+    pub(crate) fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
         Self::check_constraints();
 
         Self {
-            ctx,
+            device,
             inner,
             _position: PhantomData,
         }
@@ -112,11 +112,11 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
     }
 
     #[doc(hidden)]
-    pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+    pub(crate) fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
         Self::check_constraints();
 
         Self {
-            ctx,
+            device,
             inner,
             _position: PhantomData,
         }
@@ -142,11 +142,11 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
     }
 
     #[doc(hidden)]
-    pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+    pub(crate) fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
         Self::check_constraints();
 
         Self {
-            ctx,
+            device,
             inner,
             _position: PhantomData,
         }
@@ -169,7 +169,7 @@ impl<'l, const T: Tu, P: CanApplyFetchMask, D: Scalar, Chip: M, Cluster: M, Slic
         self,
     ) -> FetchMaskTensor<'l, T, D, Chip, Cluster, Slice, OutTime, OutPacket, B> {
         verify_fetch_mask::<Time, Packet, OutTime, OutPacket>();
-        FetchMaskTensor::new(self.ctx, self.inner.transpose(true))
+        FetchMaskTensor::new(self.device, self.inner.transpose(true))
     }
 }
 // ANCHOR_END: fetch_mask_impl
@@ -212,7 +212,7 @@ impl<
     where
         D: TableLookupCast<OutD>,
     {
-        FetchTableLookupTensor::new(self.ctx, self.inner.map(|v| v.lookup()))
+        FetchTableLookupTensor::new(self.device, self.inner.map(|v| v.lookup()))
     }
 }
 // ANCHOR_END: fetch_table_lookup_impl
@@ -240,7 +240,7 @@ impl<
     where
         D: FetchCast<OutD>,
     {
-        FetchCastTensor::new(self.ctx, self.inner.map(|v| v.cast()))
+        FetchCastTensor::new(self.device, self.inner.map(|v| v.cast()))
     }
 }
 // ANCHOR_END: fetch_cast_impl
@@ -266,11 +266,11 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
     }
 
     #[doc(hidden)]
-    pub(crate) fn new(ctx: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+    pub(crate) fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
         Self::check_constraints();
 
         Self {
-            ctx,
+            device,
             inner,
             _position: PhantomData,
         }
@@ -316,7 +316,7 @@ impl<
             zero_point_range.contains(&zero_point),
             "zero_point {zero_point} is outside the source type's quantized range {zero_point_range:?}",
         );
-        FetchZeroPointSubTensor::new(self.ctx, self.inner.map(|v| v.zero_point_sub(zero_point)))
+        FetchZeroPointSubTensor::new(self.device, self.inner.map(|v| v.zero_point_sub(zero_point)))
     }
 }
 // ANCHOR_END: fetch_zero_point_sub_impl

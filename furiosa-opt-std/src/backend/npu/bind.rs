@@ -1,100 +1,73 @@
 use furiosa_mapping::M;
+use furiosa_opt_rt::Buffer;
 
-use super::Binding;
-use super::ffi::{furiosa_npu_buffer_from, rt};
+use crate::Error;
 use crate::backend::Backend;
-use crate::runtime::DeviceSend;
+use crate::runtime::{Buffers, DeviceSend};
 use crate::scalar::Scalar;
-use crate::tensor::memory::{Address, HbmTensor, HbmTensorView, HbmTensorViewMut};
+use crate::tensor::memory::{HbmTensor, HbmTensorView, HbmTensorViewMut};
 
-fn to_binding(address: Option<Address>, len: usize) -> Binding {
-    // Cpu and compiler-placed tensors have no host-visible address. Such a value cannot cross this
-    // adapter, which is reached only when a host NPU launch binds an existing HBM allocation.
-    let Some(address) = address else {
-        panic!("NPU launch arguments must name a host-placed HBM allocation");
-    };
-    Binding::from_raw(unsafe { furiosa_npu_buffer_from(rt(), address, len) })
-}
-
-impl<D: Scalar, Chip: M, Element: M, B: Backend> From<&HbmTensor<D, Chip, Element, B>> for Binding {
-    fn from(tensor: &HbmTensor<D, Chip, Element, B>) -> Self {
-        to_binding(tensor.address(), HbmTensor::<D, Chip, Element, B>::size())
-    }
-}
-
-impl<D: Scalar, Chip: M, Element: M, B: Backend> From<&HbmTensorView<'_, D, Chip, Element, B>> for Binding {
-    fn from(view: &HbmTensorView<'_, D, Chip, Element, B>) -> Self {
-        to_binding(view.address(), view.addressable_len())
-    }
-}
-
-impl<D: Scalar, Chip: M, Element: M, B: Backend> From<&HbmTensorViewMut<'_, D, Chip, Element, B>> for Binding {
-    fn from(view: &HbmTensorViewMut<'_, D, Chip, Element, B>) -> Self {
-        to_binding(view.address(), view.addressable_len())
-    }
+/// Cpu and compiler-placed tensors have no device allocation, so a host launch cannot name them.
+fn placed(buffer: Option<Buffer>, buffers: &mut Buffers) -> Result<(), Error> {
+    buffers.push(buffer.ok_or(Error::Unplaced)?);
+    Ok(())
 }
 
 impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend for HbmTensor<D, Chip, Element, B> {
-    fn bind(&self) -> impl crate::__private::Bindings {
-        Binding::from(self)
+    fn bind(&self, buffers: &mut Buffers) -> Result<(), Error> {
+        placed(self.buffer().cloned(), buffers)
     }
 }
 
 impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend for HbmTensorView<'_, D, Chip, Element, B> {
-    fn bind(&self) -> impl crate::__private::Bindings {
-        Binding::from(self)
+    fn bind(&self, buffers: &mut Buffers) -> Result<(), Error> {
+        placed(self.buffer(), buffers)
     }
 }
 
 impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend for HbmTensorViewMut<'_, D, Chip, Element, B> {
-    fn bind(&self) -> impl crate::__private::Bindings {
-        Binding::from(self)
+    fn bind(&self, buffers: &mut Buffers) -> Result<(), Error> {
+        placed(self.buffer(), buffers)
     }
 }
 
 impl DeviceSend for () {
-    fn bind(&self) -> impl crate::__private::Bindings {
-        crate::__private::empty()
+    fn bind(&self, _: &mut Buffers) -> Result<(), Error> {
+        Ok(())
     }
 }
 
 impl<T> DeviceSend for std::marker::PhantomData<T> {
-    fn bind(&self) -> impl crate::__private::Bindings {
-        crate::__private::empty()
+    fn bind(&self, _: &mut Buffers) -> Result<(), Error> {
+        Ok(())
     }
 }
 
 impl<T: DeviceSend + ?Sized> DeviceSend for &T {
-    fn bind(&self) -> impl crate::__private::Bindings {
-        T::bind(self)
+    fn bind(&self, buffers: &mut Buffers) -> Result<(), Error> {
+        T::bind(self, buffers)
     }
 }
 
 impl<T: DeviceSend + ?Sized> DeviceSend for &mut T {
-    fn bind(&self) -> impl crate::__private::Bindings {
-        T::bind(self)
+    fn bind(&self, buffers: &mut Buffers) -> Result<(), Error> {
+        T::bind(self, buffers)
     }
 }
 
 impl<T: DeviceSend, const N: usize> DeviceSend for [T; N] {
-    fn bind(&self) -> impl crate::__private::Bindings {
-        std::array::from_fn::<_, N, _>(|index| self[index].bind())
+    fn bind(&self, buffers: &mut Buffers) -> Result<(), Error> {
+        self.iter().try_for_each(|value| value.bind(buffers))
     }
-}
-
-macro_rules! concat_value {
-    () => { crate::__private::empty() };
-    ($head:ident $(, $tail:ident)*) => {
-        crate::__private::join($head.bind(), concat_value!($($tail),*))
-    };
 }
 
 macro_rules! impl_device_send_tuple {
     ($($ty:ident : $value:ident),+ $(,)?) => {
         impl<$($ty: DeviceSend),+> DeviceSend for ($($ty,)+) {
-            fn bind(&self) -> impl crate::__private::Bindings {
+            fn bind(&self, buffers: &mut Buffers) -> Result<(), Error> {
                 let ($($value,)+) = self;
-                concat_value!($($value),+)
+                $($value.bind(buffers)?;)+
+                Ok(())
             }
         }
     };

@@ -40,7 +40,7 @@ Use `#[unroll]` to expose every iteration of a small static loop to the schedule
 # axes![Group = 4];
 # fn consume(_: usize) {}
 # #[device]
-# fn example() {
+# fn example(_: &mut Device) {
 #[unroll]
 for group in 0..Group::SIZE {
     consume(group);
@@ -48,7 +48,8 @@ for group in 0..Group::SIZE {
 # }
 # #[tokio::main]
 # async fn main() {
-#     launch(example, ()).await;
+#     let mut device = Device::new(example.topology()).unwrap();
+#     launch(example, &mut device).await.unwrap();
 # }
 ```
 
@@ -99,10 +100,10 @@ Therefore, `Contraction(i)` and `StoTrf(i + 1)` cannot overlap.
 {{#include ../../../furiosa-opt-examples/src/double_buffering/rolled_kernel.rs:2:}}
 # #[tokio::main]
 # async fn main() {
-# let mut ctx = Context::acquire();
+# let mut device = Device::new(rolled.topology()).unwrap();
 # let activation = HbmTensor::<bf16, m![1], m![Tok, Red]>::new();
 # let weight = HbmTensor::<bf16, m![1], m![Group, Out, Red]>::new();
-# let _output = launch(rolled, (&mut ctx, &activation, &weight)).await;
+# let _output = launch(rolled, (&mut device, &activation, &weight)).await.unwrap();
 # }
 ```
 
@@ -124,10 +125,10 @@ This makes `Contraction(first)` and `StoTrf(second)` available to the scheduler 
 {{#include ../../../furiosa-opt-examples/src/double_buffering/software_pipelined_kernel.rs:2:}}
 # #[tokio::main]
 # async fn main() {
-# let mut ctx = Context::acquire();
+# let mut device = Device::new(software_pipelined.topology()).unwrap();
 # let activation = HbmTensor::<bf16, m![1], m![Tok, Red]>::new();
 # let weight = HbmTensor::<bf16, m![1], m![Group, Out, Red]>::new();
-# let _output = launch(software_pipelined, (&mut ctx, &activation, &weight)).await;
+# let _output = launch(software_pipelined, (&mut device, &activation, &weight)).await.unwrap();
 # }
 ```
 
@@ -148,10 +149,10 @@ This makes `Contraction(first)` and `StoTrf(second)` available to the scheduler 
 {{#include ../../../furiosa-opt-examples/src/double_buffering/unrolled_kernel.rs:2:}}
 # #[tokio::main]
 # async fn main() {
-# let mut ctx = Context::acquire();
+# let mut device = Device::new(unrolled.topology()).unwrap();
 # let activation = HbmTensor::<bf16, m![1], m![Tok, Red]>::new();
 # let weight = HbmTensor::<bf16, m![1], m![Group, Out, Red]>::new();
-# let _output = launch(unrolled, (&mut ctx, &activation, &weight)).await;
+# let _output = launch(unrolled, (&mut device, &activation, &weight)).await.unwrap();
 # }
 ```
 

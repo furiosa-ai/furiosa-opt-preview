@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-opt-examples"
-version = "0.8.0+g3f9d4af4"
+version = "0.8.0+g8c736f31"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
@@ -14,7 +14,6 @@ furiosa-opt-std = { path = "../furiosa-opt-std", version = "0.8" }
 criterion = { workspace = true }
 env_logger = { workspace = true }
 eyre = { workspace = true }
-half = { workspace = true }
 rand = { workspace = true }
 safetensors = { workspace = true }
 tokio = { workspace = true }

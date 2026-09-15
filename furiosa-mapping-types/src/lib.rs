@@ -39,15 +39,12 @@ pub struct Ident(&'static str);
 impl Ident {
     /// Creates a new identifier.
     ///
-    /// The identifier must start with an uppercase ASCII letter and contain
-    /// only ASCII alphanumeric characters, underscores.
+    /// The identifier must start with an ASCII letter and contain only ASCII
+    /// alphanumeric characters or underscores.
     pub const fn new(s: &'static str) -> Self {
         let b = s.as_bytes();
         assert!(!b.is_empty(), "Ident must not be empty");
-        assert!(
-            b[0].is_ascii_uppercase(),
-            "Ident must start with an uppercase ASCII letter"
-        );
+        assert!(b[0].is_ascii_alphabetic(), "Ident must start with an ASCII letter");
         let mut i = 1;
         while i < b.len() {
             assert!(
@@ -135,6 +132,19 @@ impl<'a> TryFrom<&'a str> for Ident {
         let key = INTERNER.get_or_intern(value);
         let interned: &'static str = INTERNER.resolve(&key);
         std::panic::catch_unwind(|| Self::new(interned)).map_err(|_| value)
+    }
+}
+
+#[cfg(test)]
+mod ident_tests {
+    use super::Ident;
+
+    #[test]
+    fn lowercase_identifier_is_preserved() {
+        let ident = Ident::try_from("axis_1").unwrap();
+
+        assert_eq!(ident, Ident::new("axis_1"));
+        assert_eq!(ident.as_str(), "axis_1");
     }
 }
 

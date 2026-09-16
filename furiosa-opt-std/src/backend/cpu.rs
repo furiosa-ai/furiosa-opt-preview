@@ -5,7 +5,7 @@ use crate::Error;
 use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::BufStorage;
 use crate::tensor::Tensor;
-use crate::tensor::memory::{HbmTensor, HostTensor};
+use crate::tensor::memory::{HbmScalar, HbmTensor, HostTensor};
 
 use crate::backend::Backend;
 use crate::cast::{ContractionAccumulator, ContractionCast};
@@ -175,6 +175,22 @@ impl Backend for Cpu {
         hbm: &mut HbmTensor<D, Chip, Element2, Self>,
     ) -> Result<(), Error> {
         *hbm = Self::to_hbm(host, dma).await?;
+        Ok(())
+    }
+
+    async fn to_hbm_scalar<D: crate::scalar::RuntimeScalar>(
+        value: D,
+        _dma: &DmaContext<{ Dma::Pcie }, Self>,
+    ) -> Result<HbmScalar<D, Self>, Error> {
+        Ok(HbmScalar::from_value(value))
+    }
+
+    async fn to_hbm_scalar_into<D: crate::scalar::RuntimeScalar>(
+        value: D,
+        _dma: &DmaContext<{ Dma::Pcie }, Self>,
+        hbm: &mut HbmScalar<D, Self>,
+    ) -> Result<(), Error> {
+        hbm.set_value(value);
         Ok(())
     }
 

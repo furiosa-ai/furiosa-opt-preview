@@ -31,6 +31,7 @@ pub mod matmul;
 pub mod memory_op;
 pub mod memset;
 pub mod mnist;
+pub mod moe;
 pub mod negative;
 pub mod padded_axis_tile;
 pub mod param;

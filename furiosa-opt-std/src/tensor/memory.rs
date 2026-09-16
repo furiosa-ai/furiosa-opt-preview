@@ -1,8 +1,10 @@
 //! Tensors placed on memory.
 
 mod dma_layout;
+mod hbm_scalar;
 mod redistribute;
 
+pub use hbm_scalar::HbmScalar;
 pub use redistribute::*;
 
 use dma_layout::{assert_dm_dma_layout, assert_dma_layout};

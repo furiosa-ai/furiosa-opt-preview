@@ -17,6 +17,7 @@ impl Span {
 /// First-fit allocator over one span of a device memory window, tracking free spans in address
 /// order.
 pub(crate) struct Allocator {
+    capacity: usize,
     free: Vec<Span>,
 }
 
@@ -25,8 +26,20 @@ impl Allocator {
     pub(crate) fn new(free: Range<usize>) -> Self {
         let at = free.start.next_multiple_of(ALIGN);
         let end = free.end & !(ALIGN - 1);
-        let free = (end > at).then_some(Span { at, len: end - at }).into_iter().collect();
-        Self { free }
+        let capacity = end.saturating_sub(at);
+        let free = (capacity > 0)
+            .then_some(Span { at, len: capacity })
+            .into_iter()
+            .collect();
+        Self { capacity, free }
+    }
+
+    pub(crate) fn memory(&self) -> crate::Memory {
+        crate::Memory {
+            capacity: self.capacity,
+            available: self.free.iter().map(|span| span.len).sum(),
+            largest: self.free.iter().map(|span| span.len).max().unwrap_or(0),
+        }
     }
 
     pub(crate) fn alloc(&mut self, len: usize) -> Option<usize> {
@@ -91,6 +104,57 @@ impl Allocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_aligned_capacity() {
+        let allocator = Allocator::new(1000..4097);
+        let memory = allocator.memory();
+
+        assert_eq!(memory.capacity, 3072);
+        assert_eq!(memory.available, 3072);
+        assert_eq!(memory.largest, 3072);
+    }
+
+    #[test]
+    fn reports_fragmentation() {
+        let mut allocator = Allocator::new(1024..5120);
+        let first = allocator.alloc(1024).unwrap();
+        let second = allocator.alloc(1024).unwrap();
+        allocator.release(first, 1024);
+
+        let memory = allocator.memory();
+
+        assert_eq!(memory.capacity, 4096);
+        assert_eq!(memory.available, 3072);
+        assert_eq!(memory.largest, 2048);
+        assert!(allocator.alloc(memory.largest + 1).is_none());
+        assert_eq!(allocator.alloc(memory.largest), Some(second + 1024));
+    }
+
+    #[test]
+    fn reports_coalesced_space() {
+        let mut allocator = Allocator::new(0..4096);
+        let first = allocator.alloc(1024).unwrap();
+        let second = allocator.alloc(1024).unwrap();
+        allocator.release(first, 1024);
+
+        allocator.release(second, 1024);
+
+        assert_eq!(allocator.memory().available, 4096);
+        assert_eq!(allocator.memory().largest, 4096);
+    }
+
+    #[test]
+    fn reports_exhaustion() {
+        let mut allocator = Allocator::new(0..256);
+        allocator.alloc(256).unwrap();
+
+        let memory = allocator.memory();
+
+        assert_eq!(memory.capacity, 256);
+        assert_eq!(memory.available, 0);
+        assert_eq!(memory.largest, 0);
+    }
 
     #[test]
     fn reuses_released_span() {

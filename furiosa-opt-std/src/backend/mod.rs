@@ -21,8 +21,8 @@ use crate::Error;
 use crate::cast::{ContractionAccumulator, ContractionCast};
 use crate::context::{Dma, DmaContext};
 use crate::runtime::Topology;
-use crate::scalar::{MaterializableScalar, Scalar};
-use crate::tensor::memory::{HbmTensor, HostTensor};
+use crate::scalar::{MaterializableScalar, RuntimeScalar, Scalar};
+use crate::tensor::memory::{HbmScalar, HbmTensor, HostTensor};
 
 pub use cpu::Cpu;
 pub use npu::Npu;
@@ -259,6 +259,19 @@ pub trait Backend: Sized + 'static {
         host: &HostTensor<D, Element, Self>,
         dma: &DmaContext<{ Dma::Pcie }, Self>,
         hbm: &mut HbmTensor<D, Chip, Element2, Self>,
+    ) -> impl std::future::Future<Output = Result<(), Error>>;
+
+    /// Replicates one scalar into the local HBM of every device in the DMA context.
+    fn to_hbm_scalar<D: RuntimeScalar>(
+        value: D,
+        dma: &DmaContext<{ Dma::Pcie }, Self>,
+    ) -> impl std::future::Future<Output = Result<HbmScalar<D, Self>, Error>>;
+
+    /// Updates an existing replicated HBM scalar allocation.
+    fn to_hbm_scalar_into<D: RuntimeScalar>(
+        value: D,
+        dma: &DmaContext<{ Dma::Pcie }, Self>,
+        hbm: &mut HbmScalar<D, Self>,
     ) -> impl std::future::Future<Output = Result<(), Error>>;
 
     /// Transfer an HBM tensor into `host`'s own memory: pinned memory is the DMA's destination,

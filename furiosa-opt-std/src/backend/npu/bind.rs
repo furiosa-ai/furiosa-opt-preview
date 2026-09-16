@@ -5,7 +5,7 @@ use crate::Error;
 use crate::backend::Backend;
 use crate::runtime::{Buffers, DeviceSend};
 use crate::scalar::Scalar;
-use crate::tensor::memory::{HbmTensor, HbmTensorView, HbmTensorViewMut};
+use crate::tensor::memory::{HbmScalar, HbmTensor, HbmTensorView, HbmTensorViewMut};
 
 /// Cpu and compiler-placed tensors have no device allocation, so a host launch cannot name them.
 fn placed(buffer: Option<Buffer>, buffers: &mut Buffers) -> Result<(), Error> {
@@ -14,6 +14,12 @@ fn placed(buffer: Option<Buffer>, buffers: &mut Buffers) -> Result<(), Error> {
 }
 
 impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend for HbmTensor<D, Chip, Element, B> {
+    fn bind(&self, buffers: &mut Buffers) -> Result<(), Error> {
+        placed(self.buffer().cloned(), buffers)
+    }
+}
+
+impl<D: crate::scalar::RuntimeScalar, B: Backend> DeviceSend for HbmScalar<D, B> {
     fn bind(&self, buffers: &mut Buffers) -> Result<(), Error> {
         placed(self.buffer().cloned(), buffers)
     }

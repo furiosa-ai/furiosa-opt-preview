@@ -19,6 +19,17 @@ pub struct Device {
     pes: u8,
 }
 
+/// Allocator bytes per chip in the common PE-owned window, excluding driver and firmware reservations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Memory {
+    /// Initial capacity of the window, rounded down to whole allocation units.
+    pub capacity: usize,
+    /// Free bytes after subtracting live allocations and their alignment padding.
+    pub available: usize,
+    /// Largest contiguous free span; zero when exhausted, not a reservation for a later allocation.
+    pub largest: usize,
+}
+
 /// A chip's position in its device, from 0 up to [`Device::chips`]: what a transfer names a
 /// chip by, not the chip's id on the host. A device of chip 3 alone has rank 0 only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -200,6 +211,19 @@ impl Device {
         (0..self.chips()).map(ChipRank)
     }
 
+    /// Takes one allocator snapshot; fails if the allocator lock is poisoned.
+    ///
+    /// The figures describe the moment of the call and reserve nothing. An allocation between this
+    /// call and the next may take the span this reported, so a subsequent request for it can still
+    /// fail, and the caller handles that failure rather than assuming it away. Read `largest` as the
+    /// ceiling a request may start from, not as a promise it will be met.
+    pub fn memory(&self) -> Result<Memory> {
+        self.allocator
+            .lock()
+            .map(|allocator| allocator.memory())
+            .map_err(|_| Error::Memory("the allocator is poisoned".into()))
+    }
+
     /// Allocates `len` bytes of device memory at one address on every chip.
     pub fn alloc(&self, len: usize) -> Result<Buffer> {
         Buffer::alloc(&self.allocator, len)
@@ -218,5 +242,27 @@ impl Device {
     /// Copies each view into its host slice, with the same terms as [`Self::write`].
     pub async fn read(&self, pairs: impl IntoIterator<Item = (View, &mut [u8])>) -> Result<()> {
         self.engine.read(pairs).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_live_allocations() -> Result<()> {
+        let device = Device::stub(&[0, 1], 8);
+        let before = device.memory()?;
+
+        let buffer = device.alloc(257)?;
+
+        let after = device.memory()?;
+        assert_eq!(after.capacity, before.capacity);
+        assert!(before.available - after.available >= buffer.size());
+        assert_eq!(before.available - after.available, 512);
+        assert!(after.largest <= after.available);
+        drop(buffer);
+        assert_eq!(device.memory()?, before);
+        Ok(())
     }
 }

@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- `HbmScalar<T>` passes one runtime `bool`, `i32`, `u32`, `i64`, `u64`, or 64-bit `usize` value
+  from the host to every chip in a device function. Create one with `HbmScalar::from_host`, update
+  its existing HBM allocation with `write`, and load it in device code with `to_spm`.
+- Device scalar expressions support Rust integer `as` casts among `i32`, `u32`, `i64`, `u64`, and
+  `usize`. Runtime `usize` values can select tensor tiles without narrowing to `i32`.
+- A runtime scalar can guard work inside a statically bounded `for` loop, including an
+  `#[unroll]` loop. Runtime loop bounds and `break` remain unsupported; use an `if` in each
+  iteration to skip work beyond the runtime limit.
+
+## [v0.8.1]
+
+### Fixed
+
+- Ship the production-signed bootloader in runtime packages so production devices can initialize.
+- Align `furiosa-opt-rt`, `furiosa-opt-abi`, and `furiosa-opt-ipc` with the release version.
+
 ## [v0.8.0]
 
 ### Added

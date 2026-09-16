@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::Error;
 use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::BufStorage;
-use crate::tensor::memory::{HbmTensor, HostTensor};
+use crate::tensor::memory::{HbmScalar, HbmTensor, HostTensor};
 
 use super::{Function, HostBuf};
 use crate::backend::Backend;
@@ -229,6 +229,21 @@ impl Backend for Npu {
         hbm: &mut HbmTensor<D, Chip, Element2, Self>,
     ) -> Result<(), Error> {
         Function::write_into(dma, host, hbm).await
+    }
+
+    async fn to_hbm_scalar<D: crate::scalar::RuntimeScalar>(
+        value: D,
+        dma: &DmaContext<{ Dma::Pcie }, Self>,
+    ) -> Result<HbmScalar<D, Self>, Error> {
+        Function::write_scalar(dma, value).await
+    }
+
+    async fn to_hbm_scalar_into<D: crate::scalar::RuntimeScalar>(
+        value: D,
+        dma: &DmaContext<{ Dma::Pcie }, Self>,
+        hbm: &mut HbmScalar<D, Self>,
+    ) -> Result<(), Error> {
+        Function::write_scalar_into(dma, value, hbm).await
     }
 
     async fn from_hbm_into<D: MaterializableScalar, Chip: M, Element: M, Element2: M>(

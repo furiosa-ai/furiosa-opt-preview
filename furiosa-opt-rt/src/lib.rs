@@ -35,7 +35,7 @@ mod function;
 mod pinned;
 
 pub use buffer::{Buffer, View};
-pub use device::{Builder, ChipRank, Device, Topology};
+pub use device::{Builder, ChipRank, Device, Memory, Topology};
 pub use function::{Function, FunctionError, Launch, Profiled, Span, Trace};
 pub use furiosa_opt_abi::image::{self, Image};
 pub use pinned::Pinned;

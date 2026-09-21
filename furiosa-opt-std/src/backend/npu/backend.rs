@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::Error;
 use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::BufStorage;
-use crate::tensor::memory::{HbmScalar, HbmTensor, HostTensor};
+use crate::tensor::memory::{DmAllocError, DmTensor, HbmScalar, HbmTensor, HostTensor};
 
 use super::{Function, HostBuf};
 use crate::backend::Backend;
@@ -101,6 +101,24 @@ impl Backend for Npu {
     /// An unplaced handle; the compiled function places its own buffers, so this never names one.
     fn alloc_hbm<D: Scalar, Chip: M, Element: M>() -> HbmTensor<D, Chip, Element, Self> {
         HbmTensor::unbacked()
+    }
+
+    fn alloc_dm<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M>(
+        group: &Self::Device,
+    ) -> Result<DmTensor<D, Chip, Cluster, Slice, Element, Self>, DmAllocError> {
+        // One slice's bytes: a resident sits at the same address in every slice of every device.
+        let size = D::size_in_bytes_from_length(Element::SIZE);
+        let devices = group.inner().chips();
+        if Chip::SIZE != devices {
+            return Err(DmAllocError::Topology {
+                tensor_chips: Chip::SIZE,
+                device_chips: devices,
+            });
+        }
+        let buffer = group.inner().alloc(furiosa_opt_rt::image::Memory::Sram, size)?;
+        let mut tensor = DmTensor::from_parts(crate::tensor::Tensor::zeroed());
+        tensor.own(buffer);
+        Ok(tensor)
     }
 
     fn zeroed<D: Scalar>(mapping: &Mapping) -> Self::Storage<D> {

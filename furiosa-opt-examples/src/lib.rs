@@ -37,6 +37,7 @@ pub mod padded_axis_tile;
 pub mod param;
 pub mod pe_count;
 pub mod reshape;
+pub mod runtime_dm;
 pub mod runtime_if;
 pub mod runtime_if_scalar;
 pub mod scalar;

@@ -1,8 +1,8 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::buffer::{Allocator, Buffer, View};
-use crate::{Error, Result};
+use crate::buffer::{Allocations, Buffer, View};
+use crate::{Error, Result, image};
 
 mod dma;
 pub(crate) mod engine;
@@ -12,7 +12,7 @@ use engine::{Cluster, Engine, PeRange};
 /// allocation and host transfer.
 pub struct Device {
     pub(crate) engine: Arc<Engine>,
-    pub(crate) allocator: Arc<Mutex<Allocator>>,
+    pub(crate) allocations: Arc<Allocations>,
     /// Numbers each load, so a cluster can tell a new image at a reused address from the one it
     /// already holds.
     pub(crate) tokens: std::sync::atomic::AtomicU64,
@@ -149,14 +149,11 @@ impl Builder {
     /// Opens exactly `chips`, each contributing the clusters at `placement`, `pes` PEs in all.
     fn open_chips(&self, chips: &[u8], placement: &[PeRange], pes: u8) -> Result<Device> {
         let clusters = Cluster::across(chips, placement)?;
-        let allocator = Arc::new(Mutex::new(Allocator::new(0..0)));
-        let (engine, free) = Engine::open(clusters, IMAGES, Arc::clone(&allocator), self.timeout)?;
-        *allocator
-            .lock()
-            .map_err(|_| Error::Memory("the allocator is poisoned".into()))? = Allocator::new(free);
+        let engine = Engine::open(clusters, IMAGES, self.timeout)?;
+        let allocations = Arc::clone(&engine.allocations);
         Ok(Device {
             engine: Arc::new(engine),
-            allocator,
+            allocations,
             tokens: std::sync::atomic::AtomicU64::new(0),
             pes,
         })
@@ -167,10 +164,10 @@ impl Builder {
 impl Device {
     /// A device of `chips` with `pes` PEs each and no hardware behind it; see [`Engine::stub`].
     pub(crate) fn stub(chips: &[u8], pes: u8) -> Self {
-        let allocator = Arc::new(Mutex::new(Allocator::new(0..4096)));
+        let allocations = Arc::new(Allocations::new(0..4096));
         Self {
-            engine: Arc::new(Engine::stub(chips, Arc::clone(&allocator))),
-            allocator,
+            engine: Arc::new(Engine::stub(chips, Arc::clone(&allocations))),
+            allocations,
             tokens: std::sync::atomic::AtomicU64::new(0),
             pes,
         }
@@ -211,23 +208,19 @@ impl Device {
         (0..self.chips()).map(ChipRank)
     }
 
-    /// Takes one allocator snapshot; fails if the allocator lock is poisoned.
+    /// Takes one DRAM allocator snapshot; fails if the allocator lock is poisoned.
     ///
     /// The figures describe the moment of the call and reserve nothing. An allocation between this
     /// call and the next may take the span this reported, so a subsequent request for it can still
     /// fail, and the caller handles that failure rather than assuming it away. Read `largest` as the
     /// ceiling a request may start from, not as a promise it will be met.
     pub fn memory(&self) -> Result<Memory> {
-        self.allocator
-            .lock()
-            .map(|allocator| allocator.memory())
-            .map_err(|_| Error::Memory("the allocator is poisoned".into()))
+        Ok(self.allocations.memory()?)
     }
 
-    /// Allocates `len` bytes of device memory at one address on every chip.
-    pub fn alloc(&self, len: usize) -> Result<Buffer> {
-        Buffer::alloc(&self.allocator, len)
-            .ok_or_else(|| Error::Memory(format!("device memory has no room left for {len} bytes")))
+    /// Allocates `len` bytes in `memory` at one address on every chip.
+    pub fn alloc(&self, memory: image::Memory, len: usize) -> Result<Buffer> {
+        Ok(self.allocations.alloc(memory, len)?)
     }
 
     /// Copies each host slice into its view: `(bytes, buffer.on(rank))` fills one chip,
@@ -254,7 +247,7 @@ mod tests {
         let device = Device::stub(&[0, 1], 8);
         let before = device.memory()?;
 
-        let buffer = device.alloc(257)?;
+        let buffer = device.alloc(image::Memory::Dram, 257)?;
 
         let after = device.memory()?;
         assert_eq!(after.capacity, before.capacity);

@@ -22,7 +22,7 @@ use crate::cast::{ContractionAccumulator, ContractionCast};
 use crate::context::{Dma, DmaContext};
 use crate::runtime::Topology;
 use crate::scalar::{MaterializableScalar, RuntimeScalar, Scalar};
-use crate::tensor::memory::{HbmScalar, HbmTensor, HostTensor};
+use crate::tensor::memory::{DmAllocError, DmTensor, HbmScalar, HbmTensor, HostTensor};
 
 pub use cpu::Cpu;
 pub use npu::Npu;
@@ -79,6 +79,13 @@ pub trait Backend: Sized + 'static {
     /// Required, no default: whether an HBM tensor needs a device allocation is a backend's own call.
     /// `Npu` takes one and hands its ownership to the tensor; the host-side backends hold bytes.
     fn alloc_hbm<D: Scalar, Chip: M, Element: M>() -> HbmTensor<D, Chip, Element, Self>;
+
+    /// A runtime-owned DM tensor on `group` (see
+    /// [`crate::tensor::memory::DmTensor::alloc`]). `Npu` takes a resident SRAM allocation the
+    /// tensor owns; the host-side backends hold bytes.
+    fn alloc_dm<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M>(
+        group: &Self::Device,
+    ) -> Result<DmTensor<D, Chip, Cluster, Slice, Element, Self>, DmAllocError>;
 
     /// Serialize the storage to a flat `D` buffer in `mapping`-order (the physical / wire layout),
     /// consuming the storage, delegating to the concrete storage's inherent serializer.

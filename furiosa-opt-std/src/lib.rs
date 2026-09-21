@@ -46,8 +46,8 @@ pub enum Error {
     /// The runtime refused or failed a load, a launch or a transfer.
     #[error(transparent)]
     Device(#[from] furiosa_opt_rt::Error),
-    /// An HBM tensor that never went through `to_hbm` was transferred or launched.
-    #[error("an HBM tensor the runtime never placed cannot be transferred or launched")]
+    /// A tensor must own a runtime allocation before a host transfer or launch.
+    #[error("the tensor has no runtime allocation")]
     Unplaced,
     /// The binary carries no compiled image for this device function and generic arguments.
     #[error("no compiled device function for `{path}` with generic arguments {key:?}")]

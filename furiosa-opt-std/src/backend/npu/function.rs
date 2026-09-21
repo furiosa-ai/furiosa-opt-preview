@@ -21,11 +21,11 @@ trait HbmBuffer {
 
 impl<D: Scalar, Chip: M, Element: M> HbmBuffer for HbmTensor<D, Chip, Element, Npu> {
     fn buffer(&self) -> Option<&Buffer> {
-        HbmTensor::buffer(self)
+        HbmTensor::owner(self)
     }
 
     fn place(&mut self, buffer: Buffer) {
-        HbmTensor::place(self, buffer);
+        HbmTensor::own(self, buffer);
     }
 }
 
@@ -103,7 +103,7 @@ impl Function {
 impl Function {
     /// Allocates `size` bytes on every chip of the function's device.
     pub(super) fn alloc(&self, size: usize) -> Result<Buffer, Error> {
-        Ok(self.0.device().alloc(size)?)
+        Ok(self.0.device().alloc(rt::image::Memory::Dram, size)?)
     }
 
     /// Bytes one chip holds of an HBM tensor spread over `Chip` chips: the device binds per
@@ -187,7 +187,7 @@ impl Function {
         host: &mut HostTensor<D, Element2, Npu>,
     ) -> Result<(), Error> {
         let device = dma.device().inner();
-        let buffer = hbm.buffer().ok_or(Error::Unplaced)?;
+        let buffer = hbm.owner().ok_or(Error::Unplaced)?;
         let view = Self::all_chip_view::<Chip>(device, buffer)?;
         device.read([(view, host.storage_mut().inner_mut().as_mut())]).await?;
         Ok(())
@@ -203,7 +203,7 @@ impl Function {
         if let Some(buffer) = target.buffer() {
             return Ok(buffer.clone());
         }
-        let buffer = device.alloc(bytes_per_chip)?;
+        let buffer = device.alloc(rt::image::Memory::Dram, bytes_per_chip)?;
         target.place(buffer.clone());
         Ok(buffer)
     }

@@ -5,7 +5,7 @@ use crate::Error;
 use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::BufStorage;
 use crate::tensor::Tensor;
-use crate::tensor::memory::{HbmScalar, HbmTensor, HostTensor};
+use crate::tensor::memory::{DmAllocError, DmTensor, HbmScalar, HbmTensor, HostTensor};
 
 use crate::backend::Backend;
 use crate::cast::{ContractionAccumulator, ContractionCast};
@@ -43,6 +43,12 @@ impl Backend for Cpu {
     /// placeholder every host-side handle carries.
     fn alloc_hbm<D: Scalar, Chip: M, Element: M>() -> HbmTensor<D, Chip, Element, Self> {
         HbmTensor::from_parts(Tensor::zeroed())
+    }
+
+    fn alloc_dm<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M>(
+        _group: &Self::Device,
+    ) -> Result<DmTensor<D, Chip, Cluster, Slice, Element, Self>, DmAllocError> {
+        Ok(DmTensor::from_parts(Tensor::zeroed()))
     }
 
     fn zeroed<D: Scalar>(mapping: &Mapping) -> Self::Storage<D> {

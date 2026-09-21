@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - A runtime scalar can guard work inside a statically bounded `for` loop, including an
   `#[unroll]` loop. Runtime loop bounds and `break` remain unsupported; use an `if` in each
   iteration to skip work beyond the runtime limit.
+- `DmTensor::alloc(&ctx)` keeps SRAM across launches, borrowed through `&DmTensor` and
+  `&mut DmTensor`. Launch admission keeps compiler temporaries below every live resident.
+  Images record the temporary SRAM bound; the image and IPC versions remain at 1.
 
 ## [v0.8.1]
 

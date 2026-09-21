@@ -177,13 +177,13 @@ pub struct HbmTensor<D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend
     // The device allocation this tensor names and keeps live, one chip's share of the bytes.
     // `None` until a host-side transfer places it; a device function's own tensors are placed by
     // the compiled program and never reach the host this way.
-    buffer: Option<Buffer>,
+    owner: Option<Buffer>,
 }
 
 impl<D: Scalar, Chip: M, Element: M, B: Backend> std::fmt::Debug for HbmTensor<D, Chip, Element, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HbmTensor")
-            .field("buffer", &self.buffer)
+            .field("owner", &self.owner)
             .finish_non_exhaustive()
     }
 }
@@ -193,7 +193,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     pub type Mapping = m![{ Chip }, { Element }];
 
     pub(crate) fn from_parts(inner: Tensor<D, Self::Mapping, B>) -> Self {
-        Self { inner, buffer: None }
+        Self { inner, owner: None }
     }
 
     /// A fresh HBM tensor, for a device function's output.
@@ -218,13 +218,8 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     }
 
     /// Names the device allocation this tensor lives in and keeps it live for the tensor's lifetime.
-    pub(crate) fn place(&mut self, buffer: Buffer) {
-        self.buffer = Some(buffer);
-    }
-
-    pub(crate) fn placed(mut self, buffer: Buffer) -> Self {
-        self.place(buffer);
-        self
+    pub(crate) fn own(&mut self, owner: Buffer) {
+        self.owner = Some(owner);
     }
 
     pub(crate) fn inner(&self) -> &Tensor<D, Self::Mapping, B> {
@@ -233,8 +228,8 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
 
     /// The device allocation this tensor is placed in, or `None` while the compiled program owns
     /// its placement.
-    pub(crate) fn buffer(&self) -> Option<&Buffer> {
-        self.buffer.as_ref()
+    pub(crate) fn owner(&self) -> Option<&Buffer> {
+        self.owner.as_ref()
     }
 
     /// Size of the packed device image in bytes, the measure [`Self::to_buf`] produces.
@@ -294,7 +289,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
     pub fn view<'l>(&'l self) -> HbmTensorView<'l, D, Chip, Element, B> {
         HbmTensorView {
             inner: self.inner.view(),
-            buffer: self.buffer.clone(),
+            owner: self.owner.clone(),
             chip_tiled: false,
         }
     }
@@ -304,7 +299,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
     pub fn view_mut<'l>(&'l mut self) -> HbmTensorViewMut<'l, D, Chip, Element, B> {
         HbmTensorViewMut {
             inner: self.inner.view_mut(),
-            buffer: self.buffer.clone(),
+            owner: self.owner.clone(),
             chip_tiled: false,
         }
     }
@@ -345,7 +340,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
         &self,
         index: &HbmTensor<i32, Chip, Element3, B>,
     ) -> DmTensor<D, Chip, Cluster2, Slice2, Element2, B> {
-        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::from_parts(Tensor::zeroed(), None);
+        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::from_parts(Tensor::zeroed());
         self.inner.gather::<_, _>(&mut output.inner, &index.inner, true);
         output
     }
@@ -371,7 +366,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
             "unscaled gather index must be padding-only across PEs (`m![1 # {}]`), read off PE 0 alone",
             IdxPe::SIZE
         );
-        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::from_parts(Tensor::zeroed(), None);
+        let mut output: DmTensor<D, Chip, Cluster2, Slice2, Element2, B> = DmTensor::from_parts(Tensor::zeroed());
         self.inner.gather::<_, _>(&mut output.inner, &index.inner, false);
         output
     }
@@ -392,7 +387,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
             m![{ Chip }, { Cluster }, { Slice }, { Element2 }],
             Element2,
         >(DM_WRITE_ALIGN_BYTES);
-        DmTensor::from_parts(self.inner.transpose(true), None)
+        DmTensor::from_parts(self.inner.transpose(true))
     }
 
     /// Reshapes the tensor to a different mapping at the same HBM address, consuming `self`.
@@ -413,7 +408,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
         let reshaped = unsafe { self.inner.reshape::<m![{ Chip2 }, { Element2 }]>() };
         HbmTensor {
             inner: reshaped,
-            buffer: self.buffer,
+            owner: self.owner,
         }
     }
 }
@@ -444,8 +439,8 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
 pub struct HbmTensorView<'l, D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend> {
     inner: TensorView<'l, D, Pair<Chip, Element>, B>,
     // The base tensor's allocation, absent for Cpu and compiler-placed tensors. A tile's offset
-    // lives in `inner`; `buffer()` applies it once, so repeated tiles cannot double-count it.
-    buffer: Option<Buffer>,
+    // lives in `inner`; `owner()` applies it once, so repeated tiles cannot double-count it.
+    owner: Option<Buffer>,
     chip_tiled: bool,
 }
 
@@ -468,8 +463,8 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
 
     /// The device bytes this view covers: the base tensor's allocation from the window
     /// [`Self::tile`] selected to its end. It is the whole of what a view tells the Npu backend.
-    pub(crate) fn buffer(&self) -> Option<Buffer> {
-        Some(self.buffer.as_ref()?.slice(self.window()))
+    pub(crate) fn owner(&self) -> Option<Buffer> {
+        Some(self.owner.as_ref()?.slice(self.window()))
     }
 
     /// The per-chip byte range of the base allocation this view covers.
@@ -524,7 +519,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         let inner = self.inner.retile::<Index, _>(start);
         HbmTensorView {
             inner,
-            buffer: self.buffer.clone(),
+            owner: self.owner.clone(),
             chip_tiled: true,
         }
     }
@@ -546,7 +541,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         let inner = self.inner.retile::<Index, _>(start);
         HbmTensorView {
             inner,
-            buffer: self.buffer.clone(),
+            owner: self.owner.clone(),
             chip_tiled: self.chip_tiled,
         }
     }
@@ -564,7 +559,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         constraints::assert_hbm_reshape_dimension_preserved::<Chip, Chip2, Element, Element2>();
         HbmTensorView {
             inner: unsafe { self.inner.reshape::<m![{ Chip2 }, { Element2 }]>() },
-            buffer: self.buffer.clone(),
+            owner: self.owner.clone(),
             chip_tiled: self.chip_tiled,
         }
     }
@@ -583,7 +578,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         .unwrap_or_else(|e| panic!("{e}"));
         HbmTensorView {
             inner: self.inner.redeclare::<m![{ Chip }, { Element2 }]>(),
-            buffer: self.buffer.clone(),
+            owner: self.owner.clone(),
             chip_tiled: self.chip_tiled,
         }
     }
@@ -631,7 +626,7 @@ impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensorView
             m![{ Chip }, { Cluster }, { Slice }, { Element2 }],
             Element2,
         >(DM_WRITE_ALIGN_BYTES);
-        DmTensor::from_parts(self.inner.read().transpose(true), None)
+        DmTensor::from_parts(self.inner.read().transpose(true))
     }
 
     /// Redistributes HBM chip slots by DMA: `shuffle_pattern[target] = source`.
@@ -667,14 +662,14 @@ impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensorView
 pub struct HbmTensorViewMut<'l, D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend> {
     inner: TensorViewMut<'l, D, Pair<Chip, Element>, B>,
     // The base tensor's allocation; see [`HbmTensorView`]'s field of the same name.
-    buffer: Option<Buffer>,
+    owner: Option<Buffer>,
     chip_tiled: bool,
 }
 
 impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chip, Element, B> {
-    /// The device bytes this view covers; see [`HbmTensorView::buffer`].
-    pub(crate) fn buffer(&self) -> Option<Buffer> {
-        Some(self.buffer.as_ref()?.slice(self.window()))
+    /// The device bytes this view covers; see [`HbmTensorView::owner`].
+    pub(crate) fn owner(&self) -> Option<Buffer> {
+        Some(self.owner.as_ref()?.slice(self.window()))
     }
 
     /// The per-chip byte range of the base allocation this view covers.
@@ -711,7 +706,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
         let inner = self.inner.retile::<Index, _>(start);
         HbmTensorViewMut {
             inner,
-            buffer: self.buffer.clone(),
+            owner: self.owner.clone(),
             chip_tiled: true,
         }
     }
@@ -733,7 +728,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
         let inner = self.inner.retile::<Index, _>(start);
         HbmTensorViewMut {
             inner,
-            buffer: self.buffer.clone(),
+            owner: self.owner.clone(),
             chip_tiled: self.chip_tiled,
         }
     }
@@ -752,7 +747,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
         constraints::assert_hbm_reshape_dimension_preserved::<Chip, Chip2, Element, Element2>();
         HbmTensorViewMut {
             inner: unsafe { self.inner.reshape::<m![{ Chip2 }, { Element2 }]>() },
-            buffer: self.buffer.clone(),
+            owner: self.owner.clone(),
             chip_tiled: self.chip_tiled,
         }
     }
@@ -797,7 +792,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Pe: M, Element: M, B: Backend> SpmTensor<D,
             m![{ Cluster }, { Slice2 }, { Element2 }],
             Element2,
         >(DM_WRITE_ALIGN_BYTES);
-        DmTensor::from_parts(self.inner.transpose(true), None)
+        DmTensor::from_parts(self.inner.transpose(true))
     }
 }
 
@@ -806,8 +801,25 @@ impl<D: Scalar, Chip: M, Cluster: M, Pe: M, Element: M, B: Backend> SpmTensor<D,
 #[derive(Debug)]
 pub struct DmTensor<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend = CurrentBackend> {
     inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Element>>>, B>,
-    address: Option<Address>,
-    _marker: PhantomData<(D, Chip, Cluster, Slice, Element)>,
+    // The resident SRAM allocation this tensor names and keeps live; `None` for a tensor the
+    // compiled program places itself.
+    owner: Option<Buffer>,
+}
+
+/// Allocation failure for a runtime-owned DM tensor.
+#[derive(thiserror::Error, Clone, Debug, Eq, PartialEq)]
+pub enum DmAllocError {
+    /// The tensor and device must cover the same chips.
+    #[error("the tensor spans {tensor_chips} chips, but the device has {device_chips}")]
+    Topology {
+        /// Chips in the tensor mapping.
+        tensor_chips: usize,
+        /// Chips opened by the device.
+        device_chips: usize,
+    },
+    /// The runtime allocation failure, preserving its structured cause.
+    #[error(transparent)]
+    Allocation(#[from] furiosa_opt_rt::Error),
 }
 
 impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<D, Chip, Cluster, Slice, Element, B> {
@@ -823,14 +835,28 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
         constraints::assert_slice_size::<Slice>();
     }
 
-    pub(crate) fn from_parts(inner: Tensor<D, Self::Mapping, B>, address: Option<Address>) -> Self {
+    pub(crate) fn from_parts(inner: Tensor<D, Self::Mapping, B>) -> Self {
         Self::check_constraints();
 
-        Self {
-            inner,
-            address,
-            _marker: PhantomData,
-        }
+        Self { inner, owner: None }
+    }
+
+    /// Names the resident allocation this tensor lives in and keeps it live for the tensor's
+    /// lifetime.
+    pub(crate) fn own(&mut self, owner: Buffer) {
+        self.owner = Some(owner);
+    }
+
+    /// The resident allocation this tensor is placed in, or `None` while the compiled program
+    /// owns its placement.
+    pub(crate) fn owner(&self) -> Option<&Buffer> {
+        self.owner.as_ref()
+    }
+
+    /// Allocates uninitialized SRAM on `ctx`, kept alive by this tensor and its launches.
+    /// Initialize it before reading; pass it by reference to kernels on the same device group.
+    pub fn alloc(ctx: &crate::Device<B>) -> Result<Self, DmAllocError> {
+        B::alloc_dm(ctx.pdma.device())
     }
 }
 
@@ -851,7 +877,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
     #[allow(clippy::new_without_default)]
     #[primitive(DmTensor::new)]
     pub fn new() -> Self {
-        Self::from_parts(Tensor::zeroed(), None)
+        Self::from_parts(Tensor::zeroed())
     }
 }
 
@@ -1035,7 +1061,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
         assert_dm_dma_layout::<D, Chip, Cluster, Slice, Element, Chip2, Cluster2, Slice2, Element2>(
             DM_WRITE_ALIGN_BYTES,
         );
-        DmTensor::from_parts(self.inner.transpose(true), None)
+        DmTensor::from_parts(self.inner.transpose(true))
     }
 
     /// Reshapes the tensor to a different mapping at the same address, consuming `self`. Delegates to
@@ -1067,7 +1093,9 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
             self.inner
                 .reshape::<m![{ Chip2 }, { Cluster2 }, { Slice2 }, { Element2 }]>()
         };
-        DmTensor::from_parts(reshaped, self.address)
+        let mut reshaped = DmTensor::from_parts(reshaped);
+        reshaped.owner = self.owner;
+        reshaped
     }
 }
 
@@ -1667,7 +1695,7 @@ mod tests {
         let expected: Vec<i32> = (0..K::SIZE).flat_map(|k| [10 * row(k), 10 * row(k) + 1]).collect();
 
         let table = HbmTensor::<i32, m![1], m![W, V], B>::from_parts(Tensor::from_vec(table_buf));
-        let index_dm = DmTensor::<i32, m![1], m![1], Slice, m![K % 2], B>::from_parts(Tensor::from_vec(idx_buf), None);
+        let index_dm = DmTensor::<i32, m![1], m![1], Slice, m![K % 2], B>::from_parts(Tensor::from_vec(idx_buf));
         let mut device = Device::<B>::on(B::open(Topology { chips: 1, pes: 4 }).unwrap());
         let index: SpmTensor<i32, m![1], m![1], DummyPe, m![K], B> = index_dm.to_spm(&mut device.tdma);
 
@@ -1802,7 +1830,6 @@ mod tests {
 
         let input = DmTensor::<i32, m![1], m![1 # 2], m![1 # 64], m![X / 2 % 2, X % 2, Tail], Cpu>::from_parts(
             Tensor::from_vec((0..2 * 64 * X::SIZE * Tail::SIZE).map(|value| value as i32)),
-            None,
         );
         let expected = input.view().inner.read().into_vec();
         let mut device = Device::new(Topology { chips: 1, pes: 8 }).unwrap();
@@ -1818,10 +1845,9 @@ mod tests {
     fn cpu_to_dm_moves_a_chip_axis_into_the_element() {
         axes![A = 2, C = 2];
 
-        let input = DmTensor::<i32, m![A], m![1], m![1 # 64], m![C], Cpu>::from_parts(
-            Tensor::from_vec((0..A::SIZE * 64 * C::SIZE).map(|value| value as i32)),
-            None,
-        );
+        let input = DmTensor::<i32, m![A], m![1], m![1 # 64], m![C], Cpu>::from_parts(Tensor::from_vec(
+            (0..A::SIZE * 64 * C::SIZE).map(|value| value as i32),
+        ));
         let mut device = Device::new(Topology { chips: 1, pes: 8 }).unwrap();
         let output = input.to_dm::<m![2], m![1], m![1 # 64], m![A, C]>(&mut device.tdma);
 

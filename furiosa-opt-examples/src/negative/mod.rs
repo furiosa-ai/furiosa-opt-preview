@@ -30,6 +30,7 @@
 //! refused / compiled counts.
 
 pub mod array_index;
+pub mod blocking_flits;
 pub mod contract_outer_assertions;
 pub mod dm_slice;
 pub mod dma;

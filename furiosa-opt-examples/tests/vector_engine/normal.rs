@@ -4,6 +4,7 @@ use furiosa_opt_examples::vector_engine::{
     ve_elementwise_multi_vrf, ve_elementwise_reinterpret_abs_f32, ve_elementwise_reinterpret_chain_f32,
     ve_elementwise_stash_f32, ve_elementwise_stash_i32, ve_elementwise_ternary, ve_elementwise_ternary_stash,
     ve_elementwise_vrf, ve_stash_after_reinterpret_f32, ve_stash_after_widen_f32, ve_stash_fxp_fxp,
+    ve_vrf_read_many_f32,
 };
 use furiosa_opt_std::prelude::*;
 use rand::SeedableRng;
@@ -305,6 +306,34 @@ async fn test_ve_elementwise_multi_vrf() -> eyre::Result<()> {
     assert_eq!(expected.into_vec(), result.into_vec());
 
     Ok(())
+}
+
+/// Checks x, y, x VRF reads against `(s * x) * y + x` on the host runtime.
+#[tokio::test]
+async fn test_ve_vrf_read_many_f32() {
+    let mut device = Device::new(ve_vrf_read_many_f32.topology()).unwrap();
+
+    let input = HostTensor::<f32, m![A]>::from_vec((0..<m![A]>::SIZE).map(|i| ((i % 31) as f32 - 15.0) / 8.0));
+    let vrf1 = HostTensor::<f32, m![A]>::from_vec((0..<m![A]>::SIZE).map(|i| ((i % 13) as f32 + 1.0) / 4.0));
+    let vrf2 = HostTensor::<f32, m![A]>::from_vec((0..<m![A]>::SIZE).map(|i| -((i % 17) as f32 + 2.0) / 8.0));
+    let input_hbm = input.to_hbm(&mut device.pdma).await.unwrap();
+    let vrf1_hbm = vrf1.to_hbm(&mut device.pdma).await.unwrap();
+    let vrf2_hbm = vrf2.to_hbm(&mut device.pdma).await.unwrap();
+
+    let output = launch(ve_vrf_read_many_f32, (&mut device, &input_hbm, &vrf1_hbm, &vrf2_hbm))
+        .await
+        .unwrap();
+    let actual = output.to_host::<m![A]>(&mut device.pdma).await.unwrap().into_vec();
+    let x = vrf1.into_inner();
+    let y = vrf2.into_inner();
+    let expected = input
+        .into_inner()
+        .zip_with(&x, |s, x| s * x)
+        .zip_with(&y, |sx, y| sx * y)
+        .zip_with(&x, |sxy, x| sxy + x)
+        .into_vec();
+
+    assert_f32_vec_eq(&expected, &actual);
 }
 
 // =============================================================================

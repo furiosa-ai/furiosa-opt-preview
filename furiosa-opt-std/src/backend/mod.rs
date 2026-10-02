@@ -10,6 +10,8 @@
 pub(crate) mod op_prep;
 
 mod cpu;
+/// Index units and validation for indirect DMA.
+pub mod indirect;
 /// NPU backend.
 pub mod npu;
 
@@ -25,6 +27,7 @@ use crate::scalar::{MaterializableScalar, RuntimeScalar, Scalar};
 use crate::tensor::memory::{DmAllocError, DmTensor, HbmScalar, HbmTensor, HostTensor};
 
 pub use cpu::Cpu;
+pub use indirect::{IndexUnit, IndexValueError};
 pub use npu::Npu;
 
 /// Backend for tensor operations.
@@ -208,19 +211,24 @@ pub trait Backend: Sized + 'static {
     ) -> Self::Storage<D>;
 
     /// Scatters `src` into `dst` at positions read from the same-backend `i32` index tensor.
-    fn scatter<D: Scalar, Src: M, Key: M, Dst: M, Idx: M>(
+    fn scatter<D: Scalar, Src: M, Domain: M, IndexedAxis: M, Dst: M, Idx: M>(
         src: &Self::Storage<D>,
         dst: &mut Self::Storage<D>,
         index: &Self::Storage<i32>,
-        scaled: bool,
+        chip: &Mapping,
+        unit: IndexUnit,
     );
 
-    /// Gathers from `src` (table) into `dst` at positions read from the index tensor.
-    fn gather<D: MaterializableScalar, Src: M, Dst: M, Idx: M>(
+    /// Gathers from `src` along `IndexedAxis`, validating every index entry.
+    /// `prefix` limits output entries per chip; `None` gathers the whole list.
+    fn gather<D: MaterializableScalar, Src: M, IndexedAxis: M, Dst: M, Idx: M>(
         src: &Self::Storage<D>,
         dst: &mut Self::Storage<D>,
         index: &Self::Storage<i32>,
-        scaled: bool,
+        domain: &Mapping,
+        chip: &Mapping,
+        prefix: Option<usize>,
+        unit: IndexUnit,
     );
 
     /// Reinterprets `src`'s buffer under a new mapping `Dst`, returning the result. A relabeling, not

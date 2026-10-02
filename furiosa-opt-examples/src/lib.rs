@@ -42,6 +42,7 @@ pub mod runtime_if;
 pub mod runtime_if_scalar;
 pub mod scalar;
 pub mod scatter_gather;
+pub mod scatter_gather_topology;
 pub mod stotrf_table_lookup;
 pub mod switch_assertions;
 pub mod switch_engine;

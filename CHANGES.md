@@ -6,8 +6,28 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Changed
+
+- Replace `dma_gather_scaled` / `dma_gather_unscaled` with
+  `gather::<IndexedAxis, Payload>().by_byte_offsets(index)` / `.by_positions::<Domain>(index)`,
+  followed by `.to_dm(&mut device.tdma)`.
+- Replace `dma_scatter` / `dma_scatter_unscaled` with
+  `dst.view_mut().scatter::<IndexedAxis, Payload>().by_byte_offsets(index)` /
+  `.by_positions::<Domain>(index)`, followed by `.from_dm(&mut device.tdma, updates)`.
+  `from_dm` consumes the updates; use `from_dm_view` to pass a view.
+- `IndexedAxis` declares the indexed region of the table or destination; `Payload` declares
+  the values transferred per index. HBM byte-offset indices infer `Domain`; SPM position
+  indices require it explicitly, including any named cluster axes.
+- Gather output and scatter updates may interleave domain and payload axes across their placement.
+  `IndexedAxis` must still be a consecutive region.
+
 ### Added
 
+- `gather::<..>().by_byte_offsets(index).sparse_prefix(valid_length)` limits work to a runtime
+  prefix, rounded up to a DMA skip-unit boundary. Every index entry must contain a valid byte
+  offset, including entries beyond `valid_length`.
+- `DmTensorView::to_spm` stages tiled DM windows for SPM gather, so large indices can be
+  processed in bounded chunks.
 - `HbmScalar<T>` passes one runtime `bool`, `i32`, `u32`, `i64`, `u64`, or 64-bit `usize` value
   from the host to every chip in a device function. Create one with `HbmScalar::from_host`, update
   its existing HBM allocation with `write`, and load it in device code with `to_spm`.
@@ -19,6 +39,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - `DmTensor::alloc(&ctx)` keeps SRAM across launches, borrowed through `&DmTensor` and
   `&mut DmTensor`. Launch admission keeps compiler temporaries below every live resident.
   Images record the temporary SRAM bound; the image and IPC versions remain at 1.
+
+### Fixed
+
+- `DmTensorViewMut::to_dm_view` no longer writes into the destination mapping's `Bottom` padding.
 
 ## [v0.8.1]
 

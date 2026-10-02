@@ -241,6 +241,32 @@ impl Mapping {
         }
     }
 
+    /// The stride of the innermost `Bottom` or `Zero` padding boundary, in cells.
+    pub fn innermost_writable_size(&self) -> Option<usize> {
+        fn find(mapping: &Mapping, stride: usize) -> Option<usize> {
+            match mapping {
+                Mapping::Pair { left, right } => [find(left, stride * right.size()), find(right, stride)]
+                    .into_iter()
+                    .flatten()
+                    .min(),
+                Mapping::Padding { inner, kind, .. } => match kind {
+                    PaddingKind::Top => find(inner, stride),
+                    // The pad bounds this level, but a `Bottom` nested under it bounds it tighter.
+                    PaddingKind::Bottom | PaddingKind::Zero => [find(inner, stride), Some(stride * inner.size())]
+                        .into_iter()
+                        .flatten()
+                        .min(),
+                },
+                Mapping::Resize { inner, .. } => find(inner, stride),
+                Mapping::Stride { inner, .. } => find(inner, 1).map(|_| stride),
+                Mapping::Modulo { inner, modulo } => find(inner, 1).map(|bound| stride * (1 + (bound - 1) % modulo)),
+                Mapping::Symbol { .. } | Mapping::Broadcast { .. } => None,
+            }
+        }
+
+        find(self, 1)
+    }
+
     /// Whether this is an acceptable leftover for `mode` — the per-mode coverage the engines run on a
     /// carved-down [`SequencerConfig`] remainder, and the matcher reuses to accept an over-capacity
     /// fold. A live `Symbol` is an unread/unwritten real cell, rejected by both modes. Read re-reads
@@ -328,16 +354,14 @@ impl Mapping {
         }
     }
 
-    /// Peels outermost `Padding` nodes until a live factor. Interior padding is preserved. `normalize`
-    /// emits the outermost factor as the left of the topmost `Pair`, so trailing padding is exactly the
-    /// `Padding` nodes on the outer (left) spine.
-    pub fn remove_padding(self) -> Self {
+    /// Removes padding from the outer spine up to the first live factor.
+    pub fn remove_outermost_padding(self) -> Self {
         match self {
-            Self::Padding { inner, .. } => RBox::into_inner(inner).remove_padding(),
+            Self::Padding { inner, .. } => RBox::into_inner(inner).remove_outermost_padding(),
             Self::Pair { left, right } => {
-                let left = RBox::into_inner(left).remove_padding();
+                let left = RBox::into_inner(left).remove_outermost_padding();
                 if left == Self::identity() {
-                    RBox::into_inner(right).remove_padding()
+                    RBox::into_inner(right).remove_outermost_padding()
                 } else {
                     left.pair(RBox::into_inner(right))
                 }
@@ -944,16 +968,19 @@ pub enum StreamBottomPad {
 
 /// Error returned by sequencing.
 #[repr(C)]
-#[derive(StableAbi, Debug, Clone, PartialEq, Eq)]
+#[derive(StableAbi, Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SequencerError {
     /// A stream segment had no compatible memory match.
+    #[error("a stream segment has no compatible memory to match")]
     StreamUnmatchedSegment,
     /// An input carried a `Bottom` pad: the post-match consumed marker, never
     /// valid on a fresh input.
+    #[error("an input carries a `Bottom` pad, which only a matched output may")]
     InputBottomPadding,
     /// A carved-down memory was left unconsumed (a live cell the streams never
     /// read / wrote). Carries every memory in input order so the caller can
     /// name the offending one.
+    #[error("a live cell was left unread or unwritten in one of [{}]", .0.iter().format(", "))]
     Unconsumed(RVec<Mapping>),
 }
 

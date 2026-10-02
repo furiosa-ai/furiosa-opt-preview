@@ -55,7 +55,7 @@ The `i`-th chip's `j`-th element stores tensor index `i![A: i, B: j]`.
 
 SRAM tensor types add `Cluster` and `Slice` dimensions for finer-grained parallelism.
 `SpmTensor` uses `Pe` for fused-PE placement of scratchpad data: `m![4]` replicates the payload over every PE, `m![1 # 4]` keeps it in PE 0, and `m![X % 4]` partitions it over the four.
-An unscaled gather's index list takes `m![1 # 4]` alone, because the gather reads the whole list off PE 0.
+`by_positions` requires an SPM index kept entirely on PE 0, spelled `Pe = m![1 # 4]` on a four-PE cluster; see [Gather and Scatter](../moving-tensors/dma-engine.md#gather-and-scatter).
 `TrfTensor` additionally has a `Lane` dimension that distributes TRF data across the 8 lanes per slice.
 See [Contraction Engine](../computing-tensors/contraction-engine/index.md) for details.
 

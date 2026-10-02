@@ -55,3 +55,29 @@ async fn test_tile_window_commit_host() -> eyre::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_dm_bottom_padding_does_not_overwrite_second_half() -> eyre::Result<()> {
+    use furiosa_opt_examples::tile::dm_bottom_padding::{L, P, R, update_first_half};
+
+    let update = f4e2m1::from_bits(0x2);
+    let initial = f4e2m1::from_bits(0x4);
+    let len = P::SIZE * R::SIZE * L::SIZE;
+    let expected = (0..len)
+        .map(|index| if index / L::SIZE % R::SIZE < 2 { update } else { initial })
+        .collect::<Vec<_>>();
+
+    let mut device = Device::new(update_first_half.topology())?;
+    let updates = HostTensor::<f4e2m1, m![P, R, L]>::from_vec(vec![update; len])
+        .to_hbm::<m![1], m![P, R, L]>(&mut device.pdma)
+        .await?;
+    let initial = HostTensor::<f4e2m1, m![P, R, L]>::from_vec(vec![initial; len])
+        .to_hbm::<m![1], m![P, R, L]>(&mut device.pdma)
+        .await?;
+
+    let output = launch(update_first_half, (&mut device, &updates, &initial)).await?;
+    let actual = output.to_host::<m![P, R, L]>(&mut device.pdma).await?.into_vec();
+
+    assert_eq!(expected, actual);
+    Ok(())
+}

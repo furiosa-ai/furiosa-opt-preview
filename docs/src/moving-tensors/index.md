@@ -89,8 +89,7 @@ Do not read a destination before its producing transfer or commit has completed,
   Its `Element` mapping chooses the destination layout and can transpose stream axes during the write.
 * **[DMA](./dma-engine.md)** pairs read and write sequencers for memory-to-memory movement.
   The supported public paths are HBM to HBM, HBM to DM, DM to HBM, DM to DM, and DM to SPM with SPM to DM.
-  Indirect gather/scatter APIs have separate index-unit contracts: scaled gather uses an HBM index, while unscaled gather uses an `SpmTensor<i32>` index with raw row positions.
-  Unscaled scatter is currently unimplemented.
+  Indirect gather/scatter APIs name their index unit in the call that takes the index: `by_byte_offsets` consumes HBM-resident byte offsets and `by_positions` consumes positions from an `SpmTensor<i32>`, on both operations.
 
 The Tensor Unit pipeline is therefore:
 
@@ -122,7 +121,7 @@ Conflicting DM-bank patterns can starve DMA.
 See [Memory Performance](./memory-performance.md) for the bank-starvation rule, HBM interleaving, and packet-size trade-offs.
 
 For a complete end-to-end movement pattern, see [Case Study: Tensor Unit I/O](./tensor-unit-io.md).
-For indirect HBM row movement, see [DMA gather and scatter](./dma-engine.md#scatter-and-gather).
+For indirect HBM row movement, see [DMA gather and scatter](./dma-engine.md#gather-and-scatter).
 
 ## See also
 

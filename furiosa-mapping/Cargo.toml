@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-mapping"
-version = "0.8.1+g4391c823"
+version = "0.8.1+gc85dde29"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/furiosa-ai/furiosa-opt"
@@ -13,3 +13,6 @@ furiosa-mapping-macro = { path = "../furiosa-mapping-macro", version = "0.8" }
 furiosa-mapping-types = { path = "../furiosa-mapping-types", version = "0.8" }
 thiserror = { workspace = true }
 
+
+[dev-dependencies]
+eyre = { workspace = true }

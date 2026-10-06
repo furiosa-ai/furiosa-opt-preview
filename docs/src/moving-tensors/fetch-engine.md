@@ -179,7 +179,7 @@ fn without_broadcast(
 
 ## Constraints
 
-- **Hardware dimensions**: `Chip::SIZE`, `Cluster::SIZE`, and `Slice::SIZE` must match the hardware configuration (see [Sequencer](./sequencer.md#architecture)).
+- **Hardware dimensions**: `Chip::SIZE`, `Cluster::SIZE`, and `Slice::SIZE` must match the hardware configuration (see [Spatial and Temporal Dimensions](../mapping-tensors/spatial-temporal-dimensions.md#constraints)).
 
 ## Multi-Read Packet
 

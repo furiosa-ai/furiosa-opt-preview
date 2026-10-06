@@ -54,7 +54,7 @@ fn cast_commit<'l, const T: Tu>(
 
 ## Constraints
 
-- **Hardware dimensions**: `Chip::SIZE`, `Cluster::SIZE`, and `Slice::SIZE` must match the hardware configuration (see [Sequencer](./sequencer.md#architecture)).
+- **Hardware dimensions**: `Chip::SIZE`, `Cluster::SIZE`, and `Slice::SIZE` must match the hardware configuration (see [Spatial and Temporal Dimensions](../mapping-tensors/spatial-temporal-dimensions.md#constraints)).
 - **Address alignment**: All sequencer strides must be multiples of 8 bytes.
 - **Write unit alignment**: `D[valid_size]` must be 8, 16, 24, or 32 bytes (see the [Commit Adapter's Trimming](../computing-tensors/commit-adapter.md#trimming) stage).
 

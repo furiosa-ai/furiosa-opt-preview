@@ -215,7 +215,7 @@ fn trf_sequencer_partial_read<'l, const T: Tu>(
 
 ### Constraints
 
-- **Hardware dimensions**: `Chip::SIZE`, `Cluster::SIZE`, and `Slice::SIZE` must match the hardware configuration (see [Sequencer](../../moving-tensors/sequencer.md#configurations)).
+- **Hardware dimensions**: `Chip::SIZE`, `Cluster::SIZE`, and `Slice::SIZE` must match the hardware configuration (see [Spatial and Temporal Dimensions](../../mapping-tensors/spatial-temporal-dimensions.md#constraints)).
 - **Address alignment**: when `Element % ReadSize` covers all 64 B, the read spans both TRF banks per lane, so the sequencer's base address and all strides must align to 64 B.
 
 ### Architecture

@@ -93,7 +93,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   Runtime loop indices can select tensor references such as `model.layers[index].weight.x`.
 - Mapping factors accept generic axes and parenthesized counts, such as `m![Width / Factor]`
   and `m![Width / (Width / 256)]`.
-- `#[unroll]` fully expands a static `for` loop before scheduling. See [Unroll a loop](https://furiosa-ai.github.io/furiosa-opt/scheduling/tuning.html#unroll-a-loop).
+- `#[unroll]` fully expands a static `for` loop before scheduling. See [Unroll a loop](https://developer.furiosa.ai/furiosa-opt/book/scheduling/tuning.html#unroll-a-loop).
 - `DmTensorViewMut::slice_tile` creates mutable slice views.
   Indexed writes through these views are not yet supported by NPU compilation.
 

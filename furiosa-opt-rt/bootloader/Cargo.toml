@@ -2,6 +2,11 @@
 # the image's bytes do not depend on where the repository is checked out.
 [workspace]
 
+# The symlinked ABI is private to this workspace. Cargo skips duplicate-package warnings
+# for unpublished packages when this repository is consumed as a Git dependency.
+[workspace.package]
+publish = false
+
 [workspace.dependencies]
 elf = { version = "0.8.0", default-features = false }
 thiserror-core = { package = "thiserror", version = "2.0.17", default-features = false }

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [v0.9.0]
+
 ### Changed
 
 - Replace `dma_gather_scaled` / `dma_gather_unscaled` with
@@ -14,35 +16,56 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Replace `dma_scatter` / `dma_scatter_unscaled` with
   `dst.view_mut().scatter::<IndexedAxis, Payload>().by_byte_offsets(index)` /
   `.by_positions::<Domain>(index)`, followed by `.from_dm(&mut device.tdma, updates)`.
-  `from_dm` consumes the updates; use `from_dm_view` to pass a view.
-- `IndexedAxis` declares the indexed region of the table or destination; `Payload` declares
-  the values transferred per index. HBM byte-offset indices infer `Domain`; SPM position
-  indices require it explicitly, including any named cluster axes.
-- Gather output and scatter updates may interleave domain and payload axes across their placement.
-  `IndexedAxis` must still be a consecutive region.
+  Use `from_dm_view` to pass an updates view.
+- Low-level `Tensor::gather` is no longer public and `Tensor::scatter` no longer takes a
+  `scaled: bool` argument. Use the staged HBM gather/scatter APIs above.
+- NPU backend `Function::{alloc,write,write_into,read,read_into}` are no longer public.
+  Use `furiosa-opt-rt::Device::alloc`, `HostTensor::to_hbm`, and `HbmTensor::to_host`;
+  use `.output(..)` for transfers into existing tensors.
+- `MappingExt::split_at` returns `Result<(Mapping, Mapping), SplitAtError>`.
+  `FindAxisError::SpanExceedsMapping` and `WindowAxisError::SpanExceedsMapping` become
+  `SpanDoesNotDivide`.
+- Replace `Mapping::remove_padding()` with `remove_outermost_padding()`.
+- `TileError::Split` becomes `SingletonLength`, `IndexNotLocated`, or `WindowDoesNotFit`.
+- `furiosa-opt-lower::ElementSizeError` now has only `NotByteAligned` and `NotElementAligned`;
+  update exhaustive matches accordingly.
+- In `furiosa-opt-rt`, replace `device.alloc(bytes)` with
+  `device.alloc(image::Memory::Dram, bytes)` for HBM, or `image::Memory::Sram` for resident SRAM.
+  Allocation failures use `Error::Allocation(AllocError)`; `FunctionError::UnsupportedSlotMemory`
+  becomes `WrongSlotMemory { slot, expects, has }`.
+- Recompile device functions with the 0.9.0 compiler and update `furiosa-opt-rt` together.
+  Images compiled by older versions are incompatible with the new runtime.
 
 ### Added
 
-- `gather::<..>().by_byte_offsets(index).sparse_prefix(valid_length)` limits work to a runtime
-  prefix, rounded up to a DMA skip-unit boundary. Every index entry must contain a valid byte
-  offset, including entries beyond `valid_length`.
-- `DmTensorView::to_spm` stages tiled DM windows for SPM gather, so large indices can be
-  processed in bounded chunks.
-- `HbmScalar<T>` passes one runtime `bool`, `i32`, `u32`, `i64`, `u64`, or 64-bit `usize` value
-  from the host to every chip in a device function. Create one with `HbmScalar::from_host`, update
-  its existing HBM allocation with `write`, and load it in device code with `to_spm`.
-- Device scalar expressions support Rust integer `as` casts among `i32`, `u32`, `i64`, `u64`, and
-  `usize`. Runtime `usize` values can select tensor tiles without narrowing to `i32`.
-- A runtime scalar can guard work inside a statically bounded `for` loop, including an
-  `#[unroll]` loop. Runtime loop bounds and `break` remain unsupported; use an `if` in each
-  iteration to skip work beyond the runtime limit.
-- `DmTensor::alloc(&ctx)` keeps SRAM across launches, borrowed through `&DmTensor` and
-  `&mut DmTensor`. Launch admission keeps compiler temporaries below every live resident.
-  Images record the temporary SRAM bound; the image and IPC versions remain at 1.
+- `gather::<..>().by_byte_offsets(index).sparse_prefix(valid_length)` adds a runtime prefix
+  limit to a gather.
+- `DmTensorView::to_spm` copies a DM view into an SPM tensor.
+- `HbmScalar<T>` passes a runtime `bool`, `i32`, `u32`, `i64`, `u64`, or 64-bit `usize` value
+  to device code through `from_host`, `write`, and `to_spm`.
+- Device scalar expressions support Rust integer `as` casts among `i32`, `u32`, `i64`, `u64`,
+  and `usize`, including `usize` tensor indices.
+- Runtime scalar conditions can guard work inside statically bounded `for` and `#[unroll]` loops.
+- `DmTensor::alloc(&device)?` allocates SRAM that persists across launches, passed to kernels
+  through `&DmTensor` or `&mut DmTensor`.
+- `furiosa-opt-rt::Device::memory()` and `furiosa-opt-std::Device<Npu>::memory()` report
+  per-chip HBM capacity, available bytes, and the largest contiguous free span.
+- `furiosa-opt-lower` exposes `gather_payload`, `scatter_payload`, and `validate_*` helpers
+  for indirect DMA validation.
+- Mapping inspection adds `MappingExt::{remove_axis,is_broadcast,has_bottom_pad,has_no_padding}`
+  and `Mapping::innermost_writable_size`.
 
 ### Fixed
 
-- `DmTensorViewMut::to_dm_view` no longer writes into the destination mapping's `Bottom` padding.
+- `DmTensorViewMut::to_dm_view` preserves the destination mapping's `Bottom` padding.
+- Vector pipelines support repeated reads of one VRF value.
+- Runtime loop indices preserve their updated values across iterations in optimized builds.
+- Unsupported register-file stores report compilation errors when they would discard computation.
+- Inter-transpose layouts exceeding the consecutive-transfer limit fail compilation.
+- Kernels exceeding `trace` profiling capacity can still run unprofiled or use `info` / `debug`.
+- Launches reject conflicting argument bindings, overlapping writable buffers, and misaligned
+  SRAM views. Completed launches release temporary buffers.
+- `Ident::new` accepts lowercase ASCII axis names, matching identifiers parsed from strings.
 
 ## [v0.8.1]
 

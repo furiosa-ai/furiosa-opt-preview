@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-opt-examples"
-version = "0.8.1+g3c091cca"
+version = "0.9.0+ge63a28c3"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
@@ -8,7 +8,7 @@ publish = false
 [package.metadata.furiosa-opt]
 
 [dependencies]
-furiosa-opt-std = { path = "../furiosa-opt-std", version = "0.8" }
+furiosa-opt-std = { path = "../furiosa-opt-std", version = "0.9" }
 
 [dev-dependencies]
 criterion = { workspace = true }

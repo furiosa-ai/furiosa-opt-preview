@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-mapping-macro"
-version = "0.9.0+g4fb9f25f"
+version = "0.9.0+gd539ab2c"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/furiosa-ai/furiosa-opt"

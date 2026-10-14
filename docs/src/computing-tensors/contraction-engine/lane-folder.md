@@ -32,11 +32,11 @@ OutPacket = [Lane # 8]
 axes![N = 8, M = 4, P = 16];
 
 /// Lane folds into OutPacket.
-fn lane_interleaved<'l, const T: Tu>(
+fn lane_interleaved<'l>(
     // Input from upstream Time Reducer: Lane = m![N], Time = m![M], Packet = m![P].
-    input: ContractTimeTensor<'l, T, f32, m![1], m![1 # 2], m![1 # 256], m![N], m![M], m![P]>,
+    input: ContractTimeTensor<'l, { Tu::Main }, f32, m![1], m![1 # 2], m![1 # 256], m![N], m![M], m![P]>,
     // Output: OutTime = m![M, P] = [Time, Packet], OutPacket = m![N] = [Lane].
-) -> ContractTensor<'l, T, f32, m![1], m![1 # 2], m![1 # 256], m![M, P], m![N]> {
+) -> ContractTensor<'l, { Tu::Main }, f32, m![1], m![1 # 2], m![1 # 256], m![M, P], m![N]> {
     input.contract_lane::<m![M, P], m![N]>(LaneMode::Interleaved)
 }
 # 
@@ -77,11 +77,11 @@ For `Packet::SIZE < 32`, `[PadPacket / 8]::SIZE = ceil(Packet::SIZE / 8)` is the
 axes![N = 8, M = 4, P = 16];
 
 /// Lane folds into OutTime.
-fn lane_sequential<'l, const T: Tu>(
+fn lane_sequential<'l>(
     // Input from upstream Time Reducer: Lane = m![N], Time = m![M], Packet = m![P].
-    input: ContractTimeTensor<'l, T, f32, m![1], m![1 # 2], m![1 # 256], m![N], m![M], m![P]>,
+    input: ContractTimeTensor<'l, { Tu::Main }, f32, m![1], m![1 # 2], m![1 # 256], m![N], m![M], m![P]>,
     // Output: OutTime = m![M, N, P / 8] = [Time, Lane, Packet / 8], OutPacket = m![P % 8] = [Packet % 8].
-) -> ContractTensor<'l, T, f32, m![1], m![1 # 2], m![1 # 256], m![M, N, P / 8], m![P % 8]> {
+) -> ContractTensor<'l, { Tu::Main }, f32, m![1], m![1 # 2], m![1 # 256], m![M, N, P / 8], m![P % 8]> {
     input.contract_lane::<m![M, N, P / 8], m![P % 8]>(LaneMode::Sequential)
 }
 # 

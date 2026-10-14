@@ -103,7 +103,6 @@ impl<
 // ANCHOR: contract_outer_def
 impl<
     'l,
-    const T: Tu,
     P: CanApplyContractOuter,
     D: Scalar + ContractionCast,
     Chip: M,
@@ -112,7 +111,7 @@ impl<
     Time: M,
     Packet: M,
     B: Backend,
-> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+> TuTensor<'l, { Tu::Main }, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Runs the Outer stage: stashes the two un-broadcast operands (widened to the accumulator type)
     /// and the layouts [`super::ContractTimeTensor::contract_lane`] needs to fuse them into a [`LazyContraction`]. No
@@ -120,11 +119,25 @@ impl<
     ///
     /// The impl block binds [`ContractionCast`], so this method does not exist on a `TuTensor` whose
     /// element type the Multiplier has no MAC for.
+    ///
+    /// Available only in the main context.
     #[primitive(TuTensor::contract_outer)]
     pub fn contract_outer<OutTime: M, OutPacket: M, Lane: M, TrfElement: M, TrfD>(
         self,
         trf_tensor: &TrfTensor<TrfD, Chip, Cluster, Slice, Lane, TrfElement, B>,
-    ) -> ContractOuterTensor<'l, T, <D as ContractionCast>::Output, D, Chip, Cluster, Slice, Lane, OutTime, OutPacket, B>
+    ) -> ContractOuterTensor<
+        'l,
+        { Tu::Main },
+        <D as ContractionCast>::Output,
+        D,
+        Chip,
+        Cluster,
+        Slice,
+        Lane,
+        OutTime,
+        OutPacket,
+        B,
+    >
     where
         D: Cast<<D as ContractionCast>::Output>,
         // The weight (TRF) type must form a valid contraction-engine operand pair with the

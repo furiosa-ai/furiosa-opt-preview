@@ -20,15 +20,15 @@ For example, the kernel below reduces a 2D tensor along `B` (surviving only `A`)
 axes![A = 2048, B = 32];
 
 /// Reduces along B; A survives.
-fn reduce_b<'l, const T: Tu>(
+fn reduce_b<'l>(
     // Streaming operand: Slice = m![A / 8] (256 outer A chunks across slices).
     // Time = m![B / 16, A % 8]; Packet = m![B % 16].
     // B splits across Packet (B % 16) and Time (B / 16): each cycle produces a partial sum.
-    input: CollectTensor<'l, T, bf16, m![1], m![1 # 2], m![A / 8], m![B / 16, A % 8], m![B % 16]>,
+    input: CollectTensor<'l, { Tu::Main }, bf16, m![1], m![1 # 2], m![A / 8], m![B / 16, A % 8], m![B % 16]>,
     // TRF operand: single-lane weight per slice.
     trf: &TrfTensor<bf16, m![1], m![1 # 2], m![A / 8], m![1], m![B]>,
     // Output: one f32 per (slice, A % 8) cell.
-) -> ContractTensor<'l, T, f32, m![1], m![1 # 2], m![A / 8], m![A % 8], m![1 # 8]> {
+) -> ContractTensor<'l, { Tu::Main }, f32, m![1], m![1 # 2], m![A / 8], m![A % 8], m![1 # 8]> {
     input
          // Outer: Lane = m![1], OutTime = m![B / 16, A % 8], OutPacket = m![B % 16].
          .contract_outer::<m![B / 16, A % 8], m![B % 16], _, _, _>(trf)

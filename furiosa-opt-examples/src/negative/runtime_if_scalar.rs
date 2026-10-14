@@ -44,6 +44,20 @@ pub fn runtime_if_scalar_immediate(
     result.to_hbm(&mut device.tdma)
 }
 
+/// A float branch result feeds only a discarded calculation, yet merging it requires a core slot.
+#[device(chip = 1, pe = 4)]
+pub fn runtime_if_discarded_float(
+    device: &mut Device,
+    pick: &HbmScalar<usize>,
+    input: &HbmTensor<f32, Chip, m![N]>,
+) -> HbmTensor<f32, Chip, m![N]> {
+    let pick = pick.to_spm(&mut device.tdma);
+    let coefficient = if pick == 0 { 1.0f32 } else { 2.0f32 };
+    let _discarded = -coefficient;
+    let input_dm = input.to_dm::<m![1], m![N / 4], m![N % 4]>(&mut device.tdma);
+    input_dm.to_hbm(&mut device.tdma)
+}
+
 /// An observable overflow flag from `overflowing_add` must not be discarded.
 #[device(chip = 1)]
 pub fn overflowing_add_flag(device: &mut Device, input_hbm: &HbmTensor<i8, Chip, m![N]>) -> HbmTensor<i8, Chip, m![N]> {

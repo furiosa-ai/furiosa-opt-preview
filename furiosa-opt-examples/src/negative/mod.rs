@@ -29,7 +29,6 @@
 //! `cargo test --doc` is their whole gate, and they appear in neither `snapshot.toml` nor the
 //! refused / compiled counts.
 
-pub mod array_index;
 pub mod blocking_flits;
 pub mod contract_outer_assertions;
 pub mod dm_slice;

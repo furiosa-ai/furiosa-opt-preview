@@ -151,18 +151,8 @@ impl<
 // ANCHOR_END: commit_trim_impl
 
 // ANCHOR: commit_cast_impl
-impl<
-    'l,
-    const T: Tu,
-    P: CanApplyCommitCast,
-    D: MaterializableScalar,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    Time: M,
-    Packet: M,
-    B: Backend,
-> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<'l, P: CanApplyCommitCast, D: MaterializableScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    TuTensor<'l, { Tu::Main }, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Runs the Commit Adapter's type-casting stage.
     ///
@@ -171,8 +161,12 @@ impl<
     /// work. See [`CommitCast`](crate::prelude::CommitCast) for why this is the
     /// only conversion, and [`commit_cast_relu`](Self::commit_cast_relu) for the
     /// variant that fuses a ReLU.
+    ///
+    /// Available only in the main context.
     #[primitive(TuTensor::commit_cast)]
-    pub fn commit_cast<OutD: Scalar>(self) -> CommitCastTensor<'l, T, OutD, Chip, Cluster, Slice, Time, Packet, B>
+    pub fn commit_cast<OutD: Scalar>(
+        self,
+    ) -> CommitCastTensor<'l, { Tu::Main }, OutD, Chip, Cluster, Slice, Time, Packet, B>
     where
         D: CommitCast<OutD>,
     {
@@ -185,8 +179,12 @@ impl<
     /// A separate method rather than an argument because the two are separate
     /// hardware conversions (`CommitF32ToBf16` and `CommitF32ToBf16Relu`), and
     /// ReLU has no standalone stage to select at run time.
+    ///
+    /// Available only in the main context.
     #[primitive(TuTensor::commit_cast_relu)]
-    pub fn commit_cast_relu<OutD: Scalar>(self) -> CommitCastTensor<'l, T, OutD, Chip, Cluster, Slice, Time, Packet, B>
+    pub fn commit_cast_relu<OutD: Scalar>(
+        self,
+    ) -> CommitCastTensor<'l, { Tu::Main }, OutD, Chip, Cluster, Slice, Time, Packet, B>
     where
         D: CommitCast<OutD>,
     {
@@ -197,18 +195,8 @@ impl<
 // ANCHOR_END: commit_cast_impl
 
 // ANCHOR: commit_valid_count_pack_impl
-impl<
-    'l,
-    const T: Tu,
-    P: CanApplyCommitValidCountPack,
-    D: Scalar,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    Time: M,
-    Packet: M,
-    B: Backend,
-> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<'l, P: CanApplyCommitValidCountPack, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    TuTensor<'l, { Tu::Sub }, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Runs the Commit Adapter's valid-count-packing stage (sub-context
     /// only). The count comes from a per-call argument; the trailing
@@ -220,7 +208,7 @@ impl<
     pub fn commit_valid_count_pack(
         self,
         _valid_count: usize,
-    ) -> CommitValidCountPackTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B> {
+    ) -> CommitValidCountPackTensor<'l, { Tu::Sub }, D, Chip, Cluster, Slice, Time, Packet, B> {
         verify_commit_valid_count_pack::<D, Time, Packet>();
         CommitValidCountPackTensor::new(self.device, self.inner.transpose(false))
     }

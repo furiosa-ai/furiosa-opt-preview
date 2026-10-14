@@ -5,7 +5,7 @@ It mirrors the [Fetch Adapter](./fetch-adapter.md) on the output side of the Ten
 
 The adapter's stages chain as dedicated `.commit_xxx(...)` methods on the upstream tensor, and the chain always ends in `.commit(...)` for the actual DM write.
 [Trimming](#trimming) is the mandatory first stage: `.commit()` / `.commit_view()` are reachable only after `.commit_trim(...)`, so every commit is trimmed first (it is how flit padding is dropped).
-The other public stage is optional type casting, and main and sub contexts then diverge.
+After trimming, type casting is optional and available only in the main context.
 Generate Mode is a separate sub-context path used internally by `memset` for immediate fills; it does not chain off a `TuTensor`.
 
 - Main pipeline: [Trimming](#trimming) → [Type Casting](#type-casting) (optionally fusing ReLU) → `.commit()`.
@@ -16,6 +16,8 @@ Generate Mode is a separate sub-context path used internally by `memset` for imm
 | [Trimming](#trimming) | ✅ | ✅ |
 | [Type Casting](#type-casting) (optional fused ReLU) | ✅ | ❌ |
 | Generate Mode (internal `memset` path) | ❌ | ✅ |
+
+The type system enforces each context restriction: each stage's method exists on one context's `TuTensor` only.
 
 ## Trimming
 
@@ -126,4 +128,18 @@ fn commit_cast_relu_example<'l, const T: Tu>(
     input.commit_cast_relu::<bf16>()
 }
 ```
+
+
+## Generate Mode
+
+Generate Mode fills a DM region with a constant through `DmTensorViewMut::memset(value, &mut device.sub)`.
+The fill runs in the sub context and takes a value of the tensor's element type, such as `0` for `i32` or `const { bf16::from_f32(1.0) }` for `bf16`.
+
+It does not fetch from DM and does not consume any upstream Tensor Unit stream.
+The constant `value` and the destination are the only inputs; the rest of the Tensor Unit pipeline (Fetch / Switch / Collect / Contraction / Vector / Cast / Transpose / Commit Adapter stages) is bypassed entirely.
+
+Device compilation requires a compile-time constant value and a whole-region view from `view_mut()`.
+Non-constant values and tiled sub-view fills are rejected at translation.
+Supported element types are `i8`, `i16`, `i32`, `f32`, `bf16`, `f8e4m3`, and `i4`; sub-byte regions must be byte-aligned.
+`f4e2m1` fills are not yet supported by device compilation.
 

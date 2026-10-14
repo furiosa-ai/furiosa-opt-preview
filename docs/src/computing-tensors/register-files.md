@@ -27,6 +27,9 @@ Where in the register file it lands is the compiler's to decide, so the call nam
 {{#include ../../../furiosa-opt-std/src/engine/collect.rs:collect_to_trf}}
 ```
 
+The store has one signature per context, and the examples here take the sub context's.
+A store issued from the main context takes `device.sub` as an argument, because the write registers live in the sub context's register map: see [Which context a store occupies](#which-context-a-store-occupies).
+
 `.to_trf` reshapes the streaming `Time` / `Packet` into `Lane` / `Element`:
 
 ```text
@@ -44,8 +47,8 @@ The following simple case occupies the full TRF:
 # use furiosa_opt_std::prelude::*;
 axes![B = 32];
 
-fn load_trf<'l, const T: Tu>(
-    input: CollectTensor<'l, T, i8, m![1], m![1 # 2], m![1 # 256], m![1], m![B]>,
+fn load_trf<'l>(
+    input: CollectTensor<'l, { Tu::Sub }, i8, m![1], m![1 # 2], m![1 # 256], m![1], m![B]>,
 ) -> TrfTensor<i8, m![1], m![1 # 2], m![1 # 256], m![1], m![B]> {
     input.to_trf()
 }
@@ -53,7 +56,7 @@ fn load_trf<'l, const T: Tu>(
 # fn main() -> Result<(), Error> {
 # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
 #
-# let c: CollectTensor<'_, _, i8, m![1], m![1 # 2], m![1 # 256], m![1], m![B]> = CollectTensor::new(&mut device.main, Tensor::zero());
+# let c: CollectTensor<'_, { Tu::Sub }, i8, m![1], m![1 # 2], m![1 # 256], m![1], m![B]> = CollectTensor::new(&mut device.sub, Tensor::zero());
 # let _o = load_trf(c);
 #
 # Ok(())
@@ -75,8 +78,8 @@ type Lane    = m![N];
 
 /// Stores matmul weights into TRF for consumption by `bmatmul` in
 /// [Contraction Engine: Example: Batched MatMul](./contraction-engine/index.md#example-batched-matmul).
-fn store_bmatmul_trf<'l, const T: Tu>(
-    input: CollectTensor<'l, T, bf16, Chip, Cluster, Slice, m![N, K / 16], m![K % 16]>,
+fn store_bmatmul_trf<'l>(
+    input: CollectTensor<'l, { Tu::Sub }, bf16, Chip, Cluster, Slice, m![N, K / 16], m![K % 16]>,
 ) -> TrfTensor<bf16, Chip, Cluster, Slice, Lane, m![K]> {
     input.to_trf()
 }
@@ -84,7 +87,7 @@ fn store_bmatmul_trf<'l, const T: Tu>(
 # fn main() -> Result<(), Error> {
 # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
 # 
-# let c: CollectTensor<'_, _, bf16, Chip, Cluster, Slice, m![N, K / 16], m![K % 16]> = CollectTensor::new(&mut device.main, Tensor::zero());
+# let c: CollectTensor<'_, { Tu::Sub }, bf16, Chip, Cluster, Slice, m![N, K / 16], m![K % 16]> = CollectTensor::new(&mut device.sub, Tensor::zero());
 # let _o = store_bmatmul_trf(c);
 #
 # Ok(())
@@ -133,7 +136,8 @@ Nothing after the Vector Engine can run in the same command, so a store cannot b
 
 #### Which context a store occupies
 
-A store issued from the main context runs its write through the sub context, whichever of the two positions above it takes, so it occupies both and takes `&mut device.sub` as well.
+A store issued from the main context runs its write through the sub context, whichever register file it targets and whichever of the two positions above it takes, so it occupies both and takes `&mut device.sub` as well.
+The scheduler reserves both contexts for the command, so no sub-context operation overlaps it.
 `device.main` and `device.sub` are separate fields, so a kernel (which holds `&mut Device`) borrows both at once, as the example above does.
 
 The borrow lasts the statement, which is the extent of the occupancy: the sub context is free again once the command retires.

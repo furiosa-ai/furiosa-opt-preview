@@ -71,3 +71,17 @@ pub fn borrowed_dm_to_hbm(
 ) -> (HbmTensor<i32, Chip, m![S, E]>, HbmTensor<i32, Chip, m![S, E]>) {
     (input.to_hbm(&mut ctx.tdma), output.to_hbm(&mut ctx.tdma))
 }
+
+axes![A = 8, B = 8, C = 8, F = 32, G = 8, H = 128];
+
+/// Slice-to-slice DMA into a resident: streams split by destination slice group start past slice 0.
+#[device(chip = 1)]
+pub fn transpose_slices(
+    ctx: &mut Device,
+    input: &HbmTensor<i8, Chip, m![A, F, C, B, G, H]>,
+    output: &mut DmTensor<i8, Chip, m![B / 4], m![B % 4, A, C], m![G, F, H]>,
+) {
+    let staged: DmTensor<i8, Chip, m![A / 4], m![A % 4, F / 2, C / 2], m![B, G, C % 2, F % 2, H]> =
+        input.to_dm(&mut ctx.tdma);
+    staged.view().to_dm_view(&mut ctx.tdma, output.view_mut());
+}

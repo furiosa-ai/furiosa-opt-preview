@@ -1,0 +1,271 @@
+use std::sync::Arc;
+
+use furiosa_mapping::*;
+
+use crate::Error;
+use crate::scalar::{MaterializableScalar, RuntimeScalar, Scalar};
+use crate::storage::BufStorage;
+use crate::tensor::Tensor;
+use crate::tensor::memory::{DmAllocError, DmTensor, HbmScalar, HbmTensor};
+
+use super::registry;
+use crate::backend::indirect::IndexUnit;
+use crate::backend::internal;
+use crate::cast::{ContractionAccumulator, ContractionCast};
+use crate::context::{Dma, DmaContext};
+use crate::runtime::{HbmBufferSlice, HostBuffer, HostBufferSlice, HostBufferSliceMut};
+use furiosa_opt_rt as rt;
+
+/// NPU backend.
+///
+/// Host storage uses packed CPU memory; an HBM tensor's bytes live on the device and its host
+/// side holds none.
+#[derive(Debug, Clone, Copy)]
+pub struct Npu;
+
+/// An opened device with one slot per registry entry, so a `#[device]` fn loads once per device.
+pub struct Device {
+    pub(super) device: Arc<rt::Device>,
+    pub(super) registry: registry::Registry,
+}
+
+impl std::fmt::Debug for Device {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Device").finish_non_exhaustive()
+    }
+}
+
+/// Why the NPU host refuses a device function's own memory access: the compiled program performs
+/// it on the device, and the host moves HBM bytes only by DMA.
+const DEVICE_ONLY: &str = "the NPU host reaches device memory only by DMA, not a device function's body";
+
+impl internal::Backend for Npu {
+    type Storage<D: Scalar> = BufStorage<D, HostBuffer>;
+
+    fn load_memory<D: Scalar>(_: &HbmBufferSlice<'_, Self>) -> Self::Storage<D> {
+        panic!("{DEVICE_ONLY}")
+    }
+
+    fn scratch(_: usize, _: usize) -> rt::Buffer {
+        panic!("{DEVICE_ONLY}")
+    }
+
+    fn from_vec<D: Scalar>(_mapping: &Mapping, data: impl IntoIterator<Item = D>) -> Self::Storage<D> {
+        BufStorage::from_vec(data)
+    }
+
+    fn from_buf<D: MaterializableScalar>(_mapping: &Mapping, buf: Vec<u8>) -> Self::Storage<D> {
+        BufStorage::from_buf(buf)
+    }
+
+    fn alloc_dm<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M>(
+        group: &Self::Device,
+    ) -> Result<DmTensor<D, Chip, Cluster, Slice, Element, Self>, DmAllocError> {
+        // One slice's bytes: a resident sits at the same address in every slice of every device.
+        let size = D::size_in_bytes_from_length(Element::SIZE);
+        let devices = usize::from(group.device.topology().chips);
+        if Chip::SIZE != devices {
+            return Err(DmAllocError::Topology {
+                tensor_chips: Chip::SIZE,
+                device_chips: devices,
+            });
+        }
+        let buffer = group.device.alloc(rt::memory::Kind::Sram, size)?;
+        let mut tensor = DmTensor::from_parts(Tensor::zeroed());
+        tensor.own(buffer);
+        Ok(tensor)
+    }
+
+    fn zeroed<D: Scalar>(mapping: &Mapping) -> Self::Storage<D> {
+        BufStorage::zeroed(mapping.size())
+    }
+
+    fn into_vec<D: MaterializableScalar>(storage: Self::Storage<D>, mapping: &Mapping) -> Vec<D> {
+        storage.into_vec(mapping)
+    }
+
+    fn into_buf<D: Scalar>(storage: Self::Storage<D>, mapping: &Mapping) -> Vec<u8> {
+        storage.into_buf(mapping)
+    }
+
+    fn map<D: Scalar, D2: Scalar>(src: &Self::Storage<D>, f: impl Fn(D) -> D2 + Sync) -> Self::Storage<D2> {
+        src.map(f)
+    }
+
+    fn zip_with<D: MaterializableScalar, D2: MaterializableScalar, D3: Scalar>(
+        a: &Self::Storage<D>,
+        b: &Self::Storage<D2>,
+        f: impl Fn(D, D2) -> D3 + Sync,
+    ) -> Self::Storage<D3> {
+        a.zip_with(b, f)
+    }
+
+    fn zip3_with<D: MaterializableScalar, D2: MaterializableScalar, D3: MaterializableScalar, D4: Scalar>(
+        a: &Self::Storage<D>,
+        b: &Self::Storage<D2>,
+        c: &Self::Storage<D3>,
+        f: impl Fn(D, D2, D3) -> D4 + Sync,
+    ) -> Self::Storage<D4> {
+        a.zip3_with(b, c, f)
+    }
+
+    fn transpose<D: Scalar, Src: M, Dst: M>(
+        dst: &mut Self::Storage<D>,
+        src: &Self::Storage<D>,
+        src_offset: &Index,
+        dst_offset: &Index,
+        src_map: &Mapping,
+        dst_map: &Mapping,
+        allow_broadcast: bool,
+        preserve_copies: bool,
+    ) {
+        dst.transpose::<Src, Dst>(
+            src,
+            src_offset,
+            dst_offset,
+            src_map,
+            dst_map,
+            allow_broadcast,
+            preserve_copies,
+        );
+    }
+
+    fn reduce<D: MaterializableScalar, Src: M, Dst: M>(
+        src: &Self::Storage<D>,
+        reduce_fn: impl Fn(D, D) -> D + Sync,
+        identity: D,
+        allow_broadcast: bool,
+    ) -> Self::Storage<D> {
+        src.reduce::<Src, Dst, _>(reduce_fn, identity, allow_broadcast)
+    }
+
+    fn contraction<D: ContractionCast + MaterializableScalar>(
+        lhs: &Self::Storage<D>,
+        rhs: &Self::Storage<D>,
+        lhs_map: &Mapping,
+        rhs_map: &Mapping,
+        pre_reduce: &Mapping,
+        out: &Mapping,
+    ) -> Self::Storage<D> {
+        BufStorage::contraction(lhs, rhs, lhs_map, rhs_map, pre_reduce, out)
+    }
+
+    fn contraction_prewidened<D: ContractionAccumulator>(
+        lhs: &Self::Storage<D>,
+        rhs: &Self::Storage<D>,
+        lhs_map: &Mapping,
+        rhs_map: &Mapping,
+        pre_reduce: &Mapping,
+        out: &Mapping,
+    ) -> Self::Storage<D> {
+        BufStorage::contraction_prewidened(lhs, rhs, lhs_map, rhs_map, pre_reduce, out)
+    }
+
+    fn scatter<D: Scalar, Src: M, Domain: M, IndexedAxis: M, Dst: M, Idx: M>(
+        src: &Self::Storage<D>,
+        dst: &mut Self::Storage<D>,
+        index: &Self::Storage<i32>,
+        chip: &Mapping,
+        unit: IndexUnit,
+    ) {
+        src.scatter::<Src, Domain, IndexedAxis, Dst, Idx>(dst, index, chip, unit);
+    }
+
+    fn gather<D: MaterializableScalar, Src: M, IndexedAxis: M, Dst: M, Idx: M>(
+        src: &Self::Storage<D>,
+        dst: &mut Self::Storage<D>,
+        index: &Self::Storage<i32>,
+        chip: &Mapping,
+        read: crate::backend::GatherRead<'_, Self::Storage<i32>>,
+    ) {
+        src.gather::<Src, IndexedAxis, Dst, Idx>(dst, index, chip, read);
+    }
+
+    fn gather_table<D: MaterializableScalar, Dst: M, Idx: M>(
+        src: &Self::Storage<D>,
+        dst: &mut Self::Storage<D>,
+        index: &Self::Storage<i32>,
+        mapping: &Mapping,
+        indexed: &Mapping,
+        chip: &Mapping,
+        read: crate::backend::GatherRead<'_, Self::Storage<i32>>,
+    ) {
+        src.gather_into::<Dst, Idx>(dst, index, mapping, indexed, chip, read);
+    }
+
+    fn scatter_table<D: Scalar, Src: M, Key: M, Idx: M>(
+        src: &Self::Storage<D>,
+        dst: &mut Self::Storage<D>,
+        index: &Self::Storage<i32>,
+        mapping: &Mapping,
+        indexed: &Mapping,
+        chip: &Mapping,
+        unit: IndexUnit,
+    ) {
+        src.scatter_into::<Src, Key, Idx>(dst, index, mapping, indexed, chip, unit);
+    }
+
+    fn reshape<D: Scalar, Src: M, Dst: M>(src: &Self::Storage<D>) -> Self::Storage<D> {
+        src.reshape::<Src, Dst>()
+    }
+
+    fn transmute<D: MaterializableScalar, Src: M, Dst: M>(
+        storage: Self::Storage<D>,
+        src_map: &Mapping,
+        dst_map: &Mapping,
+    ) -> Self::Storage<D> {
+        storage.transmute(src_map, dst_map)
+    }
+
+    async fn to_hbm_into<D: MaterializableScalar, Chip: M, Element: M>(
+        host: &Self::Storage<D>,
+        dma: &DmaContext<{ Dma::Pcie }, Self>,
+        hbm: &mut HbmTensor<D, Chip, Element, Self>,
+    ) -> Result<(), Error> {
+        let to = hbm.memory_mut().buffer.slice_mut(..)?;
+        Ok(dma
+            .device()
+            .device
+            .write([(HostBufferSlice::from(host.inner()).0, to)])
+            .await?)
+    }
+
+    async fn to_hbm_scalar_into<D: RuntimeScalar>(
+        value: D,
+        dma: &DmaContext<{ Dma::Pcie }, Self>,
+        hbm: &mut HbmScalar<D, Self>,
+    ) -> Result<(), Error> {
+        let bytes = HbmScalar::<D, Self>::encode(value);
+        let chips = hbm.memory_mut().buffer.slice_mut(..bytes.len())?.chips();
+        Ok(dma
+            .device()
+            .device
+            .write(std::iter::repeat(bytes.as_slice().into()).zip(chips))
+            .await?)
+    }
+
+    async fn from_hbm_into<D: MaterializableScalar, Chip: M, Element: M>(
+        hbm: &HbmTensor<D, Chip, Element, Self>,
+        dma: &DmaContext<{ Dma::Pcie }, Self>,
+        host: &mut Self::Storage<D>,
+    ) -> Result<(), Error> {
+        let from = hbm.memory().buffer.slice(..)?;
+        Ok(dma
+            .device()
+            .device
+            .read([(from, HostBufferSliceMut::from(host.inner_mut()).0)])
+            .await?)
+    }
+
+    fn host_storage<D: Scalar>(buffer: HostBuffer) -> Self::Storage<D> {
+        BufStorage::from(buffer)
+    }
+
+    fn host_buffer<D: Scalar>(storage: Self::Storage<D>) -> HostBuffer {
+        storage.into_inner()
+    }
+
+    fn pin<D: MaterializableScalar>(storage: Self::Storage<D>) -> Result<Self::Storage<D>, Error> {
+        Ok(BufStorage::from_inner(storage.into_inner().pin()?))
+    }
+}

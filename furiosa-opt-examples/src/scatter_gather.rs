@@ -170,6 +170,27 @@ pub fn sparse_gather_runtime_length(
     values.to_hbm(&mut device.tdma)
 }
 
+/// Gathers the runtime-valid prefix into a buffer under a guard, so a run of no rows issues no
+/// gather; the buffer is declared outside the guard and read after it.
+#[device(chip = 1)]
+pub fn sparse_gather_guarded_view(
+    device: &mut Device,
+    rows: &HbmTensor<i32, Chip, m![1]>,
+    table: &HbmTensor<bf16, Chip, m![K, D]>,
+    index: &HbmTensor<i32, Chip, m![G]>,
+) -> HbmTensor<bf16, Chip, m![G, D]> {
+    let rows = rows.extent::<m![SF]>();
+    let mut values = DmTensor::<bf16, Chip, PaddedCluster, m![G / 2], m![G % 2, D]>::new();
+    for _ in 0..rows.min(1) {
+        table
+            .gather::<m![K], m![D]>()
+            .by_byte_offsets::<m![G]>(index)
+            .sparse_prefix((rows * 128) as i32)
+            .to_dm_view(&mut device.tdma, values.view_mut());
+    }
+    values.to_hbm(&mut device.tdma)
+}
+
 /// Gathers from a table placed per chip through one index list every chip shares.
 ///
 /// The index chip mapping is a broadcast, so one list sits in HBM and each chip reads the same

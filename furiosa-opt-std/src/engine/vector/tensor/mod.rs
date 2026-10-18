@@ -47,12 +47,14 @@
 //! Once set, `VeOrder` is preserved through all subsequent operations.
 //! It prevents re-entering the same VE block as an initial entry path.
 
+mod scale;
 mod vector_tensor;
 mod vector_tensor_pair;
 mod verify;
 
 use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
+pub use scale::ScaleOperand;
 use std::marker::PhantomData;
 pub use vector_tensor::*;
 pub use vector_tensor_pair::*;

@@ -35,7 +35,31 @@ pub(crate) fn narrow(src: &Mapping, dst: &Mapping) -> (Mapping, Mapping) {
                 rename(RBox::into_inner(left), other).pair(rename(RBox::into_inner(right), other))
             }
             Mapping::Stride { inner, stride } => rename(RBox::into_inner(inner), other).stride(stride),
-            Mapping::Resize { inner, resize } => rename(RBox::into_inner(inner), other).resize(resize),
+            Mapping::Resize { inner, resize } => {
+                let inner = RBox::into_inner(inner);
+                let prefix = match &inner {
+                    Mapping::Symbol { symbol, size } => Some((*symbol, *size, 1)),
+                    Mapping::Stride { inner, stride } => match &**inner {
+                        Mapping::Symbol { symbol, size } => Some((*symbol, *size, *stride)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match prefix {
+                    Some((symbol, size, stride))
+                        if resize * stride < size
+                            && other.contains(&(symbol, resize * stride))
+                            && !other.contains(&(symbol, size)) =>
+                    {
+                        Mapping::Symbol {
+                            symbol,
+                            size: resize * stride,
+                        }
+                        .stride(stride)
+                    }
+                    _ => rename(inner, other).resize(resize),
+                }
+            }
             Mapping::Padding { inner, padding, kind } => rename(RBox::into_inner(inner), other).padding(padding, kind),
             Mapping::Symbol { .. } | Mapping::Broadcast { .. } => mapping,
         }

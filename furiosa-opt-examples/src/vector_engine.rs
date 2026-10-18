@@ -29,9 +29,11 @@ axes![
 mod branch;
 mod normal;
 mod reduce;
+mod scan;
 mod zip;
 
 pub use branch::*;
 pub use normal::*;
 pub use reduce::*;
+pub use scan::*;
 pub use zip::*;

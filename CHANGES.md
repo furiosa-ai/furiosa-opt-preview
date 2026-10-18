@@ -21,6 +21,24 @@ How entries are written:
 
 - An `#[unroll]` loop over an empty constant range expands to nothing, as the same loop without
   `#[unroll]` does; it was rejected before.
+- Large kernels compile in less time, and the compiled images are byte-identical.
+- A multi-chip or multi-cluster kernel waits less around a transfer. A transfer's publication
+  (data sync, returning syncs, cluster sync) moves from right after the transfer toward the first
+  use of its result, also when a loop carries the result to the next trip; a remote write's
+  destination is released right after its owner last touches it; and an indirect DMA releases its
+  slice entry once it is issued. Independent work issues while the transfer runs.
+- A gather with a runtime prefix issues one descriptor per run of index positions on a PE, and
+  one per PE once the prefix reaches its later runs; it split every digit above the innermost
+  into single positions.
+- Equal constants that several scopes stage share one SRAM slot after hoisting.
+- A gather in a loop whose runtime prefix reads its lengths from a tensor the loop captures stages
+  the length table into SPM once, in the outermost enclosing scope whose SPM still holds it,
+  instead of on every trip; the transfer issues as soon as the table's source exists.
+- The two arms of a runtime branch, written as loops whose trip counts are never both nonzero
+  (`for _ in 0..s` and `for _ in 0..1 - s`), share data memory: a loop body may use the pages of
+  a `DmTensor` that only the other arm writes or reads, or that is first written after the loop.
+  A kernel whose arms together need more data memory than a slice holds compiles; it stopped with
+  `Insufficient resources` for `Sram`.
 - `Device::new` takes a `Topology`, which opens the first free placement of that shape, or a
   `Placement`, which opens exactly there; `device.placement()` tells where it opened.
 - Switching kernels avoids the code copy at launch when the next launch is already submitted
@@ -39,6 +57,115 @@ How entries are written:
   `Device::new(topology)`, allocate with `HbmBuffer::alloc(&device, bytes)`, move bytes with
   `to_hbm` / `to_host` as tensors move, and launch with `launch(f, args)` or a `Kernel` from
   `f.load(&device)`.
+- Chip-local DRAM fills upward from the end of the peer-visible window, as shared DRAM fills the
+  window, so buffers allocated back to back stay in ascending order and a slice over them keeps one
+  stride. Chip-local allocations used to fill downward from the top of DRAM.
+
+### Added
+
+- A task chunk may span up to the device's 2-MiB task code region (`TASK_CODE`), so an instruction
+  whose code alone exceeds the 1-MiB chunk the compiler splits at, such as a loop with a long
+  body, compiles into a chunk of its own instead of stopping the compile. Two consecutive chunks run
+  from the two ends of the region; an older runtime refuses such an image at parse.
+- `Slice::gather_window::<Axis, LEN, Window, Indexed, Payload>(start)` gathers one field of each
+  block of a slice of HBM tensors, such as one of two E4M3 fields in a 4096-byte block; the
+  gathered rows keep their byte offsets within the block.
+- `GatherPlan::to_dm_view(&mut device.tdma, destination)` gathers into a region of an existing
+  data-memory tensor and leaves the rest of it unchanged. After `sparse_prefix` it writes only the
+  runtime prefix, so a gather under a runtime guard can land in a buffer declared outside the
+  guard.
+- `vector_cumsum(op, read, write)` carries each lane's running `op` in the operand register from
+  one element of the stream to the next, for `i32` and `f32`. With a branch log that marks the
+  first and last element of each span, it computes a prefix sum per span.
+- `vector_scale(Branched::imm(guard, factor))` on a tagged vector scales only the elements whose
+  tag matches `guard` and keeps the others.
+- A `&DmTensor` that holds one scalar per slice is a vector-engine register operand: each slice
+  reads its own value from SRAM, without a register-file transfer.
+
+### Fixed
+
+- A Tensor Unit fetch from a tensor whose `Slice` pads an axis past its next power of two, such as
+  40 heads on `m![Heads # 256]`, compiles; it stopped in LIR with an internal compiler error.
+- A DMA through a padded composite axis such as `[S, Phases] #{!} 1104` copies each row from its
+  own source row; it read every row from the first one without an error.
+- Reading through a runtime-indexed array of references that names one tensor more than once
+  (`[x; 2][index]` in a runtime loop) compiles; LIR verification stopped it with "tries to finish
+  read in invalid state".
+- A reduction that keeps an axis written as two adjacent digits outside the reduced axis passes
+  the accumulator check; it counted every kept cell as an accumulator slot.
+- A multi-chip device function compiles with more than 4 GiB of outputs that only their own chip
+  writes; EDF verification counted every output against the 4-GiB peer-visible DRAM budget and
+  stopped it with "dram shared size is not enough".
+- On the CPU backend, `Cmp::LessUnsigned` and `Cmp::GreaterUnsigned` compare magnitudes, as the
+  NPU's branch unit does: `-4 <u 7` holds. They compared raw bit patterns, so the backends disagreed
+  on negative elements.
+- `HbmTensorView::to_spm` of a view mapped over several chips compiles: each chip loads its own
+  element into its own SPM. It stopped with `Spm remote write is not allowed`, as every chip's SPM
+  was staged from chip 0.
+- A gather or scatter compiles when its data-memory side spreads over a slice count that is not a
+  power of two (160 of 256 slices, say), in one partition axis or several. It stopped with an
+  internal compiler error in DMA segmentation.
+- A data-memory copy between layouts whose per-slice runs straddle compiles, such as 20-feature
+  runs copied into 16-feature runs. It stopped in the LIR check with "64 alignment is required" or
+  "has an inconsistent state", which read each step to the next slice as a step within one slice.
+- The CPU backend runs a relayout that no single sequencer walk addresses, such as runs that
+  straddle each other's slices (20-feature runs copied into 16-feature runs), by moving each cell to
+  its coordinates. It panicked with `transpose: Src must be covered by the dst stream`. A DMA of that
+  kind is checked for DM write alignment on the pieces both layouts share; it was refused as a
+  one-cell burst.
+- A DMA into a destination that pads the inner digit of a split axis, such as
+  `m![L3 % 6 # 8, K3 % 88]` loaded from `[L3, K3]`, compiles and keeps every live cell; it
+  stopped in VISA lowering with "cannot factorize common axis".
+- A copy that reads a high digit of a padded axis, such as `A # 8192 % 4096 / 2048` over
+  `A = 7168`, reads each of its values from memory; it read the digit's first value for all of
+  them.
+- Reading a view redeclared without its owner's padding, such as `m![Slice, Rows # 8, Width]`
+  read as `m![Slice, Rows, Width]`, returns the owner's rows on the host and in Tensor Unit
+  fetches on the CPU backend; it read the padded owner as if it were compact.
+- A DMA from or into a physical SRAM view that starts past the tensor's first cell, such as its
+  second half, compiles and keeps every cell outside the view; translation refused it.
+- A gather with a runtime prefix compiles over several batch axes, split batch digits, padded
+  DRAM axes and single-position prefixes, and reads only the prefix's rows; translation refused
+  several of these, for example with "gather prefix batch lengths must enumerate whole contiguous
+  axes".
+- An array index bounded by a runtime extent compiles; translation accepted only a plain scalar
+  index. A runtime index into an array of slice tables keeps each table's descriptors; it stopped
+  with "a runtime index requires HBM tensor leaves".
+- A slice-tensor gather that indexes an axis inside its entry compiles, and a Tensor Unit fetch of
+  a contiguous stream longer than one command's element limit is split in fetch units, so its
+  fetches cover the whole stream.
+- A loop whose carried values alias one input, that returns a tensor it captured, or whose
+  carried states return one tensor, also when unrolled, reads the carried value in every trip.
+- A contraction whose padded destination is larger than its inputs neither repeats nor truncates
+  them, a slice promotion keeps its inputs' valid counts, and a contraction whose row groups each
+  own an accumulator index compiles; it was refused.
+- A runtime loop whose body advances a scalar by a constant step, such as a position carried to
+  the next trip (`at + 1`), compiles; a runtime loop carried no scalar and refused it. An unrolled
+  loop that selects physical tiles by a symbolic offset compiles.
+- Guarded waves of DMAs and Tensor Unit commands pass verification; they exceeded its 16-state
+  budget. Verification also accepts a page remap over a tensor that maps the page elsewhere, and
+  reuse after a loop of memory the loop read; it refused both.
+- A runtime-span reduce's result loaded into the register file can be read by later
+  vector-engine ops at each slice; they refused the operand.
+- A data-memory copy that the compiler splits into several streams merges only streams whose
+  combined traversal writes each destination cell once; it stopped with "destination sequencer
+  overlapped".
+- A cross-chip HBM shuffle publishes to every cluster of the destination chip; the LIR check
+  refused any read of the shuffled tensor.
+- In a multi-chip kernel, a staged scalar lookup table is staged on every chip from that chip's
+  own copy; it took chip 0's copy in a one-chip shape.
+- A kernel whose DMAs pending together share a completion id runs to completion; the device's DMA
+  ring bookkeeping lost count of such DMAs and stopped the kernel.
+- A kernel whose resource analysis exceeds its state budget is refused; it compiled without the
+  check. Profile regions in the source survive parallel compilation.
+- On the CPU backend, a copy into the capacity prefix of a resized axis writes each source cell
+  once and keeps the rest, and a view renamed or tiled after a padded prefix keeps its
+  coordinates.
+
+## [v0.9.0]
+
+### Changed
+
 - Replace `dma_gather_scaled` / `dma_gather_unscaled` with
   `gather::<IndexedAxis, Payload>().by_byte_offsets(index)` / `.by_positions::<Domain>(index)`,
   followed by `.to_dm(&mut device.tdma)`.

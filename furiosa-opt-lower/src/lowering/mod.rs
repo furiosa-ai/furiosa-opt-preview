@@ -237,6 +237,32 @@ pub fn tile_mapping(input: TileMappingInput) -> Result<Mapping, TileError> {
             index: index.clone(),
             element: element.clone(),
         })?;
+        if len > 0
+            && len <= size
+            && matches!(index.normalize(), Mapping::Resize { .. })
+            && let Ok((outer, below)) = element.split_at(stride)
+        {
+            let outer = outer.normalize();
+            let mut axis = &outer;
+            while let Mapping::Pair { right, .. } = axis {
+                axis = right;
+            }
+            if let Mapping::Padding { inner, padding, kind } = axis
+                && inner.normalize() == index.normalize()
+                && let Ok((above, _)) = outer.split_at(axis.size())
+            {
+                return Ok(above
+                    .pair(
+                        (**inner)
+                            .clone()
+                            .resize(len)
+                            .padding(size, hole_fill)
+                            .padding(*padding, *kind),
+                    )
+                    .pair(below)
+                    .normalize());
+            }
+        }
         element
             .window_axis(stride, size, len, hole_fill)
             .map_err(|_| TileError::WindowDoesNotFit {

@@ -269,3 +269,19 @@ impl internal::Backend for Npu {
         Ok(BufStorage::from_inner(storage.into_inner().pin()?))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Npu;
+    use crate::tensor::Tensor;
+    use furiosa_mapping::*;
+
+    /// An unpadded host view keeps the padded owner's row strides on the NPU backend.
+    #[test]
+    fn preserves_unpadded_rows() {
+        axes![Slice = 2, Rows = 4, Width = 2];
+        let owner = Tensor::<i32, m![Slice, Rows # 8, Width], Npu>::from_vec(0..32);
+        let actual = owner.view().redeclare::<m![Slice, Rows, Width]>().read().into_vec();
+        assert_eq!(actual, [0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23]);
+    }
+}

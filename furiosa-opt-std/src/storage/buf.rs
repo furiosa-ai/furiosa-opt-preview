@@ -5,7 +5,7 @@ use furiosa_mapping::*;
 use rayon::prelude::*;
 
 use crate::backend::indirect::{IndexUnit, IndexValueError};
-use crate::backend::op_prep::{broadcast_axes, broadcast_padding, transpose_config};
+use crate::backend::op_prep::{Reads, broadcast_axes, broadcast_padding, transpose_reads};
 use crate::cast::{Cast, ContractionAccumulator, ContractionCast};
 use crate::scalar::*;
 use crate::storage::par_iters::MappingPositions;
@@ -283,7 +283,7 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
     {
         let mut src_view = Src::to_value();
         let mut dst_view = Dst::to_value();
-        let _ = transpose_config(&src_view, &dst_view, allow_broadcast);
+        let _ = transpose_reads(&src_view, &dst_view, allow_broadcast);
         // Whole-buffer broadcasts retain copies; padding introduced by a tile stays a hole.
         if preserve_copies && src_view == *src_map && dst_view == *dst_map {
             src_view = broadcast_padding(src_view);
@@ -295,7 +295,16 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
         // gets `memory_stride` 0, so one Src element feeds the whole broadcast run. `Carve` (not `Read`)
         // tolerates a `Bottom` pad in the dst stream, a `view_mut().tile()` write hole, read as a `Top`
         // don't-care, which the dst liveness walk then gates out of the write below.
-        let config = transpose_config(src_view, dst_view, true);
+        let reads = if src_view.size() < src_map.size() {
+            // A redeclared view shortens the stream, not the owner's physical strides.
+            Reads::Walk(
+                crate::backend::op_prep::coordinates::sequence(&[src_map], &[dst_view], SequencerMode::Locate)
+                    .expect("transpose: a redeclared source must retain its owner's coordinates")
+                    .remove(0),
+            )
+        } else {
+            transpose_reads(src_view, dst_view, true)
+        };
         // The src window's physical base and the dst window's base. Both default to 0 for an empty
         // (whole-tensor) offset. The base resolves the offset against the *base* (live-axis) map, where
         // a tiled offset axis the view carries as padding is still a live `Symbol` (the view shares the
@@ -303,14 +312,14 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
         let src_base = window_base(src_map, src_offset);
         let dst_base = window_base(dst_map, dst_offset);
         // Walk the dst window, zipping three position-aligned streams of the dst layout: the dst elements
-        // (each position writes its own, `dst_base + pos`), the src offset to read (`config`, splits via
+        // (each position writes its own, `dst_base + pos`), the src offset to read (`reads`, splits via
         // seek), and the dst liveness (`iter_positions()` yields `None` for a padding / write-hole cell), so
         // liveness is read inline, not materialized into a mask. A live position reads `src`'s element and
         // writes its own dst element; the stream's trailing `Bottom`-pad positions, which would address past
         // the window, are clamped away below. The write is range-partitioned on the dst (each rayon job
         // owns a byte-aligned element range), so the scatter is safe for every width, no branch on packing.
         // The per-chunk position range is bounded by both stream lengths so a seek never runs past either.
-        let stream = config.stream_size().min(dst_view.iter_positions().len());
+        let stream = reads.len().min(dst_view.iter_positions().len());
         self.par_chunks_mut(PAR_MIN_JOB)
             .in_pool(&BUF_POOL)
             .for_each(|mut chunk| {
@@ -323,7 +332,7 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
                 if pos_lo >= pos_hi {
                     return;
                 }
-                let src_pos = config.iter_range(pos_lo, pos_hi);
+                let src_pos = reads.range(pos_lo, pos_hi);
                 let live = dst_view.iter_positions().range(pos_lo, pos_hi);
                 for (i, (src_pos, live)) in src_pos.zip(live).enumerate() {
                     if live.is_some() {
@@ -550,12 +559,14 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
                 &updates,
                 &payload,
                 &domain,
+                SequencerMode::Read,
                 "scatter: updates factor into payload x domain",
             );
             let destination_offsets = live_offsets_by(
                 &destination,
                 &payload,
                 indexed_axis,
+                SequencerMode::Write,
                 "scatter: destination factors into payload x indexed axis",
             );
             (update_offsets, destination_offsets)
@@ -646,22 +657,28 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
         );
 
         let source_by_output = {
-            let payload = table
-                .remove_axis(indexed_axis)
-                .unwrap_or_else(|error| {
-                    panic!("gather table {table} does not hold {indexed_axis} as one region: {error}")
-                })
-                .normalize();
+            let payload = Mapping::from_terms(
+                table
+                    .remove_axis(indexed_axis)
+                    .unwrap_or_else(|error| {
+                        panic!("gather table {table} does not hold {indexed_axis} as one region: {error}")
+                    })
+                    .axes()
+                    .into_iter()
+                    .map(AxisTerm::to_term),
+            );
             let table_offsets = live_offsets_by(
                 &table,
                 &payload,
                 indexed_axis,
+                SequencerMode::Read,
                 "gather: table factors into payload x indexed axis",
             );
             let output_offsets = live_offsets_by(
                 &replica,
                 &payload,
                 domain,
+                SequencerMode::Write,
                 "gather: output factors into payload x domain",
             );
             let requested = prefix.unwrap_or(domain_size).min(domain_size);
@@ -1008,10 +1025,16 @@ fn axis_positions_by_chip<B: Buf>(
 }
 
 /// Live offsets when `mapping` factors as `payload` then `axis`; panics otherwise.
-fn live_offsets_by(mapping: &Mapping, payload: &Mapping, axis: &Mapping, what: &str) -> Vec<usize> {
+fn live_offsets_by(
+    mapping: &Mapping,
+    payload: &Mapping,
+    axis: &Mapping,
+    mode: SequencerMode,
+    what: &str,
+) -> Vec<usize> {
     let stream = payload.clone().pair(axis.clone());
     // The sequencer includes padded stream positions; keep only their live cells.
-    sequence(&[mapping], &[&stream], SequencerMode::Read).expect(what)[0]
+    sequence(&[mapping], &[&stream], mode).expect(what)[0]
         .iter()
         .zip(stream.iter_positions())
         .filter_map(|(offset, live)| live.map(|_| offset))

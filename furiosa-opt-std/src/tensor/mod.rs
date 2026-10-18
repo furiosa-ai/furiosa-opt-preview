@@ -298,7 +298,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     }
 
     /// Performs transpose. The mapping division is validated inside
-    /// `Backend::transpose` (via `transpose_config`), so this generic body works
+    /// `Backend::transpose` (via `transpose_reads`), so this generic body works
     /// for every backend.
     pub fn transpose<Dst: M>(&self, allow_broadcast: bool) -> Tensor<D, Dst, B> {
         let mut dst = Tensor::zeroed();

@@ -10,6 +10,9 @@ use crate::tensor::Tensor;
 
 use super::scalar::VeScalar;
 
+mod register;
+pub use register::Register;
+
 // The guard vocabulary is shared with the compiler IR, so it lives in `furiosa-opt-common-ir` and is
 // re-exported here as part of this module's surface. `BranchedOperand` deliberately is not: a layout is
 // reached through [`Branched`](super::operand::Branched), the only thing that can build a good one.
@@ -68,9 +71,8 @@ impl<D: VeScalar + Display> Display for TagMode<D> {
 /// Each variant carries the boundary it compares against. `D` is the stream's scalar, so the boundary
 /// is checked against it: on an `f32` stream `Cmp::Less(0.0)` compiles and `Cmp::Less(0)` does not.
 ///
-/// The `*Unsigned` pair compares the raw bit pattern as an unsigned integer, which is one hardware op
-/// whichever scalar the stream carries; it is not `Less` on some other `D`, so it keeps its own
-/// variants.
+/// The `*Unsigned` pair, named after the hardware's compare modes, compares magnitudes: `|x|` against
+/// `|boundary|`, so `-4 <u 7` and `-7` is on neither side of `7`.
 #[primitive(ve::Cmp)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Cmp<D: VeScalar> {
@@ -80,9 +82,9 @@ pub enum Cmp<D: VeScalar> {
     Less(D),
     /// Set the bit where the element is greater than the boundary.
     Greater(D),
-    /// Set the bit where the element's bit pattern, read as unsigned, is less than the boundary's.
+    /// Set the bit where the element's magnitude is less than the boundary's.
     LessUnsigned(D),
-    /// Set the bit where the element's bit pattern, read as unsigned, is greater than the boundary's.
+    /// Set the bit where the element's magnitude is greater than the boundary's.
     GreaterUnsigned(D),
     /// Always set the bit.
     True,
@@ -100,8 +102,8 @@ impl<D: VeScalar> Cmp<D> {
             Cmp::Equal(boundary) => x == boundary,
             Cmp::Less(boundary) => x.lt_scalar(boundary),
             Cmp::Greater(boundary) => boundary.lt_scalar(x),
-            Cmp::LessUnsigned(boundary) => x.to_raw_bits() < boundary.to_raw_bits(),
-            Cmp::GreaterUnsigned(boundary) => x.to_raw_bits() > boundary.to_raw_bits(),
+            Cmp::LessUnsigned(boundary) => x.lt_magnitude(boundary),
+            Cmp::GreaterUnsigned(boundary) => boundary.lt_magnitude(x),
             Cmp::True => true,
             Cmp::False => false,
         }
@@ -135,12 +137,12 @@ pub enum RfPort<D: VeScalar, Mapping: M> {
 
 /// One binary VE pass's slots: each immediate register holds a constant, the rf port holds a register
 /// or stash read.
-pub type BinaryBranchedOperand<D, Mapping> = BranchedOperand<D, RfPort<D, Mapping>>;
+pub type BinaryBranchedOperand<D, Mapping> = BranchedOperand<Register<D, Mapping>, RfPort<D, Mapping>>;
 
 /// One ternary VE pass's slots: each slot also carries the `operand1` its branch feeds, which the
 /// hardware selects per branch just like `operand0`, so two zipped groups can use different ones in a
 /// single pass. [`VeOperandLayout`] flattens the pair for the apply path.
-pub type TernaryBranchedOperand<D, Mapping> = BranchedOperand<(D, D), (RfPort<D, Mapping>, D)>;
+pub type TernaryBranchedOperand<D, Mapping> = BranchedOperand<(Register<D, Mapping>, D), (RfPort<D, Mapping>, D)>;
 
 /// How to read one pass's slots whatever they carry: [`BinaryBranchedOperand`] and
 /// [`TernaryBranchedOperand`] are the same [`BranchedOperand`] with different payloads, and this trait turns
@@ -153,7 +155,7 @@ pub trait VeOperandLayout<D: VeScalar, Mapping: M> {
 
     /// The three immediate register slots in application order, each as
     /// `(guard, operand0, operand1)`.
-    fn regs(&self) -> [Option<(&TagGuard, D, Self::Operand1)>; 3];
+    fn regs(&self) -> [Option<(&TagGuard, &Register<D, Mapping>, Self::Operand1)>; 3];
 
     /// The register-file port, as `(guard, where it reads, operand1)`.
     fn port(&self) -> Option<(&TagGuard, &RfPort<D, Mapping>, Self::Operand1)>;
@@ -168,9 +170,9 @@ pub trait VeOperandLayout<D: VeScalar, Mapping: M> {
 impl<D: VeScalar, Mapping: M> VeOperandLayout<D, Mapping> for BinaryBranchedOperand<D, Mapping> {
     type Operand1 = ();
 
-    fn regs(&self) -> [Option<(&TagGuard, D, ())>; 3] {
+    fn regs(&self) -> [Option<(&TagGuard, &Register<D, Mapping>, ())>; 3] {
         self.reg_slots()
-            .map(|slot| slot.as_ref().map(|(guard, operand0)| (guard, *operand0, ())))
+            .map(|slot| slot.as_ref().map(|(guard, operand0)| (guard, operand0, ())))
     }
 
     fn port(&self) -> Option<(&TagGuard, &RfPort<D, Mapping>, ())> {
@@ -181,10 +183,10 @@ impl<D: VeScalar, Mapping: M> VeOperandLayout<D, Mapping> for BinaryBranchedOper
 impl<D: VeScalar, Mapping: M> VeOperandLayout<D, Mapping> for TernaryBranchedOperand<D, Mapping> {
     type Operand1 = D;
 
-    fn regs(&self) -> [Option<(&TagGuard, D, D)>; 3] {
+    fn regs(&self) -> [Option<(&TagGuard, &Register<D, Mapping>, D)>; 3] {
         self.reg_slots().map(|slot| {
             slot.as_ref()
-                .map(|(guard, (operand0, operand1))| (guard, *operand0, *operand1))
+                .map(|(guard, (operand0, operand1))| (guard, operand0, *operand1))
         })
     }
 
@@ -323,19 +325,9 @@ mod tests {
         assert!(Cmp::Equal(-0.0f32).matches(0.0));
     }
 
-    /// The `*Unsigned` pair compares raw bit patterns, not values, so a negative reads as large:
-    /// `-1.0f32` is `0xbf80_0000` against `1.0f32`'s `0x3f80_0000`, and `-1i32` is `0xffff_ffff`. This
-    /// is the whole reason they are separate variants rather than `Less`/`Greater` on another scalar,
-    /// and signed and unsigned disagree on exactly the negatives. Both scalars `Cmp<D>` is used at.
+    /// The magnitude of `i32::MIN` is 2^31, not saturated to `i32::MAX`.
     #[test]
-    fn unsigned_compares_read_the_bit_pattern_not_the_value() {
-        assert!(Cmp::GreaterUnsigned(1.0f32).matches(-1.0));
-        assert!(!Cmp::Greater(1.0f32).matches(-1.0));
-        assert!(Cmp::LessUnsigned(-1.0f32).matches(1.0));
-
-        assert!(Cmp::GreaterUnsigned(1i32).matches(-1));
-        assert!(!Cmp::Greater(1i32).matches(-1));
-        assert!(!Cmp::LessUnsigned(0i32).matches(-1), "nothing is below zero unsigned");
-        assert!(Cmp::Less(0i32).matches(-1), "but -1 is below zero signed");
+    fn min_exceeds_max() {
+        assert!(Cmp::GreaterUnsigned(i32::MAX).matches(i32::MIN));
     }
 }

@@ -9,8 +9,7 @@ use crate::scalar::Scalar;
 pub(crate) fn assert_dma_layout<D: Scalar, Src: M, SrcElement: M, Dst: M, DstElement: M>(min_align: usize) {
     assert!(min_align > 0, "min_align must be positive");
 
-    let packet_end = check_dma_tail::<D>(&SrcElement::to_value(), &DstElement::to_value(), min_align);
-    check_dma_address_stride::<D>(&[Src::to_value()], &[Dst::to_value()], min_align, packet_end);
+    check_dma_bursts::<D, SrcElement, DstElement>(&[Src::to_value()], &[Dst::to_value()], min_align);
 }
 
 pub(crate) fn assert_dm_dma_layout<
@@ -28,8 +27,7 @@ pub(crate) fn assert_dm_dma_layout<
 ) {
     assert!(min_align > 0, "min_align must be positive");
 
-    let packet_end = check_dma_tail::<D>(&Element::to_value(), &Element2::to_value(), min_align);
-    check_dma_address_stride::<D>(
+    check_dma_bursts::<D, Element, Element2>(
         &[
             Chip::to_value(),
             Cluster::to_value(),
@@ -43,8 +41,39 @@ pub(crate) fn assert_dm_dma_layout<
             Element2::to_value(),
         ],
         min_align,
-        packet_end,
     );
+}
+
+/// Checks a copy's bursts: a copy one sequencer walk addresses bursts in its tails' packet, with every
+/// stream stride past it aligned, and any other copy moves in several streams of a shared piece.
+fn check_dma_bursts<D: Scalar, SrcElement: M, DstElement: M>(src: &[Mapping], dst: &[Mapping], min_align: usize) {
+    let (src_element, dst_element) = (SrcElement::to_value(), DstElement::to_value());
+    let Ok(configs) = coordinates::sequence(
+        &src.iter().collect::<Vec<_>>(),
+        &dst.iter().collect::<Vec<_>>(),
+        SequencerMode::Carve,
+    ) else {
+        check_dma_pieces::<D>(&src_element, &dst_element, min_align);
+        return;
+    };
+    let packet_end = check_dma_tail::<D>(&src_element, &dst_element, min_align);
+    for config in &configs {
+        for (&stream_stride, _entry) in config.0.iter() {
+            if stream_stride < packet_end {
+                continue;
+            }
+            let stride_bytes = D::size_in_bytes_from_length(stream_stride);
+            assert!(
+                stride_bytes.is_multiple_of(min_align),
+                "DMA address stride alignment violation: destination stream stride {stream_stride} \
+                 (at or past the burst packet) is {stride_bytes} bytes, not aligned to {min_align}-byte \
+                 granularity.\n  \
+                 reachable packet end (elements) = {packet_end}\n  \
+                 src mappings = {src:?}\n  \
+                 dst mappings = {dst:?}",
+            );
+        }
+    }
 }
 
 fn check_dma_tail<D: Scalar>(src_element: &Mapping, dst_element: &Mapping, min_align: usize) -> usize {
@@ -70,28 +99,27 @@ fn reachable_end(src_element: &Mapping, dst_element: &Mapping) -> usize {
     dst_packet
 }
 
-fn check_dma_address_stride<D: Scalar>(src: &[Mapping], dst: &[Mapping], min_align: usize, packet_end: usize) {
-    let src = src.iter().collect::<Vec<_>>();
-    let dst = dst.iter().collect::<Vec<_>>();
-    let configs = coordinates::sequence(&src, &dst, SequencerMode::Carve)
-        .expect("dma layout: destination stream must be covered by the source");
-    for config in &configs {
-        for (&stream_stride, _entry) in config.0.iter() {
-            if stream_stride < packet_end {
-                continue;
-            }
-            let stride_bytes = D::size_in_bytes_from_length(stream_stride);
-            assert!(
-                stride_bytes.is_multiple_of(min_align),
-                "DMA address stride alignment violation: destination stream stride {stream_stride} \
-                 (at or past the burst packet) is {stride_bytes} bytes, not aligned to {min_align}-byte \
-                 granularity.\n  \
-                 reachable packet end (elements) = {packet_end}\n  \
-                 src mappings = {src:?}\n  \
-                 dst mappings = {dst:?}",
-            );
-        }
-    }
+/// Checks the widest piece both elements share as their innermost cells. A piece starts at a multiple of
+/// its width inside each element, so a whole number of writes per piece aligns every burst.
+fn check_dma_pieces<D: Scalar>(src_element: &Mapping, dst_element: &Mapping, min_align: usize) {
+    let (src, dst) = &coordinates::narrow(src_element, dst_element);
+    let innermost = |mapping: &Mapping, width| mapping.split_at(width).ok().map(|(_, inner)| inner.normalize());
+    let piece = (1..=src.size().min(dst.size()))
+        .rev()
+        .filter(|&width| src.size().is_multiple_of(width) && dst.size().is_multiple_of(width))
+        .find(|&width| innermost(src, width).is_some_and(|inner| Some(inner) == innermost(dst, width)))
+        .unwrap_or(1);
+    let piece_bytes = D::size_in_bytes_from_length(piece);
+
+    assert!(
+        piece_bytes.is_multiple_of(min_align),
+        "DMA piece alignment violation: the copy needs several streams, and the widest piece both \
+         element mappings share is not aligned to {min_align} bytes.\n  \
+         shared piece (elements) = {piece}\n  \
+         shared piece (bytes) = {piece_bytes}\n  \
+         src element mapping = {src_element:?}\n  \
+         dst element mapping = {dst_element:?}",
+    );
 }
 
 #[cfg(test)]

@@ -188,10 +188,10 @@ impl<'l, D: Scalar, E: M, B: Backend> From<TensorViewMut<'l, D, E, B>> for Tenso
     }
 }
 
-/// A whole view names the same buffer in the new axes, so subsequent tiles must resolve there.
-/// A partial view keeps the owner's coordinates for the offset it already carries.
+/// An origin view spanning the owner's extent adopts the new axes, including a tiled prefix.
+/// A displaced or shortened view retains the owner's coordinates for its existing offset.
 fn reshaped_base<E: M, E2: M>(base_map: Mapping, offset: &Index) -> Mapping {
-    if offset.0.is_empty() && base_map == E::to_value() {
+    if offset.0.iter().all(|(_, value)| *value == 0) && base_map.size() == E::SIZE {
         E2::to_value()
     } else {
         base_map
@@ -268,8 +268,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
 
     /// Reshapes the view to a different mapping `E2` over the same borrow, consuming `self`. A reshape
     /// is a MOVE: a rewrap of the same mapping-agnostic storage borrow (no data copied, no second
-    /// handle). A whole view adopts the new axes as its base mapping for subsequent tiles. A partial
-    /// view retains its existing offset and the owner's coordinate system.
+    /// handle). An origin view spanning the owner's extent adopts the new axes for subsequent tiles.
+    /// Other views retain their existing offset and the owner's coordinate system.
     /// Sound on every backend, whose storage is mapping-agnostic (bare buffer / codegen relabel).
     ///
     /// # Safety
@@ -277,8 +277,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
     /// `E::SIZE == E2::SIZE` is asserted below; the genuine precondition is that `E` and `E2` lay the
     /// elements out in the SAME physical (wire) order, so the relabel moves no data. Axis regrouping
     /// (merge/split) preserves wire order and is valid; a permutation is not (use [`Self::transpose`]).
-    /// On a tiled view the relabel must preserve the live axes needed to resolve the existing
-    /// offset and any later tiles against the owner's mapping.
+    /// When the view is displaced or shortened, preserve the live axes needed to resolve its offset
+    /// and later tiles against the owner's mapping.
     ///
     /// Kept a *runtime* `assert_eq!`, not a `const` block: every
     /// `{Dm,Hbm}TensorView(Mut)::reshape` delegates its `Element`-inclusive combined mapping here (see
@@ -386,8 +386,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
 
     /// Reshapes the view to a different mapping `E2` over the same borrow, consuming `self`. A reshape
     /// is a MOVE: a rewrap of the same mapping-agnostic storage borrow (no data copied, no second
-    /// handle). A whole view adopts the new axes as its base mapping for subsequent tiles. A partial
-    /// view retains its existing offset and the owner's coordinate system.
+    /// handle). An origin view spanning the owner's extent adopts the new axes for subsequent tiles.
+    /// Other views retain their existing offset and the owner's coordinate system.
     /// Sound on every backend, whose storage is mapping-agnostic (bare buffer / codegen relabel).
     ///
     /// # Safety
@@ -395,8 +395,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
     /// `E::SIZE == E2::SIZE` is asserted below; the genuine precondition is that `E` and `E2` lay the
     /// elements out in the SAME physical (wire) order, so the relabel moves no data. Axis regrouping
     /// (merge/split) preserves wire order and is valid; a permutation is not (use `transpose`).
-    /// On a tiled view the relabel must preserve the live axes needed to resolve the existing
-    /// offset and any later tiles against the owner's mapping.
+    /// When the view is displaced or shortened, preserve the live axes needed to resolve its offset
+    /// and later tiles against the owner's mapping.
     ///
     /// Kept a *runtime* `assert_eq!`, not a `const` block: every
     /// `{Dm,Hbm}TensorView(Mut)::reshape` delegates its `Element`-inclusive combined mapping here (see
@@ -468,5 +468,56 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
             window: Window::new(),
             marker: PhantomData,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::prelude::*;
+
+    /// Renaming a contiguous prefix preserves its distinct values after removing outer padding.
+    #[test]
+    fn reads_renamed_prefix() {
+        axes![Capacity = 16, Selected = 4];
+        let source = Tensor::<i32, m![Capacity], Cpu>::from_vec(100..116);
+        let prefix = source.view().tile::<m![Capacity], m![Capacity = 4 # Capacity], 4>(0);
+        // SAFETY: the zero-offset prefix keeps the same physical cell order and buffer size.
+        let renamed = unsafe { prefix.reshape::<m![Selected # Capacity]>() };
+        assert_eq!(renamed.unpad::<m![Selected]>().read().into_vec(), [100, 101, 102, 103]);
+    }
+
+    /// A displaced view retains its owner's coordinates after an address-preserving reshape.
+    #[test]
+    fn reads_displaced_prefix() {
+        axes![Capacity = 16];
+        let source = Tensor::<i32, m![Capacity], Cpu>::from_vec(100..116);
+        let prefix = source.view().tile::<m![Capacity], m![Capacity = 4 # Capacity], 4>(8);
+        // SAFETY: the mapping and offset axes are unchanged.
+        let reshaped = unsafe { prefix.reshape::<m![Capacity = 4 # Capacity]>() };
+        assert_eq!(
+            reshaped.unpad::<m![Capacity = 4]>().read().into_vec(),
+            [108, 109, 110, 111]
+        );
+    }
+
+    /// A mutable origin view can tile the new axes after renaming a prefix.
+    #[test]
+    fn writes_renamed_prefix() {
+        axes![Capacity = 16, Selected = 4];
+        let mut destination = Tensor::<i32, m![Capacity], Cpu>::from_vec(100..116);
+        let prefix = destination
+            .view_mut()
+            .tile::<m![Capacity], m![Capacity = 4 #{!} Capacity], 4>(0);
+        // SAFETY: the origin prefix preserves physical cell order and buffer size.
+        let renamed = unsafe { prefix.reshape::<m![Selected #{!} Capacity]>() };
+        renamed
+            .tile::<m![Selected], m![Selected = 1 #{!} Capacity], 1>(2)
+            .transpose(Tensor::<i32, m![Selected = 1], Cpu>::from_vec([999]).view(), false);
+        assert_eq!(
+            destination.into_vec(),
+            [
+                100, 101, 999, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115
+            ]
+        );
     }
 }

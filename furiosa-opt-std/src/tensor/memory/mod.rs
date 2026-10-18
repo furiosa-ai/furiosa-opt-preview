@@ -731,7 +731,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         }
     }
 
-    /// Loads a view containing one live integer into an SPM scalar.
+    /// Loads a view holding one live integer per chip into an SPM scalar; each chip loads its own.
     #[primitive(HbmTensorView::to_spm)]
     pub fn to_spm(&self, dma: &mut DmaContext<{ Dma::Tensor }, B>) -> D
     where

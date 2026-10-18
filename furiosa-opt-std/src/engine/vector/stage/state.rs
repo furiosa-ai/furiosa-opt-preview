@@ -72,6 +72,15 @@ impl VeState<Fresh> {
         }
     }
 
+    /// Marks the stash used for the rest of the pass without a tensor in it: a running reduction
+    /// writes and reads it at every element.
+    pub(crate) fn spend(self) -> VeState<Spent> {
+        VeState {
+            stash: Spent,
+            used_alus: self.used_alus,
+        }
+    }
+
     /// Consumes another VeState and merges its ALU usage into this one.
     /// Used when combining two groups in binary operations.
     /// Since both groups share the same ALU state (global resource),

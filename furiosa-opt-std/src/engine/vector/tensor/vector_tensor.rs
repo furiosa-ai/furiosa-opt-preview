@@ -31,7 +31,7 @@ use crate::backend::internal::Backend as _;
 use crate::context::*;
 use crate::engine::vector::alu::RngdAlu;
 use crate::engine::vector::branch::{
-    BinaryBranchedOperand, ExecutionId, RfPort, TagGuard, TagMode, TernaryBranchedOperand, VeOperandLayout,
+    BinaryBranchedOperand, ExecutionId, Register, RfPort, TagGuard, TagMode, TernaryBranchedOperand, VeOperandLayout,
     apply_branch_config,
 };
 use crate::engine::vector::layer::{FpToFxp, FxpToFp, Reinterpret};
@@ -54,7 +54,7 @@ use crate::engine::vector::stage::markers::CanTransitionTo;
 use crate::engine::vector::stage::markers::VeOrder;
 use crate::engine::vector::stage::markers::Way::{self, Way4, Way8};
 use crate::engine::vector::stage::state::VeState;
-use crate::engine::vector::stash_slot::{Fresh, Occupied, StashState};
+use crate::engine::vector::stash_slot::{Fresh, Occupied, Spent, StashState};
 use crate::engine::vector::tensor::verify::{
     verify_vector_intra_slice_unzip, verify_vector_narrow_split, verify_vector_narrow_trim, verify_vector_widen_concat,
     verify_vector_widen_pad,
@@ -682,19 +682,6 @@ fn reduce_span<D: MaterializableScalar, Slice: M, Time: M, Packet: M, Shape: M>(
     Tensor::from_vec(reduced.collect::<Vec<_>>())
 }
 
-impl<'l, const T: Tu, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
-    VectorInitTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet>
-{
-    /// Scales each element in the VRU without reducing its coordinates.
-    #[primitive(VectorInitTensor::vector_scale)]
-    pub fn vector_scale(
-        self,
-        factor: f32,
-    ) -> VectorInterSliceReduceTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, { VeOrder::InterFirst }> {
-        create_inter_slice_reduce_tensor(self.device, self.inner.map(|value| value * factor))
-    }
-}
-
 // ============================================================================
 // Type aliases for VectorTensor at each stage
 // ============================================================================
@@ -988,13 +975,38 @@ fn apply_slots<D: VeScalar, Mapping: M, L: VeOperandLayout<D, Mapping>>(
     stash_data: Option<&Tensor<D, Mapping>>,
     combine: impl Fn(D, D, L::Operand1) -> D + Sync,
 ) -> Tensor<D, Mapping> {
-    // A slot's guard, and an immediate slot's rhs, are constants for the whole pass, so the per-cell
-    // closure captures them by value instead of borrowing the operand or broadcasting the rhs to a
-    // full tensor.
-    let regs = operand
-        .regs()
-        .map(|slot| slot.map(|(guard, operand0, operand1)| (*guard, operand0, operand1)));
-    let port = operand.port().map(|(guard, port, operand1)| {
+    let mut result = data.clone();
+    let mut claimed = [None; 3];
+    for (index, slot) in operand.regs().into_iter().enumerate() {
+        let Some((guard, operand0, operand1)) = slot else {
+            continue;
+        };
+        let previous = claimed;
+        let admits = |raw| {
+            let id = exec_id(raw);
+            guard.admits(id) && !previous.iter().flatten().any(|guard: &TagGuard| guard.admits(id))
+        };
+        result = Tensor::from_inner(match operand0 {
+            Register::Constant(value) => CurrentBackend::zip_with(&result.inner, &tag.inner, |cell, raw| {
+                if admits(raw) {
+                    combine(cell, *value, operand1)
+                } else {
+                    cell
+                }
+            }),
+            Register::Scalar(tensor) => {
+                CurrentBackend::zip3_with(&result.inner, &tensor.inner, &tag.inner, |cell, value, raw| {
+                    if admits(raw) {
+                        combine(cell, value, operand1)
+                    } else {
+                        cell
+                    }
+                })
+            }
+        });
+        claimed[index] = Some(*guard);
+    }
+    if let Some((guard, port, operand1)) = operand.port() {
         let rhs = match port {
             RfPort::External(register) => register,
             RfPort::Stash => stash_data.expect(
@@ -1002,31 +1014,21 @@ fn apply_slots<D: VeScalar, Mapping: M, L: VeOperandLayout<D, Mapping>>(
                  `StashTransition` supplies it, not a hand-built slot",
             ),
         };
-        (*guard, rhs, operand1)
-    });
-    // The port register feeds the port slot alone, so with no port the mainstream stands in for it
-    // and the closure below never reads that argument.
-    let port_rhs = port.map_or(data, |(_, rhs, _)| rhs);
-    let port_slot = port.map(|(guard, _, operand1)| (guard, operand1));
-
-    let inner = CurrentBackend::zip3_with(
-        &data.inner,
-        &port_rhs.inner,
-        &tag.inner,
-        move |cell, port_cell, raw_id| {
-            let id = exec_id(raw_id);
-            for (guard, operand0, operand1) in regs.iter().flatten() {
-                if guard.admits(id) {
-                    return combine(cell, *operand0, *operand1);
+        result = Tensor::from_inner(CurrentBackend::zip3_with(
+            &result.inner,
+            &rhs.inner,
+            &tag.inner,
+            |cell, value, raw| {
+                let id = exec_id(raw);
+                if guard.admits(id) && !claimed.iter().flatten().any(|guard| guard.admits(id)) {
+                    combine(cell, value, operand1)
+                } else {
+                    cell
                 }
-            }
-            match port_slot {
-                Some((guard, operand1)) if guard.admits(id) => combine(cell, port_cell, operand1),
-                _ => cell,
-            }
-        },
-    );
-    Tensor::from_inner(inner)
+            },
+        ));
+    }
+    result
 }
 
 /// Applies a binary operation with branch-conditional execution: [`apply_slots`] with no `operand1`.
@@ -1881,6 +1883,123 @@ where
 }
 
 // ============================================================================
+// Running clip reduction along the stream (i32 and f32)
+// ============================================================================
+
+impl<'l, const T: Tu, S, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, const VE_ORDER: VeOrder>
+    VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Fresh, VE_ORDER, stage::Standalone, { Way8 }>
+where
+    S: stage::Stage + CanTransitionTo<stage::Clip>,
+{
+    /// Each lane's running `op` of the stream in time order, carried in the operand register from one
+    /// element to the lane's next: an element `read` admits becomes `op(element, carried)`, any other
+    /// stays itself; an element `write` admits carries its result to the lane's next element. With
+    /// `AddFxpSat` and a log marking each span's first element (read off) and last (write off), a
+    /// per-lane prefix sum of every span.
+    ///
+    /// The register is a queue of whole flits: both guards must agree across a flit's lanes, and every
+    /// element `read` admits needs a carried value, so a slice's first element must not read. Takes
+    /// the stash for the whole pass.
+    #[primitive(VectorTensor::vector_cumsum)]
+    pub fn vector_cumsum(
+        self,
+        op: ClipBinaryOpI32,
+        read: TagGuard,
+        write: TagGuard,
+    ) -> VectorClipTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Spent, VE_ORDER> {
+        self.do_running(op, op.binary_op_fn(None), read, write)
+    }
+}
+
+impl<'l, const T: Tu, S, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, const VE_ORDER: VeOrder>
+    VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Fresh, VE_ORDER, stage::Standalone, { Way8 }>
+where
+    S: stage::Stage + CanTransitionTo<stage::Clip>,
+{
+    /// The f32 form of the i32 [`vector_cumsum`](Self::vector_cumsum): `ClipBinaryOpF32::Add` adds in
+    /// stream order, one rounding an element.
+    #[primitive(VectorTensor::vector_cumsum)]
+    pub fn vector_cumsum(
+        self,
+        op: ClipBinaryOpF32,
+        read: TagGuard,
+        write: TagGuard,
+    ) -> VectorClipTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Spent, VE_ORDER> {
+        self.do_running(op, op.binary_op_fn(None), read, write)
+    }
+}
+
+impl<
+    'l,
+    const T: Tu,
+    S,
+    D: VeScalar + MaterializableScalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    const VE_ORDER: VeOrder,
+> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Fresh, VE_ORDER, stage::Standalone, { Way8 }>
+where
+    S: stage::Stage,
+{
+    fn do_running(
+        self,
+        op: impl HasAlu,
+        op_fn: impl Fn(D, D) -> D,
+        read: TagGuard,
+        write: TagGuard,
+    ) -> VectorClipTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, Spent, VE_ORDER> {
+        let (device, inner, tag, mut ve_state) = self.into_parts();
+        ve_state.use_alu(op.alu());
+        let result = apply_running(
+            &inner,
+            &tag,
+            Packet::SIZE,
+            Time::SIZE * Packet::SIZE,
+            op_fn,
+            (read, write),
+        );
+        VectorClipTensor::from_parts(device, result, tag, ve_state.spend())
+    }
+}
+
+/// `vector_cumsum`'s carry, lane by lane over each slice's `per_slice` elements in stream order.
+fn apply_running<D: VeScalar + MaterializableScalar, Mapping: M>(
+    data: &Tensor<D, Mapping>,
+    tag: &Tensor<u8, Mapping>,
+    lanes: usize,
+    per_slice: usize,
+    op: impl Fn(D, D) -> D,
+    (read, write): (TagGuard, TagGuard),
+) -> Tensor<D, Mapping> {
+    let mut values = data.clone().into_vec();
+    let ids = tag.clone().into_vec();
+    for (slice, (values, ids)) in values.chunks_mut(per_slice).zip(ids.chunks(per_slice)).enumerate() {
+        let mut carried: Vec<Option<D>> = vec![None; lanes];
+        for (flit, (values, ids)) in values.chunks_mut(lanes).zip(ids.chunks(lanes)).enumerate() {
+            let reads = ids.iter().map(|&raw| read.admits(exec_id(raw))).collect::<Vec<_>>();
+            let writes = ids.iter().map(|&raw| write.admits(exec_id(raw))).collect::<Vec<_>>();
+            assert!(
+                reads.iter().all(|&r| r == reads[0]) && writes.iter().all(|&w| w == writes[0]),
+                "vector_cumsum: slice {slice} flit {flit}: the read and write guards must agree across a flit's lanes"
+            );
+            for (lane, value) in values.iter_mut().enumerate() {
+                if reads[0] {
+                    let previous = carried[lane].unwrap_or_else(|| {
+                        panic!("vector_cumsum: slice {slice} flit {flit} reads a carry no earlier element wrote")
+                    });
+                    *value = op(*value, previous);
+                }
+                carried[lane] = writes[0].then_some(*value);
+            }
+        }
+    }
+    Tensor::from_vec(values)
+}
+
+// ============================================================================
 // Filter operations
 // ============================================================================
 
@@ -2002,7 +2121,7 @@ mod tests {
         let tag = Tensor::<u8, m![A]>::from_vec([0b0100, 0b0000, 0b0100, 0b0000]);
         let register = Tensor::<i32, m![A]>::from_vec([50, 50, 50, 50]);
         let operand: BinaryBranchedOperand<i32, m![A]> = BranchedOperand::try_from_slots(
-            [Some((negative, 10)), None, None],
+            [Some((negative, Register::Constant(10))), None, None],
             Some((TagGuard::all(), RfPort::External(register))),
         )
         .unwrap();
@@ -2041,7 +2160,7 @@ mod tests {
         let data = Tensor::<i32, m![A]>::from_vec([7, 7]);
         let tag = Tensor::<u8, m![A]>::from_vec([0b0001, 0b0000]);
         let operand: BinaryBranchedOperand<i32, m![A]> =
-            BranchedOperand::try_from_slots([Some((only_bit0, 1)), None, None], None).unwrap();
+            BranchedOperand::try_from_slots([Some((only_bit0, Register::Constant(1))), None, None], None).unwrap();
 
         let out = apply_binary_op(&data, &tag, |a, b| a + b, &operand, None);
 
@@ -2072,9 +2191,15 @@ mod tests {
         let group1 = TagGuard::matches([BitReq::Ignore, BitReq::Ignore, BitReq::Ignore, BitReq::One]);
         let data = Tensor::<f32, m![A]>::from_vec([1.0, 1.0, 1.0, 1.0]);
         let tag = Tensor::<u8, m![A]>::from_vec([0b0000, 0b1000, 0b0000, 0b1000]);
-        let operand: TernaryBranchedOperand<f32, m![A]> =
-            BranchedOperand::try_from_slots([Some((group0, (2.0, 10.0))), Some((group1, (3.0, 20.0))), None], None)
-                .unwrap();
+        let operand: TernaryBranchedOperand<f32, m![A]> = BranchedOperand::try_from_slots(
+            [
+                Some((group0, (Register::Constant(2.0), 10.0))),
+                Some((group1, (Register::Constant(3.0), 20.0))),
+                None,
+            ],
+            None,
+        )
+        .unwrap();
 
         // fma: stream * operand0 + operand1, so each group shows both of its own values.
         let out = apply_ternary_op(&data, &tag, |a, b, c| a * b + c, &operand, None);
@@ -2096,5 +2221,44 @@ mod tests {
         let out = apply_binary_op(&data, &tag, |a, b| a + b, &operand, Some(&stash));
 
         assert_eq!(out.into_vec(), vec![41, 1], "the unguarded cell is untouched");
+    }
+
+    /// Division reads each slice's SRAM scalar without a register-file transfer.
+    #[test]
+    fn division_reads_sram_scalar() {
+        use crate::prelude::{Device, DmTensor, Topology};
+
+        axes![Row = 2, Width = 8];
+        type Slice = m![Row, 1 # 128];
+        let input: DmTensor<f32, m![1], m![1], Slice, m![Width]> = DmTensor::from_parts(
+            Tensor::<f32, m![Row, Width]>::from_vec([
+                8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0,
+            ])
+            .transpose(true),
+        );
+        let scale: DmTensor<f32, m![1], m![1], Slice, m![1 # 8]> =
+            DmTensor::from_parts(Tensor::<f32, m![Row]>::from_vec([4.0, -2.0]).transpose(true));
+        let mut device = Device::<CurrentBackend>::new(Topology { chips: 1, pes: 4 }).expect("CPU context");
+
+        let output: DmTensor<f32, m![1], m![1], Slice, m![Width]> = device
+            .main
+            .begin(input.view())
+            .fetch::<m![1], m![Width]>()
+            .collect::<m![1], m![Width]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_narrow_split::<m![Width / 4], m![Width % 4]>()
+            .vector_fp_div(&scale)
+            .vector_widen_concat::<m![1], m![Width]>()
+            .vector_final()
+            .commit_trim::<m![Width]>()
+            .commit();
+
+        assert_eq!(
+            output.inner.transpose::<m![Row, Width]>(false).into_vec(),
+            [
+                2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, -4.0, -6.0, -8.0, -10.0, -12.0, -14.0, -16.0, -18.0
+            ],
+        );
     }
 }

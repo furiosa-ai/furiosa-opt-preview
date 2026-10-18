@@ -5,6 +5,56 @@ use furiosa_opt_lower::{TileError, TileInput, TileMappingInput, config_tile, til
 
 axes![L1 = 192, L2 = 384, L5 = 256, B = 4096, A = 8, I = 3, Z = 24, One = 1];
 
+/// A prefix of a narrowed padded axis preserves coordinates, backing extent, and existing holes.
+#[test]
+fn preserves_narrowed_prefix() {
+    let index = <m![L5 = 122]>::to_value();
+    for extent in [128, 256] {
+        for original in [PaddingKind::Top, PaddingKind::Bottom] {
+            for hole_fill in [PaddingKind::Top, PaddingKind::Bottom] {
+                let element = <m![I]>::to_value()
+                    .pair(index.clone().padding(extent, original))
+                    .pair(<m![A]>::to_value());
+                for len in [1, 56, 122] {
+                    let prefix = tile_mapping(TileMappingInput {
+                        index: index.clone(),
+                        element: element.clone(),
+                        len,
+                        hole_fill,
+                    })
+                    .unwrap();
+                    assert_eq!(prefix.size(), element.size());
+                    for position in 0..element.size() {
+                        let row = position / A::SIZE % extent;
+                        if row < len || row >= 122 {
+                            match (prefix.index(position), element.index(position)) {
+                                (Cell::Index(prefix), Cell::Index(element)) => assert_eq!(
+                                    prefix.0.iter().filter(|(_, value)| **value != 0).collect::<Vec<_>>(),
+                                    element.0.iter().filter(|(_, value)| **value != 0).collect::<Vec<_>>(),
+                                ),
+                                (prefix, element) => assert_eq!(prefix, element),
+                            }
+                        } else {
+                            assert_eq!(prefix.index(position), Cell::Padding(hole_fill));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for len in [0, 123, 257] {
+        assert!(matches!(
+            tile_mapping(TileMappingInput {
+                index: index.clone(),
+                element: <m![L5 = 122 #{!} 256, A]>::to_value(),
+                len,
+                hole_fill: PaddingKind::Bottom,
+            }),
+            Err(TileError::WindowDoesNotFit { .. }),
+        ));
+    }
+}
+
 #[test]
 fn derives_the_tile_mapping_without_an_expected_type() {
     let mapping = tile_mapping(TileMappingInput {

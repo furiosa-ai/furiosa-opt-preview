@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 
 use furiosa_mapping::*;
+use rayon::iter::Either;
 
 pub(crate) mod coordinates;
 
@@ -35,11 +36,98 @@ pub(crate) fn broadcast_padding(mapping: Mapping) -> Mapping {
     }
 }
 
-/// Source offsets for a transpose. An unchanged outer factor retains each physical copy while
-/// the inner mapping changes. Carving the whole product could spend an anonymous outer broadcast
-/// on newly added inner padding, then read the outer copies with stride zero.
-pub(crate) fn transpose_config(src: &Mapping, dst: &Mapping, allow_broadcast: bool) -> SequencerConfig {
+/// Where each position of a transpose's destination reads its source.
+pub(crate) enum Reads {
+    /// The sequencer's walk over the source.
+    Walk(SequencerConfig),
+    /// The source position of each destination position, for a copy no single walk addresses, such
+    /// as runs that straddle each other's rows. `None` marks a padding cell.
+    Cells(Vec<Option<usize>>),
+}
+
+impl Reads {
+    /// Each destination cell reads the source cell at its coordinates, and every source cell is read.
+    fn cells(src: &Mapping, dst: &Mapping) -> Self {
+        // Each symbol at its declared size, so that no destination coordinate wraps onto another cell.
+        let mut axes: Vec<AxisTerm> = Vec::new();
+        for axis in src.axes() {
+            if axes.iter().all(|kept| kept.symbol != axis.symbol) {
+                axes.push(AxisTerm {
+                    stride: 1,
+                    modulo: axis.size,
+                    ..axis
+                });
+            }
+        }
+        let mut sources = vec![None; axes.iter().map(|axis| axis.size).product()];
+        for (position, offset) in src.iter(&axes, &Index::new(), true).enumerate() {
+            if let Some(offset) = offset {
+                sources[offset].get_or_insert(position);
+            }
+        }
+        let offsets: Vec<Option<usize>> = dst.iter(&axes, &Index::new(), true).collect();
+        let mut read = vec![false; sources.len()];
+        for &offset in offsets.iter().flatten() {
+            read[offset] = true;
+        }
+        assert!(
+            sources
+                .iter()
+                .zip(&read)
+                .all(|(source, &read)| source.is_none() || read),
+            "transpose: Src must be covered by the dst stream"
+        );
+        Self::Cells(
+            offsets
+                .into_iter()
+                .map(|offset| {
+                    offset.map(|offset| sources[offset].expect("transpose: Dst reads a cell absent from Src"))
+                })
+                .collect(),
+        )
+    }
+
+    /// The number of destination positions read.
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Walk(config) => config.stream_size(),
+            Self::Cells(cells) => cells.len(),
+        }
+    }
+
+    /// The source positions that destination positions `start..end` read.
+    pub(crate) fn range(&self, start: usize, end: usize) -> impl Iterator<Item = usize> + '_ {
+        match self {
+            Self::Walk(config) => Either::Left(config.iter_range(start, end)),
+            Self::Cells(cells) => Either::Right(cells[start..end].iter().map(|cell| cell.unwrap_or(0))),
+        }
+    }
+
+    /// Whether one source position feeds two live destination positions: a walk entry that reads
+    /// live cells at stride zero, or two cells that read one position.
+    fn broadcasts(&self) -> bool {
+        match self {
+            Self::Walk(config) => config
+                .0
+                .values()
+                .any(|entry| entry.memory_stride == 0 && !entry.mapping.is_padding()),
+            Self::Cells(cells) => {
+                let mut read = vec![false; cells.iter().flatten().max().map_or(0, |&last| last + 1)];
+                cells
+                    .iter()
+                    .flatten()
+                    .any(|&cell| std::mem::replace(&mut read[cell], true))
+            }
+        }
+    }
+}
+
+/// The reads of a transpose: the sequencer's walk where one addresses the copy, else each destination
+/// cell reads the source cell at its coordinates. Either way every source cell is read.
+pub(crate) fn transpose_reads(src: &Mapping, dst: &Mapping, allow_broadcast: bool) -> Reads {
     let (src, dst) = &coordinates::narrow(src, dst);
+    // An unchanged outer factor keeps each physical copy: carving the whole product could spend an
+    // anonymous outer broadcast on newly added inner padding, then read its copies at stride zero.
     if let (
         Mapping::Pair {
             left: src_outer,
@@ -52,32 +140,37 @@ pub(crate) fn transpose_config(src: &Mapping, dst: &Mapping, allow_broadcast: bo
     ) = (src, dst)
         && src_outer == dst_outer
     {
-        let mut config = transpose_config(src_inner, dst_inner, allow_broadcast);
-        if src_outer.size() > 1 {
-            config.0.insert(
-                dst_inner.size(),
-                SequencerEntry {
-                    mapping: (**dst_outer).clone(),
-                    memory_index: 0,
-                    memory_stride: src_inner.size(),
-                },
-            );
-        }
-        return config;
+        let copy_stride = src_inner.size();
+        return match transpose_reads(src_inner, dst_inner, allow_broadcast) {
+            Reads::Walk(mut config) => {
+                if src_outer.size() > 1 {
+                    config.0.insert(
+                        dst_inner.size(),
+                        SequencerEntry {
+                            mapping: (**dst_outer).clone(),
+                            memory_index: 0,
+                            memory_stride: copy_stride,
+                        },
+                    );
+                }
+                Reads::Walk(config)
+            }
+            Reads::Cells(cells) => Reads::Cells(
+                (0..src_outer.size())
+                    .flat_map(|copy| cells.iter().map(move |cell| cell.map(|cell| copy * copy_stride + cell)))
+                    .collect(),
+            ),
+        };
     }
-    let config = coordinates::sequence(&[src], &[dst], SequencerMode::Carve)
-        .expect("transpose: Src must be covered by the dst stream")
-        .remove(0);
-    if !allow_broadcast {
-        assert!(
-            config
-                .0
-                .values()
-                .all(|entry| entry.memory_stride != 0 || entry.mapping.is_padding()),
-            "transpose: Dst adds a broadcast absent from Src",
-        );
-    }
-    config
+    let reads = match coordinates::sequence(&[src], &[dst], SequencerMode::Carve) {
+        Ok(mut configs) => Reads::Walk(configs.remove(0)),
+        Err(_) => Reads::cells(src, dst),
+    };
+    assert!(
+        allow_broadcast || !reads.broadcasts(),
+        "transpose: Dst adds a broadcast absent from Src"
+    );
+    reads
 }
 
 /// The broadcast portion of `dst` for `reduce`: the axes whose symbol is absent in `src` (broadcast
@@ -114,6 +207,27 @@ mod tests {
         furiosa_mapping::axes![Rows = 128];
     }
 
+    mod storage {
+        use furiosa_mapping::*;
+        furiosa_mapping::axes![Rows = 1024];
+    }
+
+    /// A prefix copy writes each source cell once and preserves the capacity's remaining cells.
+    #[test]
+    fn copies_capacity_prefix() {
+        use capacity::Rows as Source;
+        use storage::Rows as Target;
+        let source = Tensor::<i32, m![Source / 8, C, Source % 8], Cpu>::from_vec(0..4096);
+        let mut target = Tensor::<i32, m![Target / 8, C, Target % 8], Cpu>::from_vec([-7; 8192]);
+        target
+            .view_mut()
+            .tile::<m![Target / 8], m![Target / 8 = 64 #{!} 128, C, Target % 8], 64>(0)
+            .transpose(source.view(), false);
+        let output = target.into_vec();
+        assert_eq!(&output[..4096], &(0..4096).collect::<Vec<_>>());
+        assert_eq!(&output[4096..], &[-7; 4096]);
+    }
+
     #[test]
     fn copies_loaded_rows() {
         use crate::prelude::*;
@@ -143,9 +257,12 @@ mod tests {
             size: 128,
         };
 
-        let offsets = super::transpose_config(&source, &destination, true);
+        let reads = super::transpose_reads(&source, &destination, true);
 
-        assert_eq!(offsets.iter().collect::<Vec<_>>(), (0..128).collect::<Vec<_>>());
+        assert_eq!(
+            reads.range(0, reads.len()).collect::<Vec<_>>(),
+            (0..128).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -160,9 +277,12 @@ mod tests {
             size: 128,
         };
 
-        let offsets = super::transpose_config(&source, &destination, false);
+        let reads = super::transpose_reads(&source, &destination, false);
 
-        assert_eq!(offsets.iter().collect::<Vec<_>>(), (0..128).collect::<Vec<_>>());
+        assert_eq!(
+            reads.range(0, reads.len()).collect::<Vec<_>>(),
+            (0..128).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -185,9 +305,38 @@ mod tests {
             .modulo(4),
         );
 
-        let offsets = super::transpose_config(&source, &destination, false);
+        let reads = super::transpose_reads(&source, &destination, false);
 
-        assert_eq!(offsets.iter().collect::<Vec<_>>(), (0..128).collect::<Vec<_>>());
+        assert_eq!(
+            reads.range(0, reads.len()).collect::<Vec<_>>(),
+            (0..128).collect::<Vec<_>>()
+        );
+    }
+
+    /// The cells of `[N / run, R, N % run]` over `N = 80, R = 2` in wire order, each holding its
+    /// coordinates as `2 n + r`.
+    fn runs(run: i32) -> impl Iterator<Item = i32> {
+        (0..80 / run).flat_map(move |s| (0..2).flat_map(move |r| (0..run).map(move |e| 2 * (run * s + e) + r)))
+    }
+
+    /// Runs of 20 and 16 cells that straddle each other's rows move every cell to its coordinates,
+    /// though no single sequencer walk addresses the copy.
+    #[test]
+    fn relayouts_straddled_runs() {
+        axes![N = 80, R = 2];
+        let source = Tensor::<i32, m![N / 20, R, N % 20], Cpu>::from_vec(runs(20));
+        let moved: Tensor<i32, m![N / 16, R, N % 16], Cpu> = source.transpose(false);
+        assert_eq!(moved.into_vec(), runs(16).collect::<Vec<_>>());
+    }
+
+    /// Each copy of an unchanged outer factor keeps its own cells through runs no walk addresses.
+    #[test]
+    fn keeps_straddled_copies() {
+        axes![N = 80, R = 2];
+        let copies = |run| runs(run).chain(runs(run).map(|cell| cell + 1000));
+        let source = Tensor::<i32, m![2, N / 20, R, N % 20], Cpu>::from_vec(copies(20));
+        let moved: Tensor<i32, m![2, N / 16, R, N % 16], Cpu> = source.transpose(false);
+        assert_eq!(moved.into_vec(), copies(16).collect::<Vec<_>>());
     }
 
     #[test]

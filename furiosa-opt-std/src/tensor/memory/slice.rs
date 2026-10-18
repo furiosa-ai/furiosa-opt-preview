@@ -41,9 +41,15 @@ pub(super) fn storage<const DMA: Dma, D: MaterializableScalar, Chip: M, Element:
     dma: &DmaContext<DMA, B>,
     blocks: &[HbmTensor<D, Chip, Element, B>],
 ) -> B::Storage<D> {
-    let values: Vec<_> = blocks.iter().map(|block| block.read(dma).into_vec()).collect();
+    from_blocks::<D, Chip, Element, B>(blocks.iter().map(|block| block.read(dma).into_vec()).collect())
+}
+
+/// Lays out per-block values, each `Chip`-major, as the storage of a slice of `blocks.len()` blocks.
+pub(super) fn from_blocks<D: MaterializableScalar, Chip: M, Element: M, B: Backend>(
+    values: Vec<Vec<D>>,
+) -> B::Storage<D> {
     B::from_vec(
-        &mapping::<Chip, Element>(blocks.len()),
+        &mapping::<Chip, Element>(values.len()),
         (0..Chip::SIZE).flat_map(|chip| {
             values
                 .iter()

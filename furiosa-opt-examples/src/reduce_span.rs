@@ -144,3 +144,40 @@ static_wave!(wave_static_5, G5, L5);
 static_wave!(wave_static_6, G6, L6);
 static_wave!(wave_static_7, G7, L7);
 static_wave!(wave_static_8, G8, L8);
+
+/// A runtime-span max loaded into the register file by Main, then subtracted at each slice: every
+/// slice reads its own group's max, as a decode row's peak feeds its scores' exponent.
+#[device(chip = 1)]
+pub fn max_span_to_vrf(
+    ctx: &mut Device,
+    depth: &HbmTensor<i32, Chip, m![One]>,
+    peaks: &HbmTensor<f32, Chip, m![R, 1 # 8]>,
+    scores: &HbmTensor<f32, Chip, m![R, H, G]>,
+) -> HbmTensor<f32, Chip, m![R, H, G]> {
+    let depth = depth.extent::<m![Depth]>();
+    let peaks = peaks.to_dm::<Cluster, m![R], m![1 # 8]>(&mut ctx.tdma);
+    let scores = scores.to_dm::<Cluster, m![R], m![H, G]>(&mut ctx.tdma);
+    let peak: VrfTensor<f32, Chip, Cluster, m![R], m![1 # 8]> = ctx
+        .main
+        .begin(peaks.view())
+        .fetch::<m![1], m![1 # 8]>()
+        .collect::<m![1], m![1 # 8]>()
+        .vector_init()
+        .vector_inter_slice_reduce_span(InterSliceReduceOpF32::Max, depth)
+        .vector_final()
+        .to_vrf(&mut ctx.sub);
+    let result: DmTensor<f32, Chip, Cluster, m![R], m![H, G]> = ctx
+        .main
+        .begin(scores.view())
+        .fetch::<m![H / 2], m![H % 2, G]>()
+        .collect::<m![H / 2], m![H % 2, G]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![H], m![G]>()
+        .vector_fp_binary(FpBinaryOp::SubF, &peak)
+        .vector_widen_concat::<m![H / 2], m![H % 2, G]>()
+        .vector_final()
+        .commit_trim::<m![H % 2, G]>()
+        .commit();
+    result.to_hbm(&mut ctx.tdma)
+}

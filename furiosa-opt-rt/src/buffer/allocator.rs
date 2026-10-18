@@ -14,7 +14,8 @@ const DRAM_ALIGNMENT: usize = 512;
 // Kernels place DRAM tensors on 4-KiB units; matching buffer alignment keeps transfer speed stable.
 const DRAM_UNIT: usize = 4096;
 
-/// One device's DRAM and SRAM allocators; shared DRAM grows up inside the peer aperture, the rest down.
+/// One device's DRAM and SRAM allocators. DRAM grows up, shared inside the peer aperture and
+/// chip-local from its end, so back-to-back buffers ascend; SRAM residents grow down.
 pub(crate) struct Allocations {
     pub(crate) topology: Topology,
     dram: Mutex<Allocator>,
@@ -96,6 +97,24 @@ impl Allocator {
                 (at >= gap.start).then_some(at)
             })
             .last()
+    }
+
+    /// The lowest aligned start of `len` free bytes among those that put the fewest of them below
+    /// `floor`.
+    fn above(&self, floor: usize, len: usize, alignment: usize) -> Option<usize> {
+        self.gaps()
+            .filter_map(|gap| {
+                let low = gap.start.checked_next_multiple_of(alignment)?;
+                let last = gap.end.checked_sub(len)? / alignment * alignment;
+                (low <= last).then(|| {
+                    let high = floor
+                        .checked_next_multiple_of(alignment)
+                        .unwrap_or(last)
+                        .clamp(low, last);
+                    if high + len > floor { high } else { low }
+                })
+            })
+            .min_by_key(|&at| (floor.saturating_sub(at).min(len), at))
     }
 }
 
@@ -185,7 +204,9 @@ impl Allocations {
                         (at.saturating_add(len) <= gap.end.min(self.shared_end)).then_some(at)
                     })
                 } else {
-                    allocator.top(len, alignment)
+                    // Chip-local memory leaves the aperture, the only DRAM shared memory can use, to
+                    // shared allocations as far as the free spans allow.
+                    allocator.above(self.shared_end, len, alignment)
                 }
                 .ok_or(full)?;
                 debug_assert!(at.is_multiple_of(DRAM_ALIGNMENT), "peer DMA needs aligned DRAM");
@@ -315,6 +336,27 @@ mod tests {
             assert_eq!(allocations.alloc(Kind::DramShared, 1).is_ok(), end > 1024);
             drop(shared);
             assert!(allocations.alloc(Kind::DramShared, 1024).is_ok());
+        }
+    }
+
+    /// Back-to-back allocations of one kind land contiguous and ascending, chip-local ones above
+    /// a peer aperture when it leaves room, so a slice of them keeps one stride.
+    #[test]
+    fn places_allocations_ascending() {
+        for (end, kind, floor) in [
+            (4096, Kind::Dram, 0),
+            (4096, Kind::DramShared, 0),
+            (1024, Kind::Dram, 1024),
+            (1024, Kind::DramShared, 0),
+        ] {
+            let allocations = crate::test::allocations(0..4096, end);
+            let first = allocations.alloc(kind, 512).unwrap();
+            let second = allocations.alloc(kind, 512).unwrap();
+            assert_eq!(
+                (first.addr(), second.addr()),
+                (floor, floor + 512),
+                "{kind:?} below {end}"
+            );
         }
     }
 

@@ -226,7 +226,7 @@ both paths.
 | `TagMode` | How each tag bit is filled | Status |
 |-----------|----------------------------|--------|
 | `Zero` | All four bits are 0. Every element has tag = 0. | Works |
-| `Comparison([cmp0, cmp1, cmp2, cmp3])` | For each element `x`, bit `i` = `1` iff `cmp_i(x)` holds. Each `cmp_i` is a `Cmp<D>` carrying the boundary it compares against, typed by the stream's scalar so the boundary is checked against it: `Equal`, `Less`, `Greater`, `LessUnsigned`, `GreaterUnsigned`, `True`, `False`. The `*Unsigned` pair compares raw bit patterns. | Works |
+| `Comparison([cmp0, cmp1, cmp2, cmp3])` | For each element `x`, bit `i` = `1` iff `cmp_i(x)` holds. Each `cmp_i` is a `Cmp<D>` carrying the boundary it compares against, typed by the stream's scalar so the boundary is checked against it: `Equal`, `Less`, `Greater`, `LessUnsigned`, `GreaterUnsigned`, `True`, `False`. The `*Unsigned` pair compares magnitudes: the element's absolute value against the boundary's. | Works |
 | `AxisToggle { axis }` | Bit 3 (`GroupId`) = `axis_index % 2` along `axis`. Bits 0..2 stay 0. | **Not compilable.** Runs on the host, but rejected with a kernel compile error when lowered. `vector_intra_slice_unzip()` is the supported way to get this grouping. |
 
 For example, with `i32` data and `Comparison([Cmp::Less(0), Cmp::Equal(5), Cmp::Greater(100), Cmp::True])`, an element `x = 7` yields bits `0/0/0/1` (LSB first), so its tag is `0b1000 = 8`.

@@ -19,6 +19,10 @@ pub trait VeScalar: MaterializableScalar + sealed::Sealed {
     /// shadowing `PartialOrd::lt` at concrete call sites.
     fn lt_scalar(self, other: Self) -> bool;
 
+    /// Whether `|self| < |other|`, the order the branch unit's `*Unsigned` comparisons use. An `i32`
+    /// magnitude is unsigned, so `|i32::MIN|` is 2^31.
+    fn lt_magnitude(self, other: Self) -> bool;
+
     /// Rereads `self`'s 32 bits as `D2`, leaving them untouched: the functional model of
     /// [`vector_reinterpret`](crate::prelude::VectorTensor::vector_reinterpret). A reinterpret, not a
     /// conversion: `1.0f32.reinterpret::<i32>()` is `0x3f80_0000`, not `1`. `D2 == Self` is the identity.
@@ -47,6 +51,10 @@ impl VeScalar for i32 {
     fn lt_scalar(self, other: Self) -> bool {
         self < other
     }
+
+    fn lt_magnitude(self, other: Self) -> bool {
+        self.unsigned_abs() < other.unsigned_abs()
+    }
 }
 
 impl VeScalar for f32 {
@@ -60,6 +68,10 @@ impl VeScalar for f32 {
 
     fn lt_scalar(self, other: Self) -> bool {
         self < other
+    }
+
+    fn lt_magnitude(self, other: Self) -> bool {
+        self.abs() < other.abs()
     }
 }
 

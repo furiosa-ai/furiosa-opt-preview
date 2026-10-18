@@ -71,7 +71,7 @@ use furiosa_opt_macro::primitive;
 
 // From the modules that define these, not through this crate's own prelude: the prelude is the
 // surface a kernel author reaches for, not an internal path.
-use crate::engine::vector::branch::{BinaryBranchedOperand, RfPort, TagGuard, TernaryBranchedOperand};
+use crate::engine::vector::branch::{BinaryBranchedOperand, Register, RfPort, TagGuard, TernaryBranchedOperand};
 use crate::engine::vector::op::FpUnaryOp;
 use crate::engine::vector::scalar::VeScalar;
 use crate::engine::vector::stage::markers::Way;
@@ -83,6 +83,8 @@ use crate::tensor::memory::VrfTensor;
 // Straight from the common IR, not through `branch`, which deliberately does not re-export it: a
 // kernel author reaches a layout only through [`Branched`]. Named here because the builder holds one.
 use furiosa_opt_common_ir::{BranchedOperand, ImmSlot, SlotDefect};
+
+mod sram;
 
 /// The operand that reads the stash: `vector_fp_binary(op, Stash)`, `vector_fp_ternary(op,
 /// (Stash, c))`. A value read more than once is not a stash -- use a read-many [`VrfTensor`].
@@ -342,24 +344,50 @@ impl CanFillRf for ThreeRegs {}
 /// constructor serve both arities: its argument names `Self`, and the port slot follows without a
 /// turbofish.
 pub trait RegPayload<D: VeScalar, Mapping: M>: sealed::SlotSealed {
+    /// Slot payload shared by constant and SRAM register sources.
+    type Value: Clone;
+    /// Arity representative for a builder containing mixed register sources.
+    type Canonical: RegPayload<D, Mapping, Value = Self::Value, Port = Self::Port>;
+
+    /// Returns this source's slot payload.
+    fn into_value(self) -> Self::Value;
+
     /// What the pass's one rf port slot carries.
     type Port;
 }
 
 /// A binary `i32` pass: the port is a register or stash read, with nothing riding along.
 impl<Mapping: M> RegPayload<i32, Mapping> for i32 {
+    type Value = Register<i32, Mapping>;
+    type Canonical = i32;
     type Port = RfPort<i32, Mapping>;
+
+    fn into_value(self) -> Self::Value {
+        Register::Constant(self)
+    }
 }
 
 /// A binary `f32` pass, the same shape as the `i32` one.
 impl<Mapping: M> RegPayload<f32, Mapping> for f32 {
+    type Value = Register<f32, Mapping>;
+    type Canonical = f32;
     type Port = RfPort<f32, Mapping>;
+
+    fn into_value(self) -> Self::Value {
+        Register::Constant(self)
+    }
 }
 
 /// A ternary pass: every slot carries its own `operand1`, so the port payload grows one `f32`.
 /// Ternary ops are f32-only, which is why there is no `i32` counterpart.
 impl<Mapping: M> RegPayload<f32, Mapping> for (f32, f32) {
+    type Value = (Register<f32, Mapping>, f32);
+    type Canonical = (f32, f32);
     type Port = (RfPort<f32, Mapping>, f32);
+
+    fn into_value(self) -> Self::Value {
+        (Register::Constant(self.0), self.1)
+    }
 }
 
 /// Opens a guarded operand. The namespace a conditional operand is written through:
@@ -393,8 +421,13 @@ impl Branched {
     pub fn imm<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>>(
         guard: TagGuard,
         v: Reg,
-    ) -> VeOperandBuilder<D, Mapping, Reg, NoStash, OneReg> {
-        fill_reg(BranchedOperand::default(), ImmSlot::Reg0, guard, v)
+    ) -> VeOperandBuilder<D, Mapping, Reg::Canonical, NoStash, OneReg> {
+        let mut operand = BranchedOperand::default();
+        assert_fill(operand.fill_imm(ImmSlot::Reg0, guard, v.into_value()));
+        VeOperandBuilder {
+            operand,
+            _mark: PhantomData,
+        }
     }
 
     /// Opens with the pass's rf port: `arg`, applied where `guard` matches. Nothing may follow it.
@@ -411,24 +444,9 @@ impl Branched {
 // Free functions rather than methods because the incoming and outgoing `Slot` differ and the incoming
 // one is often not yet decided, leaving an inherent `Self::` call nothing to infer its position from.
 
-/// Fills immediate register `imm`, landing at whatever `Slot` the caller's return type names. The
-/// stash marker rides along: an immediate never reads the stash, so filling one cannot change it.
-fn fill_reg<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, StashMark, Slot>(
-    mut operand: BranchedOperand<Reg, Reg::Port>,
-    imm: ImmSlot,
-    guard: TagGuard,
-    v: Reg,
-) -> VeOperandBuilder<D, Mapping, Reg, StashMark, Slot> {
-    assert_fill(operand.fill_imm(imm, guard, v));
-    VeOperandBuilder {
-        operand,
-        _mark: PhantomData,
-    }
-}
-
 /// Fills the rf port, landing at [`AtRf`] and taking the stash marker from what the port read.
 fn fill_rf<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, A: PortArg<D, Mapping, Reg>>(
-    mut operand: BranchedOperand<Reg, Reg::Port>,
+    mut operand: BranchedOperand<Reg::Value, Reg::Port>,
     guard: TagGuard,
     arg: A,
 ) -> VeOperandBuilder<D, Mapping, Reg, A::Mark, AtRf> {
@@ -542,7 +560,7 @@ fn assert_fill(filled: Result<(), SlotDefect>) {
 /// ```
 #[derive(Debug, Clone)]
 pub struct VeOperandBuilder<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, StashMark = NoStash, Slot = OneReg> {
-    operand: BranchedOperand<Reg, Reg::Port>,
+    operand: BranchedOperand<Reg::Value, Reg::Port>,
     _mark: PhantomData<(D, Mapping, StashMark, Slot)>,
 }
 
@@ -557,8 +575,15 @@ impl<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, StashMark, Slot: CanA
 {
     /// The next immediate register: `v`, applied where `guard` matches.
     #[primitive(op::VeOperandBuilder::imm)]
-    pub fn imm(self, guard: TagGuard, v: Reg) -> VeOperandBuilder<D, Mapping, Reg, StashMark, Slot::Next> {
-        fill_reg(self.operand, Slot::NEXT_IMM, guard, v)
+    pub fn imm<Value>(mut self, guard: TagGuard, v: Value) -> VeOperandBuilder<D, Mapping, Reg, StashMark, Slot::Next>
+    where
+        Value: RegPayload<D, Mapping, Value = Reg::Value, Port = Reg::Port>,
+    {
+        assert_fill(self.operand.fill_imm(Slot::NEXT_IMM, guard, v.into_value()));
+        VeOperandBuilder {
+            operand: self.operand,
+            _mark: PhantomData,
+        }
     }
 }
 
@@ -676,6 +701,7 @@ where
     D: RegPayload<
             D,
             VeTensorShape<Chip, Cluster, Slice, Time, Packet>,
+            Value = Register<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
             Port = RfPort<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
         >,
 {
@@ -690,7 +716,7 @@ where
 /// A binary stash read.
 impl<D: VeScalar, Mapping: M> PortArg<D, Mapping, D> for Stash
 where
-    D: RegPayload<D, Mapping, Port = RfPort<D, Mapping>>,
+    D: RegPayload<D, Mapping, Value = Register<D, Mapping>, Port = RfPort<D, Mapping>>,
 {
     type Mark = WithStash;
 
@@ -863,14 +889,14 @@ pub trait IntoBranchedOperand<D: VeScalar, TargetMapping: M>: Sized + sealed::Sl
 /// An `i32` constant drives an immediate register.
 impl<Mapping: M> IntoBranchedOperand<i32, Mapping> for i32 {
     fn fill_slots(self, operand: &mut BinaryBranchedOperand<i32, Mapping>, guard: TagGuard) {
-        assert_fill(operand.fill_imm(ImmSlot::Reg0, guard, self));
+        assert_fill(operand.fill_imm(ImmSlot::Reg0, guard, Register::Constant(self)));
     }
 }
 
 /// An `f32` constant drives an immediate register.
 impl<Mapping: M> IntoBranchedOperand<f32, Mapping> for f32 {
     fn fill_slots(self, operand: &mut BinaryBranchedOperand<f32, Mapping>, guard: TagGuard) {
-        assert_fill(operand.fill_imm(ImmSlot::Reg0, guard, self));
+        assert_fill(operand.fill_imm(ImmSlot::Reg0, guard, Register::Constant(self)));
     }
 }
 
@@ -901,10 +927,10 @@ impl<D: VeScalar, Mapping: M> IntoBranchedOperand<D, Mapping> for Stash {
 /// An operand already in slot form: the builder's slots carry their own guards, so the guard handed
 /// down has nothing left to say. Only a builder whose registers hold a bare `D` is a *binary* operand;
 /// a ternary one goes through [`IntoTernaryOperand`] instead.
-impl<D: VeScalar, Mapping: M, StashMark, Slot> IntoBranchedOperand<D, Mapping>
-    for VeOperandBuilder<D, Mapping, D, StashMark, Slot>
+impl<D: VeScalar, Mapping: M, Reg, StashMark, Slot> IntoBranchedOperand<D, Mapping>
+    for VeOperandBuilder<D, Mapping, Reg, StashMark, Slot>
 where
-    D: RegPayload<D, Mapping, Port = RfPort<D, Mapping>>,
+    Reg: RegPayload<D, Mapping, Value = Register<D, Mapping>, Port = RfPort<D, Mapping>>,
 {
     fn fill_slots(self, operand: &mut BinaryBranchedOperand<D, Mapping>, _guard: TagGuard) {
         *operand = self.operand;
@@ -958,7 +984,7 @@ pub trait IntoTernaryOperand<D: VeScalar, TargetMapping: M>: Sized + sealed::Slo
 /// `(operand0, operand1)` constants drive one immediate register carrying both.
 impl<Mapping: M> IntoTernaryOperand<f32, Mapping> for (f32, f32) {
     fn fill_ternary_slots(self, operand: &mut TernaryBranchedOperand<f32, Mapping>, guard: TagGuard) {
-        assert_fill(operand.fill_imm(ImmSlot::Reg0, guard, self));
+        assert_fill(operand.fill_imm(ImmSlot::Reg0, guard, (Register::Constant(self.0), self.1)));
     }
 }
 
@@ -988,8 +1014,10 @@ impl<Mapping: M> IntoTernaryOperand<f32, Mapping> for (Stash, f32) {
 
 /// A ternary operand already in slot form: the builder's registers hold `(operand0, operand1)` pairs,
 /// which is exactly what a ternary slot carries, so the layout transfers as it stands.
-impl<Mapping: M, StashMark, Slot> IntoTernaryOperand<f32, Mapping>
-    for VeOperandBuilder<f32, Mapping, (f32, f32), StashMark, Slot>
+impl<Mapping: M, Reg, StashMark, Slot> IntoTernaryOperand<f32, Mapping>
+    for VeOperandBuilder<f32, Mapping, Reg, StashMark, Slot>
+where
+    Reg: RegPayload<f32, Mapping, Value = (Register<f32, Mapping>, f32), Port = (RfPort<f32, Mapping>, f32)>,
 {
     fn fill_ternary_slots(self, operand: &mut TernaryBranchedOperand<f32, Mapping>, _guard: TagGuard) {
         *operand = self.operand;
@@ -1171,13 +1199,27 @@ mod tests {
     const GROUP0: TagGuard = TagGuard::matches([Ignore, Ignore, Ignore, Zero]);
     const GROUP1: TagGuard = TagGuard::matches([Ignore, Ignore, Ignore, One]);
 
-    /// The three immediate slots and whether the rf slot is filled, for asserting which ones a pass
-    /// drives. Generic over the register payload rather than the scalar, so one helper reads a binary
-    /// layout's `D` and a ternary one's `(D, D)`.
-    fn slots<Reg: Copy, Port>(operand: &BranchedOperand<Reg, Port>) -> ([Option<(TagGuard, Reg)>; 3], bool) {
-        let regs = operand
-            .reg_slots()
-            .map(|slot| slot.as_ref().map(|(guard, v)| (*guard, *v)));
+    fn slots<D: VeScalar, Mapping: M>(
+        operand: &BinaryBranchedOperand<D, Mapping>,
+    ) -> ([Option<(TagGuard, D)>; 3], bool) {
+        let regs = operand.reg_slots().map(|slot| {
+            slot.as_ref().map(|(guard, value)| match value {
+                Register::Constant(value) => (*guard, *value),
+                Register::Scalar(_) => panic!("expected a constant register"),
+            })
+        });
+        (regs, operand.rf_slot().is_some())
+    }
+
+    fn ternary_slots<D: VeScalar, Mapping: M>(
+        operand: &TernaryBranchedOperand<D, Mapping>,
+    ) -> ([Option<(TagGuard, (D, D))>; 3], bool) {
+        let regs = operand.reg_slots().map(|slot| {
+            slot.as_ref().map(|(guard, (value, operand1))| match value {
+                Register::Constant(value) => (*guard, (*value, *operand1)),
+                Register::Scalar(_) => panic!("expected a constant register"),
+            })
+        });
         (regs, operand.rf_slot().is_some())
     }
 
@@ -1254,7 +1296,7 @@ mod tests {
         let ternary: TernaryBranchedOperand<f32, Map> =
             Branched::imm(TagGuard::all(), (2.0f32, 3.0f32)).into_ternary_operand();
 
-        let ([reg0, _, _], has_rf) = slots(&ternary);
+        let ([reg0, _, _], has_rf) = ternary_slots(&ternary);
         let (guard, (operand0, operand1)) = reg0.unwrap();
         assert_eq!(guard, TagGuard::all());
         assert_eq!((operand0, operand1), (2.0, 3.0));
@@ -1280,7 +1322,7 @@ mod tests {
             .imm(GROUP1, (3.0f32, 2.0f32))
             .into_ternary_operand();
 
-        let ([reg0, reg1, reg2], has_rf) = slots(&ternary);
+        let ([reg0, reg1, reg2], has_rf) = ternary_slots(&ternary);
 
         let (group0_guard, (operand0, operand1)) = reg0.unwrap();
         assert_eq!((operand0, operand1), (2.0, 1.0));

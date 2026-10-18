@@ -8,7 +8,9 @@ use furiosa_opt_lower::{
 };
 use std::num::NonZeroUsize;
 
+mod destination;
 mod unscaled;
+mod window;
 
 /// A deferred gather whose `Stage` determines the available index and prefix.
 #[primitive(GatherPlan)]
@@ -39,6 +41,8 @@ enum TableSource<'l, D: Scalar, Chip: M, Element: M, B: Backend> {
     View(HbmTensorView<'l, D, Chip, Element, B>),
     /// Slice blocks from the selected entry onward, so indices cannot reach the blocks before it.
     Blocks(&'l [HbmTensor<D, Chip, Element, B>]),
+    /// One field window of each slice block, read when the gather executes.
+    Window(Vec<HbmTensorView<'l, D, Chip, Element, B>>),
 }
 
 #[derive(Debug)]
@@ -190,6 +194,10 @@ impl<'l, D: Scalar, Chip: M, TableAxes: M, IndexedAxis: M, Stage: GatherStage<B>
                 assert!(entry < blocks.len(), "table entry {entry} exceeds allocated entries");
                 *blocks = &blocks[entry..];
             }
+            TableSource::Window(blocks) => {
+                assert!(entry < blocks.len(), "table entry {entry} exceeds allocated entries");
+                blocks.drain(..entry);
+            }
         }
         self
     }
@@ -202,7 +210,7 @@ impl<'l, D: Scalar, Chip: M, TableAxes: M, IndexedAxis: M, Stage: GatherStage<B>
     #[primitive(GatherPlan::unchecked)]
     pub unsafe fn unchecked(self) -> Self {
         assert!(
-            matches!(self.table.source, TableSource::Blocks(_)),
+            matches!(self.table.source, TableSource::Blocks(_) | TableSource::Window(_)),
             "only a slice gather checks its offsets"
         );
         self
@@ -439,6 +447,16 @@ where
             ),
             TableSource::Blocks(blocks) => (
                 slice::storage(dma, blocks),
+                slice::mapping::<Chip, TableAxes>(blocks.len()),
+                slice::outer::<Chip, TableAxes>(blocks.len()).pair(IndexedAxis::to_value()),
+            ),
+            TableSource::Window(blocks) => (
+                slice::from_blocks::<D, Chip, TableAxes, B>(
+                    blocks
+                        .iter()
+                        .map(|block| block.read(dma, |block| block.read().into_vec()))
+                        .collect(),
+                ),
                 slice::mapping::<Chip, TableAxes>(blocks.len()),
                 slice::outer::<Chip, TableAxes>(blocks.len()).pair(IndexedAxis::to_value()),
             ),

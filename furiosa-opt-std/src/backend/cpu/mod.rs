@@ -70,17 +70,17 @@ impl Runtime for Cpu {
     }
 
     fn capacity(device: &Host) -> usize {
-        device.capacity.capacity(Kind::DramShared)
+        device.capacity.capacity(Kind::Dram)
     }
 
     fn usage(device: &Host) -> Usage {
-        device.capacity.usage(Kind::DramShared)
+        device.capacity.usage(Kind::Dram)
     }
 
-    fn alloc(device: &Host, bytes: usize) -> Result<Buffer, Error> {
+    fn alloc(device: &Host, kind: Kind, bytes: usize) -> Result<Buffer, Error> {
         Ok(Buffer::alloc(
             &device.capacity,
-            Kind::DramShared,
+            kind,
             usize::from(device.topology.chips),
             bytes,
         )?)

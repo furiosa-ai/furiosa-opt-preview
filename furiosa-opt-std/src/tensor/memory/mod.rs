@@ -278,14 +278,15 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
         dma.store(self.memory_mut(), &value.inner);
     }
 
-    /// A tensor in a new, uninitialized allocation on `device`.
+    /// A tensor in a new, uninitialized allocation on `device`, which each chip's device code
+    /// reaches only on its own chip, as [`HbmBuffer::alloc`](crate::HbmBuffer::alloc) places it.
     pub fn alloc(device: &crate::Device<B>) -> Result<Self, Error> {
-        Self::alloc_in(device.pdma.device())
+        Self::alloc_in(device.pdma.device(), crate::runtime::Kind::Dram)
     }
 
-    pub(crate) fn alloc_in(device: &B::Device) -> Result<Self, Error> {
+    pub(crate) fn alloc_in(device: &B::Device, kind: crate::runtime::Kind) -> Result<Self, Error> {
         let bytes = D::size_in_bytes_from_length(Element::SIZE);
-        Ok(Self::from_buffer(B::alloc(device, bytes)?))
+        Ok(Self::from_buffer(B::alloc(device, kind, bytes)?))
     }
 
     /// Resolves once the launches and transfers submitted before this call that write this tensor
@@ -2308,7 +2309,7 @@ impl<'t, D: MaterializableScalar, Element: M, Chip: M, Element2: M, B: Backend> 
 
     fn submit(self) -> Submitted<Self::Future> {
         async move {
-            let mut hbm = HbmTensor::alloc_in(self.dma.device())?;
+            let mut hbm = HbmTensor::alloc_in(self.dma.device(), crate::runtime::Kind::Dram)?;
             self.write(&mut hbm).await?;
             Ok(hbm)
         }

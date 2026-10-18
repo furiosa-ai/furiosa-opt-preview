@@ -8,7 +8,7 @@ impl<B: Backend> DeviceSend<B> for HbmBuffer<B> {
         if self.1.get().is_some() {
             return Ok(());
         }
-        let mut table = B::alloc(device, 64)?;
+        let mut table = B::alloc(device, crate::runtime::Kind::Dram, 64)?;
         let image: Vec<_> = [
             self.size() as u64,
             (self.addr() as u64).wrapping_sub(table.addr() as u64),

@@ -312,9 +312,10 @@ mod tests {
         Arc::new(Capacity::new(4096))
     }
 
-    /// Host HBM exhaustion reports the same shared-memory kind as the NPU allocator.
+    /// Chip-local and shared host HBM draw on one budget, and exhaustion names the kind asked for,
+    /// as on the NPU.
     #[test]
-    fn hbm_exhaustion_names_shared_memory() {
+    fn hbm_exhaustion_names_the_requested_kind() {
         let device = Host {
             topology: Topology { chips: 2, pes: 8 },
             placement: crate::Placement {
@@ -323,9 +324,9 @@ mod tests {
             },
             capacity: capacity(),
         };
-        let _buffer = Cpu::alloc(&device, 4096).unwrap();
+        let _buffer = Cpu::alloc(&device, Kind::Dram, 4096).unwrap();
         assert!(matches!(
-            Cpu::alloc(&device, 1),
+            Cpu::alloc(&device, Kind::DramShared, 1),
             Err(Error::Device(rt::Error::OutOfMemory {
                 kind: Kind::DramShared,
                 ..

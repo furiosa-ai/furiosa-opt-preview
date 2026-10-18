@@ -182,9 +182,12 @@ pub(crate) fn axis_leaves(m: &Mapping) -> Vec<Mapping> {
 /// Padded extent of a division term's axis, or `None` when the term is not an axis boundary.
 ///
 /// Only an axis carries a padded extent. Dividing can split a padded axis into intra-axis sub-terms
-/// when an axis between its digits is reduced, and such a sub-term owns no extent to report.
+/// when an axis between its digits is reduced, and such a sub-term owns no extent to report. A term
+/// over adjacent digits starts at its innermost digit's leaf, yet spans every live cell it matched.
 pub(crate) fn padded_extent_at(padding_per_stride: &BTreeMap<usize, usize>, term: &DivideTerm) -> Option<usize> {
-    padding_per_stride.get(&term.dividend_stride).copied()
+    padding_per_stride
+        .get(&term.dividend_stride)
+        .map(|&extent| extent.max(term.resize))
 }
 
 /// Keep explicit physical boundaries before normalizing each leaf; normalization may combine a
@@ -323,6 +326,29 @@ mod tests {
             (kept.clone().pair(reduced).pair(row.clone()), kept.pair(row), 16),
         ] {
             assert_eq!(inner_reduce_extent(&input, &output), Ok(expected));
+        }
+    }
+
+    /// A kept axis written as two adjacent digits outside the reduced axis holds no slot itself:
+    /// the slots are the rows inner to the reduction, as with the axis written whole.
+    #[test]
+    fn split_outer_digits_hold_no_slots() {
+        let output = Mapping::Symbol {
+            symbol: Ident::N,
+            size: 64,
+        };
+        let reduced = Mapping::Symbol {
+            symbol: Ident::K,
+            size: 21,
+        };
+        let row = Mapping::Symbol {
+            symbol: Ident::R,
+            size: 16,
+        };
+        let split = output.clone().stride(8).pair(output.clone().modulo(8));
+        for kept in [output, split] {
+            let input = kept.clone().pair(reduced.clone()).pair(row.clone());
+            assert_eq!(inner_reduce_extent(&input, &kept.pair(row.clone())), Ok(16));
         }
     }
 

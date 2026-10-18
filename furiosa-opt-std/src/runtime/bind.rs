@@ -51,8 +51,9 @@ impl<B: Backend> DeviceOutput<B> for () {
 impl<D: Scalar, Chip: M, Element: M, B: Backend> sealed::Sealed for HbmTensor<D, Chip, Element, B> {}
 
 impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceOutput<B> for HbmTensor<D, Chip, Element, B> {
+    /// A function may write what it returns from another chip, so a return takes shared DRAM.
     fn alloc(device: &Device<B>) -> Result<Self, Error> {
-        Self::alloc(device)
+        Self::alloc_in(device.pdma.device(), crate::runtime::Kind::DramShared)
     }
 }
 

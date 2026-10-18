@@ -3,8 +3,8 @@
 use std::future::Future;
 
 use super::{
-    HbmBuffer, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Issued, Prepared,
-    Submitted, Work,
+    HbmBuffer, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Issued, Kind,
+    Prepared, Submitted, Work,
 };
 use crate::Error;
 use crate::backend::Backend;
@@ -91,7 +91,7 @@ impl<'t, B: Backend> Work for ToHbm<'t, B> {
             if !len.is_multiple_of(chips) {
                 return Err(Error::Invalid("the host bytes do not split evenly across the chips"));
             }
-            let mut buffer = HbmBuffer::new(B::alloc(self.dma.device(), len / chips)?);
+            let mut buffer = HbmBuffer::new(B::alloc(self.dma.device(), Kind::Dram, len / chips)?);
             self.write(HbmBufferSliceMut::from(&mut buffer)).await?;
             Ok(buffer)
         }

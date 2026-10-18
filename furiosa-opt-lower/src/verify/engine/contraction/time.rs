@@ -71,9 +71,7 @@ pub fn config_contract_time(input: ContractTimeInput) -> Result<(), ContractTime
     let time_padding_per_stride = padding_per_stride(&in_time);
     let mut boundaries: Vec<(&DivideTerm, usize)> = division_terms
         .iter()
-        .filter_map(|term| {
-            padded_extent_at(&time_padding_per_stride, term).map(|extent| (term, extent.max(term.resize)))
-        })
+        .filter_map(|term| padded_extent_at(&time_padding_per_stride, term).map(|extent| (term, extent)))
         .collect();
     // Edge-to-edge is a claim about the OUTPUT layout, so walk it in divisor order.
     boundaries.sort_by_key(|(term, _)| term.divisor_stride);

@@ -8,7 +8,7 @@ use furiosa_opt_macro::primitive;
 
 use crate::Error;
 use crate::backend::{Allocation, Backend, Runtime};
-use crate::runtime::{CurrentBackend, Usage};
+use crate::runtime::{CurrentBackend, Kind, Usage};
 
 /// A byte range at the same offset on every chip of a device, which an
 /// [`HbmTensor`](crate::tensor::memory::HbmTensor) takes by `TryFrom` and gives back by
@@ -30,9 +30,18 @@ impl<B: Runtime> HbmBuffer<B> {
 }
 
 impl<B: Backend> HbmBuffer<B> {
-    /// `bytes` uninitialized bytes on every chip of `device`.
+    /// `bytes` uninitialized bytes on every chip of `device`, which a multi-chip function's device
+    /// code reaches only on its own chip; [`DeviceError::OutOfMemory`](super::DeviceError) when no
+    /// span is free.
     pub fn alloc(device: &super::Device<B>, bytes: usize) -> Result<Self, Error> {
-        B::alloc(device.pdma.device(), bytes).map(Self::new)
+        B::alloc(device.pdma.device(), Kind::Dram, bytes).map(Self::new)
+    }
+
+    /// `bytes` uninitialized bytes on every chip of `device` that the other chips' device code may
+    /// write too: a function whose cross-chip transfer lands in a caller's buffer binds only these.
+    /// Each chip sees its peers' DRAM through a few 4-GiB windows, so this memory is scarce.
+    pub fn alloc_shared(device: &super::Device<B>, bytes: usize) -> Result<Self, Error> {
+        B::alloc(device.pdma.device(), Kind::DramShared, bytes).map(Self::new)
     }
 
     /// Resolves once the launches and transfers submitted before this call that write these bytes

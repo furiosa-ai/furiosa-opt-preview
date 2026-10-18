@@ -33,16 +33,15 @@ impl Runtime for Npu {
     }
 
     fn capacity(device: &Self::Device) -> usize {
-        device.device.capacity(rt::memory::Kind::DramShared)
+        device.device.capacity(rt::memory::Kind::Dram)
     }
 
     fn usage(device: &Self::Device) -> Usage {
-        device.device.usage(rt::memory::Kind::DramShared)
+        device.device.usage(rt::memory::Kind::Dram)
     }
 
-    fn alloc(device: &Self::Device, bytes: usize) -> Result<rt::Buffer, Error> {
-        // Multi-chip kernels address their IO through peers; one chip's shared range is all DRAM.
-        Ok(device.device.alloc(rt::memory::Kind::DramShared, bytes)?)
+    fn alloc(device: &Self::Device, kind: rt::memory::Kind, bytes: usize) -> Result<rt::Buffer, Error> {
+        Ok(device.device.alloc(kind, bytes)?)
     }
 
     async fn write<'a>(

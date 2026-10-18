@@ -144,7 +144,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend<B> for Slice<HbmTens
         // Overlapping entries stay separate so writable aliases still conflict within a launch.
         behind.dedup_by(|next, previous| previous.join(next));
         let behind = behind.into_boxed_slice();
-        let mut buffer = B::alloc(device, Table::<B>::len(&blocks))?;
+        let mut buffer = B::alloc(device, crate::runtime::Kind::Dram, Table::<B>::len(&blocks))?;
         let image = Table::<B>::encode(buffer.addr(), &blocks).repeat(usize::from(B::topology(device).chips));
         futures_executor::block_on(tokio::task::unconstrained(B::write(
             device,

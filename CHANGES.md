@@ -93,6 +93,13 @@ How entries are written:
   with `Error::Device(DeviceError::ForeignBuffer)`. Why: a program that runs on the NPU runs on
   the CPU backend with the same results. Migrate: a CPU test that relied on a tensor keeping its
   own copy reads through `to_host` after the launch.
+- `HbmBuffer::alloc` and `HbmTensor::alloc` place chip-local DRAM, all of each chip, and
+  `memory()` counts all of it. Why: a chip sees its peers' DRAM through (16 - chips) / chips
+  windows of 4 GiB, 28 GiB of each chip at two chips, and every allocation used to sit in that
+  window, so a multi-chip device held no buffer past it. A function writing a caller's buffer
+  from another chip declares that argument peer-written, and binding chip-local memory there is
+  refused. Migrate: allocate such a buffer with `HbmBuffer::alloc_shared`; a launch's own returns
+  are already shared.
 - `HbmTensor::new()` is for device functions: outside one, the NPU backend panics instead of
   returning a tensor without memory. Migrate: allocate host-side tensors with
   `HbmTensor::alloc(&device)`.
@@ -224,6 +231,18 @@ How entries are written:
 - On the NPU backend, `to_hbm` and `to_host` lay a tensor out as the destination type says,
   rearranging it on the host when the host and HBM layouts differ, as the CPU backend does; they
   copied the bytes unchanged.
+- A Tensor Unit fetch from a tensor whose `Slice` pads an axis past its next power of two, such as
+  40 heads on `m![Heads # 256]`, compiles; it stopped in LIR with an internal compiler error.
+- A DMA through a padded composite axis such as `[S, Phases] #{!} 1104` copies each row from its
+  own source row; it read every row from the first one without an error.
+- Reading through a runtime-indexed array of references that names one tensor more than once
+  (`[x; 2][index]` in a runtime loop) compiles; LIR verification stopped it with "tries to finish
+  read in invalid state".
+- A reduction that keeps an axis written as two adjacent digits outside the reduced axis passes
+  the accumulator check; it counted every kept cell as an accumulator slot.
+- A multi-chip device function compiles with more than 4 GiB of outputs that only their own chip
+  writes; EDF verification counted every output against the 4-GiB peer-visible DRAM budget and
+  stopped it with "dram shared size is not enough".
 
 ## [v0.8.1]
 

@@ -52,7 +52,7 @@ impl<D: RuntimeScalar, B: Backend> HbmScalar<D, B> {
     /// A scalar in a new, uninitialized allocation on `device`.
     pub(crate) fn alloc_in(device: &B::Device) -> Result<Self, Error> {
         Ok(Self {
-            buffer: B::alloc(device, D::Storage::buf_bytes(1))?,
+            buffer: B::alloc(device, crate::runtime::Kind::Dram, D::Storage::buf_bytes(1))?,
             value: PhantomData,
         })
     }

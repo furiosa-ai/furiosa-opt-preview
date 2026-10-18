@@ -13,7 +13,7 @@ use crate::Error;
 use crate::cast::{ContractionAccumulator, ContractionCast};
 use crate::context::{Dma, DmaContext};
 use crate::runtime::{
-    DeviceOutput, DeviceSend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut,
+    DeviceOutput, DeviceSend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Kind,
     Launched, Placement, Submitted, Topology, Usage,
 };
 use crate::scalar::{MaterializableScalar, RuntimeScalar, Scalar};
@@ -70,8 +70,9 @@ pub trait Runtime: Sized + 'static {
     /// Free bytes per chip on `device` now.
     fn usage(device: &Self::Device) -> Usage;
 
-    /// A buffer of `bytes` uninitialized bytes on every chip of `device`.
-    fn alloc(device: &Self::Device, bytes: usize) -> Result<Self::Buffer, Error>;
+    /// A buffer of `bytes` uninitialized bytes on every chip of `device`, of DRAM `kind`:
+    /// [`Kind::DramShared`] for memory another chip's device code writes, [`Kind::Dram`] otherwise.
+    fn alloc(device: &Self::Device, kind: Kind, bytes: usize) -> Result<Self::Buffer, Error>;
 
     /// Copies a batch in one runtime write, each host's bytes chip after chip in rank order;
     /// the caller checked every length, and foreign buffers are refused by the backend.

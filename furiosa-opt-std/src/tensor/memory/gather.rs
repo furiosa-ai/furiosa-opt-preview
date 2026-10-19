@@ -425,6 +425,14 @@ where
         self
     }
 
+    /// Lets each batch read past its own prefix up to the longest batch's, which leaves its cells
+    /// past the prefix unspecified; every index position up to the longest prefix must be valid.
+    #[primitive(GatherPlan::overfetch)]
+    pub fn overfetch(self) -> Self {
+        assert!(self.table.prefix.is_some(), "only a per-batch prefix can overfetch");
+        self
+    }
+
     fn materialize<Cluster: M, Slice: M, Element: M>(
         self,
         dma: &DmaContext<{ Dma::Tensor }, B>,

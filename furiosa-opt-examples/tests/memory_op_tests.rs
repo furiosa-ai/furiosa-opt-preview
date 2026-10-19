@@ -263,6 +263,71 @@ mod batched_slices {
         values.to_hbm(&mut device.tdma)
     }
 
+    #[device(chip = 1)]
+    fn overfetch(device: &mut Device, blocks: &Slice<KvBlock>, indices: &Indices, lengths: &Lengths) -> Output {
+        let mut selected: HbmTensor<i32, m![1], m![Rows]> = HbmTensor::new();
+        lengths
+            .view()
+            .tile::<m![Windows], 1, m![Rows, Windows = 1 # Windows]>(1)
+            .to_hbm_view(&mut device.tdma, selected.view_mut());
+        let values = blocks
+            .gather::<m![1], m![Block, Width]>()
+            .by_byte_offsets(indices)
+            .prefix::<m![Count], _>(&selected, 0)
+            .overfetch()
+            .to_dm::<m![1 # 2], m![Rows / 32, Count, Block / 2], m![Rows % 32, Block % 2, Width]>(&mut device.tdma);
+        values.to_hbm(&mut device.tdma)
+    }
+
+    /// Rows whose prefixes differ still land their own prefixes when they may read up to the
+    /// longest one; every entry up to it is valid.
+    #[tokio::test]
+    async fn overfetch_lands_each_rows_prefix() -> eyre::Result<()> {
+        let mut device = Device::new(overfetch.topology())?;
+        let blocks = Slice::from(vec![
+            HostTensor::<bf16, m![Block, Width]>::from_vec(vec![bf16::from_f32(7.0); Block::SIZE * Width::SIZE])
+                .to_hbm(&mut device.pdma)
+                .await?,
+            HostTensor::<bf16, m![Block, Width]>::from_vec(vec![bf16::from_f32(11.0); Block::SIZE * Width::SIZE])
+                .to_hbm(&mut device.pdma)
+                .await?,
+        ]);
+        let bytes = (Block::SIZE * Width::SIZE * 2) as i32;
+        for iteration in 0..8 {
+            let lengths = (0..Rows::SIZE)
+                .map(|row| ((row * 3 + iteration) % (Count::SIZE + 1)) as i32)
+                .collect::<Vec<_>>();
+            let indices = HostTensor::<i32, m![Rows, Count]>::from_vec(
+                (0..Rows::SIZE)
+                    .flat_map(|row| (0..Count::SIZE).map(move |at| ((row + at + iteration) % 2) as i32 * bytes)),
+            )
+            .to_hbm(&mut device.pdma)
+            .await?;
+            let counts =
+                HostTensor::<i32, m![Rows, Windows]>::from_vec(lengths.iter().flat_map(|&length| [-1, length]))
+                    .to_hbm(&mut device.pdma)
+                    .await?;
+            let values = launch(overfetch, (&mut device, &blocks, &indices, &counts))
+                .await?
+                .to_host::<m![Rows, Count, Block, Width]>(&mut device.pdma)
+                .await?
+                .into_vec();
+            for (row, length) in lengths.into_iter().enumerate() {
+                for at in 0..length as usize {
+                    let start = (row * Count::SIZE + at) * Block::SIZE * Width::SIZE;
+                    let expected = if (row + at + iteration) % 2 == 0 { 7.0 } else { 11.0 };
+                    assert!(
+                        values[start..start + Block::SIZE * Width::SIZE]
+                            .iter()
+                            .all(|v| *v == bf16::from_f32(expected)),
+                        "iteration {iteration}, row {row}, position {at}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn respects_each_rows_prefix() -> eyre::Result<()> {
         let mut device = Device::new(gather.topology())?;

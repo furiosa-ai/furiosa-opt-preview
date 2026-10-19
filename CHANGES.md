@@ -34,6 +34,10 @@ How entries are written:
 - A gather in a loop whose runtime prefix reads its lengths from a tensor the loop captures stages
   the length table into SPM once, in the outermost enclosing scope whose SPM still holds it,
   instead of on every trip; the transfer issues as soon as the table's source exists.
+- A loop whose gathers read their runtime prefixes from a tile of a length table a trip stages its
+  first trip's tile as soon as the table and the tile's start exist, ahead of the transfers issued
+  before the loop: the loop's first gather no longer waits for a gather before the loop to land.
+  With a runtime trip count the tile is staged even when the loop runs no trip.
 - The two arms of a runtime branch, written as loops whose trip counts are never both nonzero
   (`for _ in 0..s` and `for _ in 0..1 - s`), share data memory: a loop body may use the pages of
   a `DmTensor` that only the other arm writes or reads, or that is first written after the loop.
@@ -145,6 +149,10 @@ How entries are written:
 - Guarded waves of DMAs and Tensor Unit commands pass verification; they exceeded its 16-state
   budget. Verification also accepts a page remap over a tensor that maps the page elsewhere, and
   reuse after a loop of memory the loop read; it refused both.
+- Verification of a runtime branch whose arms map a tensor's pages to different physical pages
+  reaches every cell the tensor may occupy after the branch. A DMA from that tensor on one arm
+  finished on only some of them, so a later write or page remap of the others was refused with
+  "used without wait" or "page table update while cell is in use" although the DMA was awaited.
 - A runtime-span reduce's result loaded into the register file can be read by later
   vector-engine ops at each slice; they refused the operand.
 - A data-memory copy that the compiler splits into several streams merges only streams whose
@@ -161,6 +169,8 @@ How entries are written:
 - On the CPU backend, a copy into the capacity prefix of a resized axis writes each source cell
   once and keeps the rest, and a view renamed or tiled after a padded prefix keeps its
   coordinates.
+- A launch of many short Tensor Unit operations no longer runs past its time limit while one
+  cluster waits for the other; profiling at `info` or `debug` made this likely.
 
 ## [v0.9.0]
 

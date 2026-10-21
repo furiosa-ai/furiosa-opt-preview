@@ -2,17 +2,96 @@
 //! memory it already holds by its dma-buf, or from pageable memory it pins for the command.
 
 use std::fs::File;
+use std::mem::transmute;
 use std::ops::Range;
 use std::os::fd::AsRawFd;
 
 use io_uring::{opcode::UringCmd16, squeue::Entry, types::Fd};
 
-use crate::Result;
-use crate::arch::rngd::{
-    Segment, URING_CMD_DMABUF_READ, URING_CMD_DMABUF_WRITE, URING_CMD_SCATTER_READ, URING_CMD_SCATTER_WRITE, node,
+use crate::driver::kernel::{
+    DmabufCommand, ScatterCommand, Segment, URING_CMD_DMABUF_READ, URING_CMD_DMABUF_WRITE, URING_CMD_SCATTER_READ,
+    URING_CMD_SCATTER_WRITE, node,
 };
-use crate::driver::map::open_rw;
-use crate::pinned::HostLease;
+use crate::pinned::PinnedLease;
+use crate::{Error, Result};
+
+/// One segment between `host` memory and `chip`; its command stays at a fixed address until completion.
+pub(crate) struct Command {
+    chip: u8,
+    direction: Direction,
+    host: Memory,
+    segment: Segment,
+}
+
+impl Command {
+    /// Moves `len` bytes between `host` and the chip's PDMA address `device`, in `direction`.
+    pub(crate) fn new(chip: u8, direction: Direction, host: Host, device: u64, len: u64) -> Self {
+        let (host, at) = match host {
+            Host::Borrowed(at) => (Memory::Borrowed, at),
+            Host::Owned(lease, at) => (Memory::Owned(lease), at),
+        };
+        Self {
+            chip,
+            direction,
+            host,
+            segment: direction.segment(at, device, len),
+        }
+    }
+
+    pub(crate) fn encode(&self, channel: &Channel, tag: u64) -> Entry {
+        UringCmd16::new(Fd(channel.0.as_raw_fd()), self.opcode())
+            .cmd(self.payload())
+            .build()
+            .user_data(tag)
+    }
+
+    pub(crate) fn chunks(len: usize) -> impl ExactSizeIterator<Item = Range<usize>> {
+        // The driver rejects requests totaling 4 GiB; aligned offsets preserve host page alignment.
+        const LIMIT: usize = (1_usize << 32) - 4096;
+        (0..len)
+            .step_by(LIMIT)
+            .map(move |start| start..start + LIMIT.min(len - start))
+    }
+
+    /// The kernel driver index of the chip the command moves bytes on.
+    pub(crate) fn chip(&self) -> u8 {
+        self.chip
+    }
+
+    pub(crate) fn direction(&self) -> Direction {
+        self.direction
+    }
+
+    pub(crate) fn borrowed(&self) -> bool {
+        matches!(self.host, Memory::Borrowed)
+    }
+
+    fn opcode(&self) -> u32 {
+        match (&self.host, self.direction) {
+            (Memory::Borrowed, Direction::Write) => URING_CMD_SCATTER_WRITE,
+            (Memory::Borrowed, Direction::Read) => URING_CMD_SCATTER_READ,
+            (Memory::Owned(_), Direction::Write) => URING_CMD_DMABUF_WRITE,
+            (Memory::Owned(_), Direction::Read) => URING_CMD_DMABUF_READ,
+        }
+    }
+
+    /// The sixteen command bytes: a [`ScatterCommand`] for pageable memory, a [`DmabufCommand`]
+    /// for a dma-buf.
+    fn payload(&self) -> [u8; 16] {
+        let desc_addr = std::ptr::from_ref(&self.segment).expose_provenance() as u64;
+        // SAFETY: both commands are sixteen bytes of integers with no padding between them.
+        unsafe {
+            match &self.host {
+                Memory::Borrowed => transmute::<ScatterCommand, [u8; 16]>(ScatterCommand { count: 1, desc_addr }),
+                Memory::Owned(lease) => transmute::<DmabufCommand, [u8; 16]>(DmabufCommand {
+                    fd: lease.fd(),
+                    count: 1,
+                    desc_addr,
+                }),
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Direction {
@@ -37,90 +116,25 @@ pub(crate) enum Host {
     /// Any process memory at this address; the driver pins its pages for the command.
     Borrowed(u64),
     /// Page-locked memory at this offset of the dma-buf the driver takes by its descriptor.
-    Owned(HostLease, u64),
-}
-
-enum Memory {
-    Borrowed,
-    Owned(HostLease),
-}
-
-/// One segment between `host` memory and `chip`; its command stays at a fixed address until completion.
-pub(crate) struct Command {
-    pub(crate) chip: u8,
-    pub(crate) direction: Direction,
-    host: Memory,
-    segment: Segment,
-}
-
-impl Command {
-    pub(crate) fn chunks(len: usize) -> impl ExactSizeIterator<Item = Range<usize>> {
-        // The driver rejects requests totaling 4 GiB; aligned offsets preserve host page alignment.
-        const LIMIT: usize = (1_usize << 32) - 4096;
-        (0..len)
-            .step_by(LIMIT)
-            .map(move |start| start..start + LIMIT.min(len - start))
-    }
-
-    /// Moves `len` bytes between `host` and the chip's PDMA address `device`, in `direction`.
-    pub(crate) fn new(chip: u8, direction: Direction, host: Host, device: u64, len: u64) -> Self {
-        let (host, at) = match host {
-            Host::Borrowed(at) => (Memory::Borrowed, at),
-            Host::Owned(lease, at) => (Memory::Owned(lease), at),
-        };
-        Self {
-            chip,
-            direction,
-            host,
-            segment: direction.segment(at, device, len),
-        }
-    }
-
-    pub(crate) fn borrowed(&self) -> bool {
-        matches!(self.host, Memory::Borrowed)
-    }
-
-    pub(crate) fn encode(&self, channel: &Channel, tag: u64) -> Entry {
-        UringCmd16::new(Fd(channel.0.as_raw_fd()), self.opcode())
-            .cmd(self.payload())
-            .build()
-            .user_data(tag)
-    }
-
-    fn opcode(&self) -> u32 {
-        match (&self.host, self.direction) {
-            (Memory::Borrowed, Direction::Write) => URING_CMD_SCATTER_WRITE,
-            (Memory::Borrowed, Direction::Read) => URING_CMD_SCATTER_READ,
-            (Memory::Owned(_), Direction::Write) => URING_CMD_DMABUF_WRITE,
-            (Memory::Owned(_), Direction::Read) => URING_CMD_DMABUF_READ,
-        }
-    }
-
-    /// The sixteen command bytes: `{count: u64, desc_addr: u64}` for pageable memory, and
-    /// `{fd: i32, count: u32, desc_addr: u64}` for a dma-buf.
-    fn payload(&self) -> [u8; 16] {
-        let mut payload = [0; 16];
-        let descriptor = (std::ptr::from_ref(&self.segment).expose_provenance() as u64).to_ne_bytes();
-        match &self.host {
-            Memory::Borrowed => {
-                payload[..8].copy_from_slice(&1_u64.to_ne_bytes());
-            }
-            Memory::Owned(lease) => {
-                payload[..4].copy_from_slice(&lease.fd().to_ne_bytes());
-                payload[4..8].copy_from_slice(&1_u32.to_ne_bytes());
-            }
-        }
-        payload[8..].copy_from_slice(&descriptor);
-        payload
-    }
+    Owned(PinnedLease, u64),
 }
 
 pub(crate) struct Channel(File);
 
 impl Channel {
     pub(crate) fn open(chip: u8, channel: u8) -> Result<Self> {
-        open_rw(&node(chip, &format!("ch{channel}"))).map(Self)
+        File::options()
+            .read(true)
+            .write(true)
+            .open(node(chip, &format!("ch{channel}")))
+            .map_err(|why| Error::Device(format!("{}: {why}", node(chip, &format!("ch{channel}")))))
+            .map(Self)
     }
+}
+
+enum Memory {
+    Borrowed,
+    Owned(PinnedLease),
 }
 
 #[cfg(test)]

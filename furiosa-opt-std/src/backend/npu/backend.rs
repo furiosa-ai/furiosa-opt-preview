@@ -3,16 +3,15 @@ use std::sync::Arc;
 use furiosa_mapping::*;
 
 use crate::Error;
-use crate::scalar::{MaterializableScalar, RuntimeScalar, Scalar};
+use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::BufStorage;
 use crate::tensor::Tensor;
-use crate::tensor::memory::{DmAllocError, DmTensor, HbmScalar, HbmTensor};
+use crate::tensor::memory::{DmAllocError, DmTensor};
 
 use super::registry;
 use crate::backend::indirect::IndexUnit;
 use crate::backend::internal;
 use crate::cast::{ContractionAccumulator, ContractionCast};
-use crate::context::{Dma, DmaContext};
 use crate::runtime::{HbmBufferSlice, HostBuffer, HostBufferSlice, HostBufferSliceMut};
 use furiosa_opt_rt as rt;
 
@@ -35,19 +34,21 @@ impl std::fmt::Debug for Device {
     }
 }
 
-/// Why the NPU host refuses a device function's own memory access: the compiled program performs
-/// it on the device, and the host moves HBM bytes only by DMA.
-const DEVICE_ONLY: &str = "the NPU host reaches device memory only by DMA, not a device function's body";
+impl<D: Scalar> From<BufStorage<D, HostBuffer>> for HostBuffer {
+    fn from(storage: BufStorage<D, HostBuffer>) -> Self {
+        storage.into_inner()
+    }
+}
 
 impl internal::Backend for Npu {
     type Storage<D: Scalar> = BufStorage<D, HostBuffer>;
 
     fn load_memory<D: Scalar>(_: &HbmBufferSlice<'_, Self>) -> Self::Storage<D> {
-        panic!("{DEVICE_ONLY}")
+        panic!("the NPU host reaches device memory only by DMA, not a device function's body")
     }
 
     fn scratch(_: usize, _: usize) -> rt::Buffer {
-        panic!("{DEVICE_ONLY}")
+        panic!("the NPU host reaches device memory only by DMA, not a device function's body")
     }
 
     fn from_vec<D: Scalar>(_mapping: &Mapping, data: impl IntoIterator<Item = D>) -> Self::Storage<D> {
@@ -217,52 +218,12 @@ impl internal::Backend for Npu {
         storage.transmute(src_map, dst_map)
     }
 
-    async fn to_hbm_into<D: MaterializableScalar, Chip: M, Element: M>(
-        host: &Self::Storage<D>,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        hbm: &mut HbmTensor<D, Chip, Element, Self>,
-    ) -> Result<(), Error> {
-        let to = hbm.memory_mut().buffer.slice_mut(..)?;
-        Ok(dma
-            .device()
-            .device
-            .write([(HostBufferSlice::from(host.inner()).0, to)])
-            .await?)
+    fn bytes<D: Scalar>(storage: &Self::Storage<D>) -> HostBufferSlice<'_> {
+        storage.inner().into()
     }
 
-    async fn to_hbm_scalar_into<D: RuntimeScalar>(
-        value: D,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        hbm: &mut HbmScalar<D, Self>,
-    ) -> Result<(), Error> {
-        let bytes = HbmScalar::<D, Self>::encode(value);
-        let chips = hbm.memory_mut().buffer.slice_mut(..bytes.len())?.chips();
-        Ok(dma
-            .device()
-            .device
-            .write(std::iter::repeat(bytes.as_slice().into()).zip(chips))
-            .await?)
-    }
-
-    async fn from_hbm_into<D: MaterializableScalar, Chip: M, Element: M>(
-        hbm: &HbmTensor<D, Chip, Element, Self>,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        host: &mut Self::Storage<D>,
-    ) -> Result<(), Error> {
-        let from = hbm.memory().buffer.slice(..)?;
-        Ok(dma
-            .device()
-            .device
-            .read([(from, HostBufferSliceMut::from(host.inner_mut()).0)])
-            .await?)
-    }
-
-    fn host_storage<D: Scalar>(buffer: HostBuffer) -> Self::Storage<D> {
-        BufStorage::from(buffer)
-    }
-
-    fn host_buffer<D: Scalar>(storage: Self::Storage<D>) -> HostBuffer {
-        storage.into_inner()
+    fn bytes_mut<D: Scalar>(storage: &mut Self::Storage<D>) -> HostBufferSliceMut<'_> {
+        storage.inner_mut().into()
     }
 
     fn pin<D: MaterializableScalar>(storage: Self::Storage<D>) -> Result<Self::Storage<D>, Error> {

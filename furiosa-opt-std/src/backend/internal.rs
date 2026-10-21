@@ -11,13 +11,12 @@ use furiosa_mapping::*;
 
 use crate::Error;
 use crate::cast::{ContractionAccumulator, ContractionCast};
-use crate::context::{Dma, DmaContext};
 use crate::runtime::{
     DeviceOutput, DeviceSend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Kind,
     Launched, Placement, Submitted, Topology, Usage,
 };
-use crate::scalar::{MaterializableScalar, RuntimeScalar, Scalar};
-use crate::tensor::memory::{DmAllocError, DmTensor, HbmScalar, HbmTensor};
+use crate::scalar::{MaterializableScalar, Scalar};
+use crate::tensor::memory::{DmAllocError, DmTensor};
 
 /// A backend's device memory: `size()` bytes at the same address on each of `chips()` chips.
 pub trait Allocation: Debug + Send + Sync + Sized {
@@ -123,15 +122,16 @@ pub trait Runtime: Sized + 'static {
 /// `Npu`: owns native staging buffers and does real PCIe DMA; the host never interprets a device
 /// function's body.
 ///
-/// Host transfers move bytes unchanged on both: a host tensor in another layout is relaid out on
-/// the host first, by backend-agnostic code.
+/// Host transfers copy a storage's [`Self::bytes`] with [`Runtime::write`] and [`Runtime::read`],
+/// unchanged on both: a host tensor in another layout is relaid out on the host first, by
+/// backend-agnostic code.
 pub trait Backend: Runtime {
     /// Concrete per-backend tensor type. Opaque:
     /// only `Clone + Debug + PartialEq` (so the memory-tier `#[derive(Debug)]` structs and the
     /// `Tensor<D, Mapping, B>` wrapper's `Debug`/`PartialEq` resolve without a per-backend `where`
     /// clause). `PartialEq` (not `Eq`) because `f32` tensors must compare. All operations on the
     /// storage are methods on this trait.
-    type Storage<D: Scalar>: Clone + Debug + PartialEq;
+    type Storage<D: Scalar>: Clone + Debug + PartialEq + From<HostBuffer> + Into<HostBuffer>;
 
     /// `memory`'s bytes, chip after chip, as `D` values, for a device function that reads device
     /// memory without a DMA context. Only the host backend interprets device functions; a device
@@ -354,50 +354,15 @@ pub trait Backend: Runtime {
         dst_map: &Mapping,
     ) -> Self::Storage<D>;
 
-    /// Copies `host`, which holds `hbm`'s cells in its `m![Chip, Element]` layout, into `hbm`'s
-    /// memory unchanged. Host-only: invoked from host code over PCIe DMA, never from device kernel
-    /// MIR, so no `#[primitive(...)]` annotation is needed.
-    fn to_hbm_into<D: MaterializableScalar, Chip: M, Element: M>(
-        host: &Self::Storage<D>,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        hbm: &mut HbmTensor<D, Chip, Element, Self>,
-    ) -> impl Future<Output = Result<(), Error>>;
+    /// `storage`'s bytes in place, for a transfer to copy from: the DMA reads page-locked memory
+    /// directly.
+    fn bytes<D: Scalar>(storage: &Self::Storage<D>) -> HostBufferSlice<'_>;
 
-    /// Replicates one scalar into the local HBM of every device in the DMA context.
-    fn to_hbm_scalar<D: RuntimeScalar>(
-        value: D,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-    ) -> impl Future<Output = Result<HbmScalar<D, Self>, Error>> {
-        async move {
-            let mut hbm = HbmScalar::alloc_in(dma.device())?;
-            Self::to_hbm_scalar_into(value, dma, &mut hbm).await?;
-            Ok(hbm)
-        }
-    }
-
-    /// Updates an existing replicated HBM scalar allocation.
-    fn to_hbm_scalar_into<D: RuntimeScalar>(
-        value: D,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        hbm: &mut HbmScalar<D, Self>,
-    ) -> impl Future<Output = Result<(), Error>>;
-
-    /// Copies `hbm`'s memory unchanged into `host`, which then holds its cells in its
-    /// `m![Chip, Element]` layout: pinned memory is the DMA's destination, pageable memory is
-    /// copied.
-    fn from_hbm_into<D: MaterializableScalar, Chip: M, Element: M>(
-        hbm: &HbmTensor<D, Chip, Element, Self>,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        host: &mut Self::Storage<D>,
-    ) -> impl Future<Output = Result<(), Error>>;
+    /// `storage`'s bytes in place, for a transfer to copy into: the DMA writes page-locked memory
+    /// directly.
+    fn bytes_mut<D: Scalar>(storage: &mut Self::Storage<D>) -> HostBufferSliceMut<'_>;
 
     /// Host storage moved to page-locked memory, so transfers use it directly; a backend without a
     /// device has nothing to pin and returns the storage unchanged.
     fn pin<D: MaterializableScalar>(storage: Self::Storage<D>) -> Result<Self::Storage<D>, Error>;
-
-    /// `buffer`'s bytes as host storage of `D` values, the caller having checked their length.
-    fn host_storage<D: Scalar>(buffer: HostBuffer) -> Self::Storage<D>;
-
-    /// The host memory `storage` keeps its bytes in.
-    fn host_buffer<D: Scalar>(storage: Self::Storage<D>) -> HostBuffer;
 }

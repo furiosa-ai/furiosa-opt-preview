@@ -18,7 +18,6 @@ pub mod chip_reduce;
 pub mod cluster_chip_shuffle_slice;
 pub mod cluster_reduce;
 pub mod commit_view_tile;
-pub mod contract_bursts;
 pub mod contract_element_types;
 pub mod contract_outer_assertions;
 pub mod dma;

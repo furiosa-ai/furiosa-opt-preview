@@ -6,7 +6,9 @@ use furiosa_opt_macro::primitive;
 use crate::Error;
 use crate::backend::{Backend, Cpu};
 use crate::context::{Dma, DmaContext};
-use crate::runtime::{CurrentBackend, HbmBufferSlice, HbmBufferSliceMut, Issued, Prepared, Submitted, Work};
+use crate::runtime::{
+    CurrentBackend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, Issued, Prepared, Submitted, Work,
+};
 use crate::scalar::{RuntimeScalar, Scalar};
 
 /// One scalar value replicated in the local HBM of every chip in the launch group.
@@ -33,7 +35,7 @@ impl<D: RuntimeScalar, B: Backend> HbmScalar<D, B> {
     /// Loads the value into an SPM scalar every chip and cluster can read.
     #[primitive(HbmScalar::to_spm)]
     pub fn to_spm(&self, dma: &mut DmaContext<{ Dma::Tensor }, B>) -> D {
-        let bytes = B::host_buffer(dma.load::<D::Storage>(self.memory()));
+        let bytes: HostBuffer = dma.load::<D::Storage>(self.memory()).into();
         D::from_storage(D::Storage::load(&bytes, 0))
     }
 }
@@ -79,19 +81,31 @@ pub struct FromHost<'t, D: RuntimeScalar, B: Backend> {
     dma: &'t mut DmaContext<{ Dma::Pcie }, B>,
 }
 
+impl<D: RuntimeScalar, B: Backend> FromHost<'_, D, B> {
+    async fn write(self, scalar: &mut HbmScalar<D, B>) -> Result<(), Error> {
+        let memory = scalar.memory_mut();
+        let bytes = HbmScalar::<D, B>::encode(self.value).repeat(memory.region.chips.count_ones() as usize);
+        self.dma.to_hbm([(&bytes, memory)]).await
+    }
+}
+
 impl<'t, D: RuntimeScalar, B: Backend> Work for FromHost<'t, D, B> {
     type Output = HbmScalar<D, B>;
     type Future = Issued<impl Future<Output = Result<HbmScalar<D, B>, Error>>>;
 
     fn submit(self) -> Submitted<Self::Future> {
-        B::to_hbm_scalar(self.value, self.dma).submit()
+        async move {
+            let mut scalar = HbmScalar::alloc_in(self.dma.device())?;
+            self.write(&mut scalar).await?;
+            Ok(scalar)
+        }
+        .submit()
     }
 }
 
 impl<'t, D: RuntimeScalar, B: Backend> Prepared<FromHost<'t, D, B>> {
     /// Copies into `scalar`'s existing HBM allocation instead of a fresh one.
     pub fn output(self, scalar: &'t mut HbmScalar<D, B>) -> Prepared<impl Future<Output = Result<(), Error>>> {
-        let FromHost { value, dma } = self.into_work();
-        Prepared::new(B::to_hbm_scalar_into(value, dma, scalar))
+        Prepared::new(self.into_work().write(scalar))
     }
 }

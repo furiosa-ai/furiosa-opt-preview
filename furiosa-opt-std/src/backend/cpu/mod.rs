@@ -1,36 +1,36 @@
 use furiosa_mapping::*;
 
 use crate::Error;
-use crate::scalar::{MaterializableScalar, RuntimeScalar, Scalar};
+use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::BufStorage;
 use crate::tensor::Tensor;
-use crate::tensor::memory::{DmAllocError, DmTensor, HbmScalar, HbmTensor};
+use crate::tensor::memory::{DmAllocError, DmTensor};
 
 use crate::backend::indirect::IndexUnit;
 use crate::backend::{Runtime, internal};
 use crate::cast::{ContractionAccumulator, ContractionCast};
-use crate::context::{Dma, DmaContext};
 use crate::runtime::{
     Access, DeviceOutput, DeviceSend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice,
     HostBufferSliceMut, Launched, Placement, Submitted, Topology, Usage, launch_memory,
 };
 
 mod buffer;
-use buffer::{Buffer, Bytes, Capacity};
-use furiosa_opt_rt::memory::Kind;
+use buffer::{Buffer, Bytes};
+use furiosa_opt_rt::Lease;
+use furiosa_opt_rt::memory::{Allocations, Kind};
 use std::sync::Arc;
 
 /// Host backend: interprets device functions on the host, over host memory that stands in for
-/// device memory with the device's budget, aliases and access conflicts.
+/// device memory, placed by the device's allocator, with the device's aliases and access conflicts.
 #[derive(Debug, Clone, Copy)]
 pub struct Cpu;
 
-/// The host standing in for a device of `topology`, with its memory budget.
+/// The host standing in for a device of `topology`, and the allocators that place its memory.
 #[derive(Clone, Debug)]
 pub struct Host {
     topology: Topology,
     placement: Placement,
-    capacity: Arc<Capacity>,
+    allocations: Arc<Allocations>,
 }
 
 impl Runtime for Cpu {
@@ -41,10 +41,9 @@ impl Runtime for Cpu {
 
     type Buffer = Buffer;
 
-    /// Memory of the DRAM an RNGD chip offers the topology's PEs before the firmware's share: an
-    /// upper bound of the NPU's, which learns its free range when the device boots.
+    /// The host's memory is placed by a device's allocators, over fixed upper bounds of the ranges
+    /// a device learns when it boots: see [`Allocations::new`].
     fn open(placements: Vec<Placement>) -> Result<Host, Error> {
-        use furiosa_opt_abi::arch::rngd::{DRAM, PES};
         let placement = placements
             .into_iter()
             .next()
@@ -53,11 +52,10 @@ impl Runtime for Cpu {
             chips: u8::try_from(placement.chips.len()).map_err(|_| Error::Invalid("too many placement chips"))?,
             pes: u8::try_from(placement.pes.len()).map_err(|_| Error::Invalid("too many placement PEs"))?,
         };
-        let dram = ((DRAM / u64::from(PES)) as usize & !4095) * usize::from(topology.pes);
         Ok(Host {
             topology,
             placement,
-            capacity: Arc::new(Capacity::new(dram)),
+            allocations: Arc::new(Allocations::new(topology)),
         })
     }
 
@@ -70,20 +68,15 @@ impl Runtime for Cpu {
     }
 
     fn capacity(device: &Host) -> usize {
-        device.capacity.capacity(Kind::Dram)
+        device.allocations.capacity(Kind::Dram)
     }
 
     fn usage(device: &Host) -> Usage {
-        device.capacity.usage(Kind::Dram)
+        device.allocations.usage(Kind::Dram)
     }
 
     fn alloc(device: &Host, kind: Kind, bytes: usize) -> Result<Buffer, Error> {
-        Ok(Buffer::alloc(
-            &device.capacity,
-            kind,
-            usize::from(device.topology.chips),
-            bytes,
-        )?)
+        Ok(Buffer::alloc(&device.allocations, kind, bytes)?)
     }
 
     async fn write<'a>(
@@ -91,16 +84,18 @@ impl Runtime for Cpu {
         pairs: Vec<(HostBufferSlice<'a>, HbmBufferSliceMut<'a, Self>)>,
     ) -> Result<(), Error> {
         for (_, to) in &pairs {
-            to.buffer.check_device(&device.capacity)?;
+            to.buffer.check_device(&device.allocations)?;
         }
         for (host, to) in pairs {
-            to.buffer.write(&device.capacity, &to.region, host.0.bytes())?;
+            to.buffer.store(&to.region, &host.0.bytes().to_vec().into());
         }
         Ok(())
     }
 
     async fn read(device: &Host, from: HbmBufferSlice<'_, Self>, host: HostBufferSliceMut<'_>) -> Result<(), Error> {
-        from.buffer.read(&device.capacity, &from.region, host.0.into_bytes())
+        from.buffer.check_device(&device.allocations)?;
+        host.0.into_bytes().copy_from_slice(&from.buffer.load(&from.region));
+        Ok(())
     }
 
     /// A host launch finishes before it returns, and so does a host transfer.
@@ -113,9 +108,9 @@ impl Runtime for Cpu {
         Ok(())
     }
 
-    /// Runs the function's Rust body over its memory, refused as a device refuses it, and copies
-    /// its returns into `output`. The launch finishes before it returns, so only its own uses can
-    /// conflict.
+    /// Runs the function's Rust body over its memory, held and refused as a device holds and
+    /// refuses it, and copies its returns into `output`. The launch finishes before it returns, so
+    /// only its own uses can conflict.
     fn launch<Args: DeviceSend<Self>, Output: DeviceOutput<Self>>(
         device: &mut crate::Device<Self>,
         (): (),
@@ -126,7 +121,7 @@ impl Runtime for Cpu {
         Submitted::launched((|| {
             args.prepare(device.pdma.device())?;
             output.prepare(device.pdma.device())?;
-            let capacity = &device.pdma.device().capacity;
+            let allocations = &device.pdma.device().allocations;
             let uses = launch_memory(&args, output)?
                 .flat_map(|(slice, access)| {
                     std::iter::once((slice.buffer, slice.region, access)).chain(
@@ -138,15 +133,31 @@ impl Runtime for Cpu {
                 })
                 .collect::<Vec<_>>();
             for (memory, _, _) in &uses {
-                memory.check_device(capacity)?;
+                memory.check_device(allocations)?;
             }
-            buffer::check_conflicts(uses.iter().map(|(memory, region, access)| (*memory, region, *access)))?;
+            let _held = Lease::acquire(
+                uses.iter()
+                    .filter_map(|(memory, region, access)| Some((memory.placed(region)?, *access))),
+            )?;
             let returned = body(device, args);
             for ((to, _), (from, _)) in output.arguments(Access::Write)?.zip(returned.arguments(Access::Read)?) {
                 to.buffer.store(&to.region, &from.buffer.load(&from.region));
             }
             Ok(None)
         })())
+    }
+}
+
+/// Host bytes become CPU storage without a copy, and CPU storage hands its bytes back the same way.
+impl<D: Scalar> From<HostBuffer> for BufStorage<D, Bytes> {
+    fn from(buffer: HostBuffer) -> Self {
+        BufStorage::from_inner(Vec::<u8>::from(buffer).into())
+    }
+}
+
+impl<D: Scalar> From<BufStorage<D, Bytes>> for HostBuffer {
+    fn from(storage: BufStorage<D, Bytes>) -> Self {
+        Vec::<u8>::from(storage.into_inner()).into()
     }
 }
 
@@ -181,7 +192,7 @@ impl internal::Backend for Cpu {
             });
         }
         let bytes = D::size_in_bytes_from_length(Element::SIZE);
-        let buffer = Buffer::alloc(&group.capacity, Kind::Sram, devices, bytes)?;
+        let buffer = Buffer::alloc(&group.allocations, Kind::Sram, bytes)?;
         let mut tensor = DmTensor::from_parts(Tensor::zeroed());
         tensor.own(buffer);
         Ok(tensor)
@@ -332,48 +343,15 @@ impl internal::Backend for Cpu {
         storage.transmute(src_map, dst_map)
     }
 
-    async fn to_hbm_into<D: MaterializableScalar, Chip: M, Element: M>(
-        host: &Self::Storage<D>,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        hbm: &mut HbmTensor<D, Chip, Element, Self>,
-    ) -> Result<(), Error> {
-        let memory = hbm.memory_mut();
-        memory
-            .buffer
-            .write(&dma.device().capacity, &memory.region, host.as_bytes())
+    fn bytes<D: Scalar>(storage: &Self::Storage<D>) -> HostBufferSlice<'_> {
+        HostBufferSlice::from(&**storage.inner())
     }
 
-    async fn to_hbm_scalar_into<D: RuntimeScalar>(
-        value: D,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        hbm: &mut HbmScalar<D, Self>,
-    ) -> Result<(), Error> {
-        let memory = hbm.memory_mut();
-        let bytes = HbmScalar::<D, Self>::encode(value).repeat(memory.region.chips.count_ones() as usize);
-        memory.buffer.write(&dma.device().capacity, &memory.region, &bytes)
-    }
-
-    async fn from_hbm_into<D: MaterializableScalar, Chip: M, Element: M>(
-        hbm: &HbmTensor<D, Chip, Element, Self>,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        host: &mut Self::Storage<D>,
-    ) -> Result<(), Error> {
-        let memory = hbm.memory();
-        let mut bytes = vec![0; memory.region.host_len()];
-        memory.buffer.read(&dma.device().capacity, &memory.region, &mut bytes)?;
-        *host = BufStorage::from_buf(bytes);
-        Ok(())
+    fn bytes_mut<D: Scalar>(storage: &mut Self::Storage<D>) -> HostBufferSliceMut<'_> {
+        HostBufferSliceMut::from(&mut **storage.inner_mut())
     }
 
     /// Host memory moves without a copy unless it is page-locked, whose bytes are copied out.
-    fn host_storage<D: Scalar>(buffer: HostBuffer) -> Self::Storage<D> {
-        BufStorage::from_buf(buffer.into())
-    }
-
-    fn host_buffer<D: Scalar>(storage: Self::Storage<D>) -> HostBuffer {
-        Vec::<u8>::from(storage.into_inner()).into()
-    }
-
     fn pin<D: MaterializableScalar>(storage: Self::Storage<D>) -> Result<Self::Storage<D>, Error> {
         Ok(storage)
     }

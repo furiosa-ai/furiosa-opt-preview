@@ -2,6 +2,9 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{GenericParam, Generics, TypeParamBound};
 
+/// The attribute that marks a type-keyed instantiation for the compiler, and the `Loadable` items
+/// that name an instantiation's registry key: its numeric axis and const values, or, when the
+/// function is generic over other types, its function-item type name.
 pub(super) fn expansion(generics: &Generics, hidden: &syn::Ident) -> (TokenStream, TokenStream) {
     let axis = |bounds: &syn::punctuated::Punctuated<TypeParamBound, syn::Token![+]>| {
         bounds.iter().any(|bound| {
@@ -40,7 +43,12 @@ pub(super) fn expansion(generics: &Generics, hidden: &syn::Ident) -> (TokenStrea
         });
         (
             quote!(),
-            quote!(furiosa_opt_std::__private::Key::Numeric(&[#(#keys),*])),
+            quote! {
+                const KEY: &'static [usize] = &[#(#keys),*];
+                fn instance() -> &'static str {
+                    ""
+                }
+            },
         )
     } else {
         let arguments = generics.params.iter().filter_map(|param| match param {
@@ -50,9 +58,12 @@ pub(super) fn expansion(generics: &Generics, hidden: &syn::Ident) -> (TokenStrea
         });
         (
             quote!(#[furiosa_opt::instance_key = "type"]),
-            quote!(furiosa_opt_std::__private::Key::Type(
-                ::std::any::type_name_of_val(&self::#hidden::<#(#arguments),*>)
-            )),
+            quote! {
+                const KEY: &'static [usize] = &[];
+                fn instance() -> &'static str {
+                    ::std::any::type_name_of_val(&self::#hidden::<#(#arguments),*>)
+                }
+            },
         )
     }
 }

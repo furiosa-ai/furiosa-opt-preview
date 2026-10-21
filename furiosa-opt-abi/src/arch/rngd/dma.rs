@@ -1,27 +1,28 @@
 //! Device DMA configuration and host operands, bound before execution.
 
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
 use super::DEVICE_MEMORY;
 
-/// Immutable host mapping header, followed by `entries` [`Segment`] values in local HBM.
-/// Registration validates nonempty DMA extents whose lengths sum to `len`, and retains
-/// both the mapping and this table through execution. Firmware only checks the requested range.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Mapping {
-    pub len: u64,
-    pub entries: u64,
+/// The PDMA engine the host lends one cluster's firmware: the runtime builds it per cluster and
+/// sends it in a DMA request, and the firmware's PDMA queue checks it before use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+pub struct Config {
+    /// The PDMA register bank's address in the firmware's address space, 4-byte aligned.
+    pub registers: u64,
+    /// The device-memory address of the firmware's descriptor chains, one per channel, 64-byte
+    /// aligned.
+    pub descriptors: u64,
+    /// The PDMA channels this cluster owns, bit `n` for channel `n`.
+    pub channels: u8,
+    /// This chip's device memory as a PDMA address.
+    pub local: u64,
+    /// Each chip's device memory as a PDMA address, in rank order; zero past `members`.
+    pub peers: [u64; super::MAX_CHIPS as usize],
+    /// Chips the device spans, 1 to [`MAX_CHIPS`](super::MAX_CHIPS).
+    pub members: u8,
 }
-
-/// One contiguous device-visible extent of a mapped host allocation.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Segment {
-    pub address: u64,
-    pub len: u64,
-}
-
-/// Alignment of a mapping header in device memory, so its address fits the operand's 28 bits.
-const HEADER_ALIGNMENT: u64 = 256;
 
 /// DMA-only host mapping word: bit 63 tags it, bits 32..60 hold a 256-byte header offset,
 /// and bits 0..32 hold the byte offset. CPU and tensor-DMA accesses fault on this tag.
@@ -54,12 +55,24 @@ impl Operand {
     }
 }
 
-impl Mapping {
+/// Where the bytes of one pinned host allocation lie on the bus: this header, then `entries`
+/// [`Segment`]s, in device memory. Pinned memory is contiguous to the host but not on the bus, so
+/// device DMA walks this table to turn an offset into the allocation into a bus address.
+/// Registration validates nonempty extents whose lengths sum to `len` and retains the table
+/// through execution; firmware only checks the requested range.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct SegmentTable {
+    pub len: u64,
+    pub entries: u64,
+}
+
+impl SegmentTable {
     /// The header and segments firmware walks for `len` mapped bytes, the last segment cut at
     /// `len`; `None` unless nonempty, non-wrapping segments cover `len`.
     #[cfg(feature = "alloc")]
-    pub fn table(len: u64, segments: impl IntoIterator<Item = Segment>) -> Option<alloc::vec::Vec<u64>> {
-        let mut words = alloc::vec![len, 0];
+    pub fn encode(len: u64, segments: impl IntoIterator<Item = Segment>) -> Option<alloc::vec::Vec<u64>> {
+        let mut entries = alloc::vec::Vec::new();
         let mut remaining = len;
         for segment in segments {
             if remaining == 0 {
@@ -67,33 +80,30 @@ impl Mapping {
             }
             let len = remaining.min(segment.len);
             segment.address.checked_add(len).filter(|_| len != 0)?;
-            words.extend([segment.address, len]);
+            entries.push(Segment { len, ..segment });
             remaining -= len;
         }
-        words[1] = (words.len() as u64 - 2) / 2;
-        (remaining == 0).then_some(words)
+        let header: [u64; 2] = zerocopy::transmute!(Self {
+            len,
+            entries: entries.len() as u64
+        });
+        let words = entries
+            .into_iter()
+            .flat_map(|entry| -> [u64; 2] { zerocopy::transmute!(entry) });
+        (remaining == 0).then(|| header.into_iter().chain(words).collect())
     }
 }
 
-/// The PDMA engine the host lends one cluster's firmware: the runtime builds it per cluster and
-/// sends it in a DMA request, and the firmware's PDMA queue checks it before use.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
-pub struct Config {
-    /// The PDMA register bank's address in the firmware's address space, 4-byte aligned.
-    pub registers: u64,
-    /// The device-memory address of the firmware's descriptor chains, one per channel, 64-byte
-    /// aligned.
-    pub descriptors: u64,
-    /// The PDMA channels this cluster owns, bit `n` for channel `n`.
-    pub channels: u8,
-    /// This chip's device memory as a PDMA address.
-    pub local: u64,
-    /// Each chip's device memory as a PDMA address, in rank order; zero past `members`.
-    pub peers: [u64; super::MAX_CHIPS as usize],
-    /// Chips the device spans, 1 to [`MAX_CHIPS`](super::MAX_CHIPS).
-    pub members: u8,
+/// One contiguous device-visible extent of a mapped host allocation.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct Segment {
+    pub address: u64,
+    pub len: u64,
 }
+
+/// Alignment of a mapping header in device memory, so its address fits the operand's 28 bits.
+const HEADER_ALIGNMENT: u64 = 256;
 
 #[cfg(test)]
 mod tests {
@@ -127,11 +137,11 @@ mod tests {
         let segment = |address, len| Segment { address, len };
         let segments = [segment(0x1000, 8), segment(0x3000, 16), segment(0x5000, 8)];
         assert_eq!(
-            Mapping::table(12, segments),
+            SegmentTable::encode(12, segments),
             Some(alloc::vec![12, 2, 0x1000, 8, 0x3000, 4])
         );
-        assert_eq!(Mapping::table(40, segments), None);
-        assert_eq!(Mapping::table(12, [segment(0x1000, 0)]), None);
-        assert_eq!(Mapping::table(12, [segment(u64::MAX, 12)]), None);
+        assert_eq!(SegmentTable::encode(40, segments), None);
+        assert_eq!(SegmentTable::encode(12, [segment(0x1000, 0)]), None);
+        assert_eq!(SegmentTable::encode(12, [segment(u64::MAX, 12)]), None);
     }
 }

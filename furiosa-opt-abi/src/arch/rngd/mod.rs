@@ -1,8 +1,9 @@
 //! RNGD address layout and execution limits.
 
-use crate::Topology;
 use crate::doorbell::Layout;
-use crate::ring::Ring;
+use crate::mmio::Fixed;
+use crate::ring::CompletionPage;
+use core::mem::offset_of;
 use core::ops::Range;
 
 pub mod dma;
@@ -22,11 +23,6 @@ pub const COUNTER_HZ: u64 = 25_000_000;
 /// Scratchpad region reserved for task instructions by the firmware linker.
 pub const CODE: Range<usize> = 0x10_0000..0x31_0000;
 
-/// Clusters across all chips of `topology`.
-pub const fn clusters(topology: Topology) -> usize {
-    topology.chips as usize * topology.pes.div_ceil(CLUSTER_PES) as usize
-}
-
 /// The device's DRAM aperture in a PE's address space, per the RNGD memory map.
 pub const DEVICE_MEMORY: Range<u64> = 0xc0_0000_0000..0xd0_0000_0000;
 
@@ -44,6 +40,11 @@ pub const DOORBELLS: Layout = Layout {
 /// Words in a completion ring.
 pub const COMPLETION_RING: usize = 255;
 
+/// The page every core's completion ring lies in.
 // SAFETY: the standalone memory map places the completion page here in every core.
-pub const COMPLETION: Ring =
-    unsafe { Ring::completion(core::ptr::without_provenance_mut(0x50_0020_0000), COMPLETION_RING) };
+pub const COMPLETION: Fixed = unsafe {
+    Fixed::new(
+        core::ptr::without_provenance_mut(0x50_0020_0000),
+        0..offset_of!(CompletionPage, entries) + COMPLETION_RING * size_of::<u64>(),
+    )
+};

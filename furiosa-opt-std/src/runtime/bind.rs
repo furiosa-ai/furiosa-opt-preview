@@ -8,7 +8,7 @@ use crate::backend::{Backend, Runtime};
 use crate::context::{Dma, DmaContext, Tu, TuContext};
 use crate::runtime::{CurrentBackend, Device, HbmBufferSlice, Region};
 use crate::scalar::{RuntimeScalar, Scalar};
-use crate::tensor::memory::{DmTensor, HbmScalar, HbmTensor, HbmTensorView, HbmTensorViewMut};
+use crate::tensor::memory::{AllChips, DmTensor, HbmScalar, HbmTensor, HbmTensorView, HbmTensorViewMut};
 
 pub use furiosa_opt_rt::Access;
 
@@ -113,13 +113,13 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DeviceSen
 }
 
 /// A shared view only reads, whatever access it is given.
-impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend<B> for HbmTensorView<'_, D, Chip, Element, B> {
+impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend<B> for HbmTensorView<'_, D, Chip, Element, B, AllChips> {
     fn arguments(&self, _: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
         Ok(std::iter::once((self.memory(), Access::Read)))
     }
 }
 
-impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend<B> for HbmTensorViewMut<'_, D, Chip, Element, B> {
+impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend<B> for HbmTensorViewMut<'_, D, Chip, Element, B, AllChips> {
     fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
         Ok(std::iter::once((self.memory(), access)))
     }

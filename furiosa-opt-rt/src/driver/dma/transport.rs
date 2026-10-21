@@ -1,10 +1,10 @@
 //! Driver-channel submission and completion; descriptors remain owned by the transfer queue.
 
 use std::collections::BTreeMap;
-use std::io;
 
 use arrayvec::ArrayVec;
 
+use super::engine::Engine;
 use super::{Channel, Command, Direction, Ring};
 use crate::{Error, Result};
 
@@ -24,11 +24,6 @@ pub(crate) enum Transport {
     Fake(fake::Fake),
 }
 
-pub(crate) struct Channels {
-    open: Vec<Channel>,
-    next: [usize; 2],
-}
-
 impl Transport {
     pub(crate) fn open(chips: impl IntoIterator<Item = u8>, depth: u32) -> Result<Self> {
         let channels = chips
@@ -43,38 +38,40 @@ impl Transport {
         let ring = Ring::open(depth).map_err(|why| Error::Device(format!("opening io_uring: {why}")))?;
         Ok(Self::Driver { ring, channels })
     }
+}
 
-    pub(super) fn submit<'a>(&mut self, commands: impl Iterator<Item = (u64, &'a Command)>) -> io::Result<()> {
+impl Engine for Transport {
+    type Command = Command;
+
+    /// Takes all of `commands` or, when the ring has no room for them, none.
+    fn submit<'a>(&mut self, commands: impl Iterator<Item = (u64, &'a Command)>) -> Result<usize> {
         match self {
             Self::Driver { ring, channels } => {
-                let commands = commands
+                let entries = commands
                     .map(|(tag, command)| {
-                        let channels = channels.get_mut(&command.chip).expect("validated DMA chip");
-                        command.encode(channels.select(command.direction), tag)
+                        let channels = channels.get_mut(&command.chip()).expect("validated DMA chip");
+                        (tag, command.encode(channels.select(command.direction()), tag))
                     })
                     .collect::<ArrayVec<_, { super::queue::DEPTH as usize }>>();
-                if commands.is_empty() {
-                    Ok(())
-                } else {
-                    ring.submit(&commands)
-                }
+                ring.submit(entries.iter().map(|(tag, entry)| (*tag, entry)))
             }
             #[cfg(test)]
-            Self::Fake(fake) => fake.submit(commands.map(|(tag, _)| tag)),
+            Self::Fake(fake) => Ok(fake.submit(commands.map(|(tag, _)| tag))),
         }
     }
 
-    pub(super) fn retire(&mut self, mut receive: impl FnMut(u64, io::Result<i32>)) {
+    fn complete(&mut self, done: impl FnMut(u64, Result<()>)) {
         match self {
-            Self::Driver { ring, .. } => {
-                for (tag, result) in ring.completions() {
-                    receive(tag, result);
-                }
-            }
+            Self::Driver { ring, .. } => ring.complete(done),
             #[cfg(test)]
-            Self::Fake(fake) => fake.retire(receive),
+            Self::Fake(fake) => fake.complete(done),
         }
     }
+}
+
+pub(crate) struct Channels {
+    open: Vec<Channel>,
+    next: [usize; 2],
 }
 
 impl Channels {
@@ -92,6 +89,8 @@ pub(crate) mod fake {
     use std::io;
     use std::sync::{Arc, Mutex};
 
+    use crate::{Error, Result};
+
     #[derive(Clone, Default)]
     pub(crate) struct Fake(Arc<Mutex<State>>);
 
@@ -102,12 +101,14 @@ pub(crate) mod fake {
     }
 
     impl Fake {
-        pub(super) fn submit(&mut self, tags: impl Iterator<Item = u64>) -> io::Result<()> {
+        pub(super) fn submit(&mut self, tags: impl Iterator<Item = u64>) -> usize {
             let mut state = self.0.lock().unwrap();
+            let mut count = 0;
             for tag in tags {
                 assert!(state.pending.insert(tag), "a DMA command is published once");
+                count += 1;
             }
-            Ok(())
+            count
         }
 
         pub(crate) fn respond(&self, tag: u64, result: io::Result<i32>) {
@@ -116,9 +117,14 @@ pub(crate) mod fake {
             state.answers.push_back((tag, result));
         }
 
-        pub(super) fn retire(&mut self, mut receive: impl FnMut(u64, io::Result<i32>)) {
+        pub(super) fn complete(&mut self, mut done: impl FnMut(u64, Result<()>)) {
             for (tag, result) in self.0.lock().unwrap().answers.drain(..) {
-                receive(tag, result);
+                done(
+                    tag,
+                    result
+                        .map(drop)
+                        .map_err(|error| Error::Device(format!("DMA command failed: {error}"))),
+                );
             }
         }
     }

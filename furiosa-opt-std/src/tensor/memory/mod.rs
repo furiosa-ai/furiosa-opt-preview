@@ -74,7 +74,7 @@ impl<D: MaterializableScalar, Element: M, B: Backend> TryFrom<HostBuffer> for Ho
         if buffer.len() != D::size_in_bytes_from_length(Element::SIZE) {
             return Err(Error::Invalid("the host buffer's length is not the tensor's"));
         }
-        Ok(Tensor::from_inner(B::host_storage(buffer)).into())
+        Ok(Tensor::from_inner(buffer.into()).into())
     }
 }
 
@@ -131,7 +131,7 @@ impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> 
 
     /// The host buffer this tensor's bytes live in, as the device holds them.
     pub fn into_buffer(self) -> HostBuffer {
-        B::host_buffer(self.inner.inner)
+        self.inner.inner.into()
     }
 
     /// Consumes self and returns the inner tensor.
@@ -333,7 +333,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
     pub fn view<'l>(&'l self) -> HbmTensorView<'l, D, Chip, Element, B> {
         HbmTensorView {
             inner: View::whole(self.memory()),
-            chip_tiled: false,
+            chips: PhantomData,
         }
     }
 
@@ -342,7 +342,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
     pub fn view_mut<'l>(&'l mut self) -> HbmTensorViewMut<'l, D, Chip, Element, B> {
         HbmTensorViewMut {
             inner: View::whole(self.memory_mut()),
-            chip_tiled: false,
+            chips: PhantomData,
         }
     }
 
@@ -449,14 +449,33 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     }
 }
 
-/// View of an HBM tensor.
+/// View of an HBM tensor, over every chip of it ([`AllChips`]) or over the chips a
+/// [`chip_tile`](Self::chip_tile) selects ([`SomeChips`]).
 #[primitive(HbmTensorView)]
 #[derive(Debug, Clone)]
-pub struct HbmTensorView<'l, D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend> {
+pub struct HbmTensorView<'l, D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend, Chips = AllChips> {
     /// The view's cells, over the base tensor's device memory.
     inner: View<'l, D, Pair<Chip, Element>, B, HbmBufferSlice<'l, B>>,
-    chip_tiled: bool,
+    chips: PhantomData<Chips>,
 }
+
+/// Marks an HBM view over every chip of its tensor, which a launch binds.
+#[derive(Debug, Clone)]
+pub struct AllChips;
+
+/// Marks an HBM view that may cover only some chips of its tensor, as a
+/// [`chip_tile`](HbmTensorView::chip_tile) makes. Device DMA reads and writes it, but a launch binds
+/// every chip of an argument, so it refuses one:
+///
+/// ```compile_fail,E0277
+/// use furiosa_opt_std::prelude::*;
+/// axes![A = 16, C = 4];
+/// fn bind(_: impl DeviceSend) {}
+/// let tensor = HbmTensor::<i32, m![C], m![A]>::new();
+/// bind(tensor.view().chip_tile::<m![C], 1, m![1 # 4]>(1));
+/// ```
+#[derive(Debug, Clone)]
+pub struct SomeChips;
 
 /// The per-chip byte range a view covers: from the window starting at element `window_base` to the
 /// end of a base tensor of `base_len` elements spread over `Chip` chips.
@@ -521,7 +540,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> TryFrom<HbmBufferSlice<'l, 
                 region,
                 behind: slice.behind,
             }),
-            chip_tiled: false,
+            chips: PhantomData,
         })
     }
 }
@@ -539,12 +558,12 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> TryFrom<HbmBufferSliceMut<'
                 buffer: slice.buffer,
                 region,
             }),
-            chip_tiled: false,
+            chips: PhantomData,
         })
     }
 }
 
-impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, Element, B> {
+impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, Element, B, AllChips> {
     /// Names this view's cells as an owned tensor of another shape, without copying.
     ///
     /// # Safety
@@ -567,9 +586,6 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
                 .unwrap_or_else(|error| panic!("{error}")),
         )
     }
-
-    /// Logical shape (mapping) of this tensor.
-    pub type Mapping = m![{ Chip }, { Element }];
 
     /// Borrows a typed window at `byte_offset` on every chip of `buffer`.
     #[primitive(HbmTensorView::new)]
@@ -595,11 +611,15 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
 
     /// The per-chip byte range of the base allocation this view covers.
     pub(crate) fn window(&self) -> std::ops::Range<usize> {
-        assert!(!self.chip_tiled, "a host-bound HBM view cannot select individual chips");
         let start = self.inner.inner.region.bytes.start;
         let window = hbm_window::<D, Chip>(self.inner.window.base_len(), self.inner.window.window_base());
         start + window.start..start + window.end
     }
+}
+
+impl<'l, D: Scalar, Chip: M, Element: M, B: Backend, Chips> HbmTensorView<'l, D, Chip, Element, B, Chips> {
+    /// Logical shape (mapping) of this tensor.
+    pub type Mapping = m![{ Chip }, { Element }];
 
     /// Runs `read` over the view's cells, as a device function reads them.
     fn read<const DMA: Dma, R>(
@@ -615,10 +635,10 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
     /// source's `Chip`: a read source (Top padding) may target a `view_mut`
     /// destination (Bottom padding). `transpose` validates the live layout.
     #[primitive(HbmTensorView::to_hbm_view)]
-    pub fn to_hbm_view<const DMA: Dma, Chip2: M, Element2: M>(
+    pub fn to_hbm_view<const DMA: Dma, Chip2: M, Element2: M, Chips2>(
         self,
         dma: &mut DmaContext<{ DMA }, B>,
-        dst: HbmTensorViewMut<'l, D, Chip2, Element2, B>,
+        dst: HbmTensorViewMut<'l, D, Chip2, Element2, B, Chips2>,
     ) {
         self.read(dma, |src| dst.write(dma, |mut dst| dst.transpose(src, true)));
     }
@@ -645,7 +665,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
     pub fn chip_tile<Index: M, const LEN: usize, Chip2: M>(
         &self,
         start: usize,
-    ) -> HbmTensorView<'l, D, Chip2, Element, B> {
+    ) -> HbmTensorView<'l, D, Chip2, Element, B, SomeChips> {
         config_tile(TileInput {
             index: Index::to_value(),
             element: Chip::to_value(),
@@ -657,10 +677,14 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         HbmTensorView {
             inner: View {
                 inner: self.inner.inner.clone(),
-                window: self.inner.window.clone().retile::<Index, _>(start, PaddingKind::Top),
+                window: self
+                    .inner
+                    .window
+                    .clone()
+                    .retile::<Index, _>(start, LEN, PaddingKind::Top),
                 marker: PhantomData,
             },
-            chip_tiled: true,
+            chips: PhantomData,
         }
     }
 
@@ -669,7 +693,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
     pub fn tile<Index: M, const LEN: usize, Element2: M>(
         &self,
         start: usize,
-    ) -> HbmTensorView<'l, D, Chip, Element2, B> {
+    ) -> HbmTensorView<'l, D, Chip, Element2, B, Chips> {
         config_tile(TileInput {
             index: Index::to_value(),
             element: Element::to_value(),
@@ -681,10 +705,14 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
         HbmTensorView {
             inner: View {
                 inner: self.inner.inner.clone(),
-                window: self.inner.window.clone().retile::<Index, _>(start, PaddingKind::Top),
+                window: self
+                    .inner
+                    .window
+                    .clone()
+                    .retile::<Index, _>(start, LEN, PaddingKind::Top),
                 marker: PhantomData,
             },
-            chip_tiled: self.chip_tiled,
+            chips: PhantomData,
         }
     }
 
@@ -697,7 +725,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
     /// [`constraints::assert_hbm_reshape_dimension_preserved`]); precondition is same-wire-order
     /// (regroup valid, permutation not). Consuming `self` makes the move explicit.
     #[primitive(HbmTensorView::reshape)]
-    pub unsafe fn reshape<Chip2: M, Element2: M>(self) -> HbmTensorView<'l, D, Chip2, Element2, B> {
+    pub unsafe fn reshape<Chip2: M, Element2: M>(self) -> HbmTensorView<'l, D, Chip2, Element2, B, Chips> {
         constraints::assert_hbm_reshape_dimension_preserved::<Chip, Chip2, Element, Element2>();
         HbmTensorView {
             inner: View {
@@ -705,7 +733,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
                 window: self.inner.window.reshape::<m![{ Chip2 }, { Element2 }]>(),
                 marker: PhantomData,
             },
-            chip_tiled: self.chip_tiled,
+            chips: PhantomData,
         }
     }
 
@@ -715,7 +743,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
     /// the same tail. The read over-reaches the live cells into declared don't-care, which is what a
     /// read packet is allowed to do -- `Pad::extent` trims to the live cells on the SINK side only.
     #[primitive(HbmTensorView::pad)]
-    pub fn pad<Element2: M>(self) -> HbmTensorView<'l, D, Chip, Element2, B> {
+    pub fn pad<Element2: M>(self) -> HbmTensorView<'l, D, Chip, Element2, B, Chips> {
         config_pad(PadInput {
             element: Element::to_value(),
             expected: Element2::to_value(),
@@ -727,7 +755,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
                 window: self.inner.window.redeclare::<m![{ Chip }, { Element2 }]>(),
                 marker: PhantomData,
             },
-            chip_tiled: self.chip_tiled,
+            chips: PhantomData,
         }
     }
 
@@ -744,7 +772,9 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
     }
 }
 
-impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, Element, B> {
+impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend, Chips>
+    HbmTensorView<'l, D, Chip, Element, B, Chips>
+{
     /// Converts to data memory tensor.
     #[primitive(HbmTensorView::to_dm)]
     pub fn to_dm<Cluster: M, Slice: M, Element2: M>(
@@ -808,16 +838,16 @@ impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensorView
     }
 }
 
-/// Mutable view of an HBM tensor.
+/// Mutable view of an HBM tensor; see [`HbmTensorView`] for `Chips`.
 #[primitive(HbmTensorViewMut)]
 #[derive(Debug)]
-pub struct HbmTensorViewMut<'l, D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend> {
+pub struct HbmTensorViewMut<'l, D: Scalar, Chip: M, Element: M, B: Backend = CurrentBackend, Chips = AllChips> {
     /// The view's cells, over the base tensor's device memory.
     inner: View<'l, D, Pair<Chip, Element>, B, HbmBufferSliceMut<'l, B>>,
-    chip_tiled: bool,
+    chips: PhantomData<Chips>,
 }
 
-impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chip, Element, B> {
+impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chip, Element, B, AllChips> {
     /// Borrows a writable typed window at `byte_offset` on every chip of `buffer`.
     #[primitive(HbmTensorViewMut::new)]
     pub fn new(buffer: &'l mut crate::HbmBuffer<B>, byte_offset: usize) -> Self {
@@ -842,12 +872,13 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
 
     /// The per-chip byte range of the base allocation this view covers.
     pub(crate) fn window(&self) -> std::ops::Range<usize> {
-        assert!(!self.chip_tiled, "a host-bound HBM view cannot select individual chips");
         let start = self.inner.inner.region.bytes.start;
         let window = hbm_window::<D, Chip>(self.inner.window.base_len(), self.inner.window.window_base());
         start + window.start..start + window.end
     }
+}
 
+impl<'l, D: Scalar, Chip: M, Element: M, B: Backend, Chips> HbmTensorViewMut<'l, D, Chip, Element, B, Chips> {
     /// Runs `write` over the view's cells, as a device function writes them. The cells return to
     /// memory even when `write` unwinds, so a caught panic leaves the memory whole, as on a device.
     pub(crate) fn write<const DMA: Dma>(
@@ -885,7 +916,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
     pub fn chip_tile<Index: M, const LEN: usize, Chip2: M>(
         self,
         start: usize,
-    ) -> HbmTensorViewMut<'l, D, Chip2, Element, B> {
+    ) -> HbmTensorViewMut<'l, D, Chip2, Element, B, SomeChips> {
         config_tile(TileInput {
             index: Index::to_value(),
             element: Chip::to_value(),
@@ -897,10 +928,10 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
         HbmTensorViewMut {
             inner: View {
                 inner: self.inner.inner,
-                window: self.inner.window.retile::<Index, _>(start, PaddingKind::Bottom),
+                window: self.inner.window.retile::<Index, _>(start, LEN, PaddingKind::Bottom),
                 marker: PhantomData,
             },
-            chip_tiled: true,
+            chips: PhantomData,
         }
     }
 
@@ -909,7 +940,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
     pub fn tile<Index: M, const LEN: usize, Element2: M>(
         self,
         start: usize,
-    ) -> HbmTensorViewMut<'l, D, Chip, Element2, B> {
+    ) -> HbmTensorViewMut<'l, D, Chip, Element2, B, Chips> {
         config_tile(TileInput {
             index: Index::to_value(),
             element: Element::to_value(),
@@ -921,10 +952,10 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
         HbmTensorViewMut {
             inner: View {
                 inner: self.inner.inner,
-                window: self.inner.window.retile::<Index, _>(start, PaddingKind::Bottom),
+                window: self.inner.window.retile::<Index, _>(start, LEN, PaddingKind::Bottom),
                 marker: PhantomData,
             },
-            chip_tiled: self.chip_tiled,
+            chips: PhantomData,
         }
     }
 
@@ -938,7 +969,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
     /// [`constraints::assert_hbm_reshape_dimension_preserved`]); precondition is same-wire-order
     /// (regroup valid, permutation not). Consuming `self` makes the move explicit.
     #[primitive(HbmTensorViewMut::reshape)]
-    pub unsafe fn reshape<Chip2: M, Element2: M>(self) -> HbmTensorViewMut<'l, D, Chip2, Element2, B> {
+    pub unsafe fn reshape<Chip2: M, Element2: M>(self) -> HbmTensorViewMut<'l, D, Chip2, Element2, B, Chips> {
         constraints::assert_hbm_reshape_dimension_preserved::<Chip, Chip2, Element, Element2>();
         HbmTensorViewMut {
             inner: View {
@@ -946,7 +977,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
                 window: self.inner.window.reshape::<m![{ Chip2 }, { Element2 }]>(),
                 marker: PhantomData,
             },
-            chip_tiled: self.chip_tiled,
+            chips: PhantomData,
         }
     }
 }
@@ -966,7 +997,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M> HbmTensor<D, Chip, Element, C
     }
 }
 
-impl<D: MaterializableScalar, Chip: M, Element: M> HbmTensorView<'_, D, Chip, Element, Cpu> {
+impl<D: MaterializableScalar, Chip: M, Element: M, Chips> HbmTensorView<'_, D, Chip, Element, Cpu, Chips> {
     /// The dense packed byte image of the view's cells; see [`HbmTensor::to_buf`].
     pub fn to_buf(&self) -> Vec<u8> {
         self.cells().into_buf()
@@ -991,7 +1022,7 @@ impl<D: MaterializableScalar, Chip: M, Element: M> HbmTensorView<'_, D, Chip, El
     }
 }
 
-impl<D: MaterializableScalar, Chip: M, Element: M> HbmTensorViewMut<'_, D, Chip, Element, Cpu> {
+impl<D: MaterializableScalar, Chip: M, Element: M, Chips> HbmTensorViewMut<'_, D, Chip, Element, Cpu, Chips> {
     /// The dense packed byte image of the view's cells; see [`HbmTensor::to_buf`].
     pub fn to_buf(&self) -> Vec<u8> {
         let memory = &self.inner.inner;
@@ -1275,10 +1306,10 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     /// source's `Chip`: a read source (Top) may target a `view_mut` destination
     /// (Bottom). `transpose` validates the live layout.
     #[primitive(DmTensorView::to_hbm_view)]
-    pub fn to_hbm_view<Chip2: M, Element2: M>(
+    pub fn to_hbm_view<Chip2: M, Element2: M, Chips>(
         self,
         dma: &mut DmaContext<{ Dma::Tensor }, B>,
-        dst: HbmTensorViewMut<'l, D, Chip2, Element2, B>,
+        dst: HbmTensorViewMut<'l, D, Chip2, Element2, B, Chips>,
     ) {
         dst.write(dma, |mut dst| dst.transpose(self.inner, true));
     }
@@ -1364,7 +1395,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorView { inner }
     }
 
@@ -1437,7 +1468,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Tiled<Index, Chip, LEN, { PaddingKind::Top }>, Cluster, Slice, Element, B> {
         DmTensorView {
-            inner: self.inner.retile_derived::<Index, _>(start),
+            inner: self.inner.retile_derived::<Index, _>(start, LEN),
         }
     }
 
@@ -1446,7 +1477,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Cluster, Slice, Tiled<AxisToSlice, Element, 1, { PaddingKind::Top }>, B> {
         DmTensorView {
-            inner: self.inner.retile::<AxisToSlice, _>(start),
+            inner: self.inner.retile::<AxisToSlice, _>(start, 1),
         }
     }
 
@@ -1465,7 +1496,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorView { inner }
     }
 
@@ -1474,7 +1505,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Tiled<Index, Cluster, LEN, { PaddingKind::Top }>, Slice, Element, B> {
         DmTensorView {
-            inner: self.inner.retile_derived::<Index, _>(start),
+            inner: self.inner.retile_derived::<Index, _>(start, LEN),
         }
     }
 
@@ -1493,7 +1524,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorView { inner }
     }
 
@@ -1511,7 +1542,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorView { inner }
     }
 
@@ -1609,7 +1640,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorViewMut { inner }
     }
 
@@ -1618,7 +1649,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorViewMut<'l, D, Tiled<Index, Chip, LEN, { PaddingKind::Bottom }>, Cluster, Slice, Element, B> {
         DmTensorViewMut {
-            inner: self.inner.retile_derived::<Index, _>(start),
+            inner: self.inner.retile_derived::<Index, _>(start, LEN),
         }
     }
 
@@ -1637,7 +1668,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorViewMut { inner }
     }
 
@@ -1646,7 +1677,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorViewMut<'l, D, Chip, Tiled<Index, Cluster, LEN, { PaddingKind::Bottom }>, Slice, Element, B> {
         DmTensorViewMut {
-            inner: self.inner.retile_derived::<Index, _>(start),
+            inner: self.inner.retile_derived::<Index, _>(start, LEN),
         }
     }
 
@@ -1665,7 +1696,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorViewMut { inner }
     }
 
@@ -1683,7 +1714,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorViewMut { inner }
     }
 
@@ -2187,19 +2218,6 @@ mod tests {
         assert!(std::panic::catch_unwind(|| hbm_window::<i32, m![2]>(0, 0)).is_err());
     }
 
-    #[test]
-    fn rejects_host_chip_tiles() {
-        axes![A = 16, C4 = 4];
-
-        let tensor = HbmTensor::<i32, m![C4], m![A], Cpu>::new();
-        let view = tensor.view().chip_tile::<m![C4], 1, m![1 # 4]>(1);
-        assert!(std::panic::catch_unwind(|| view.window()).is_err());
-
-        let mut tensor = HbmTensor::<i32, m![C4], m![A], Cpu>::new();
-        let view = tensor.view_mut().chip_tile::<m![C4], 1, m![1 #{!} 4]>(1);
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| view.window())).is_err());
-    }
-
     /// A view of a view accumulates one offset per tile: each `tile` adds its own start, so the second
     /// start is relative to the first. Checked by reading the elements the nested view selects, since
     /// which cells a view names is what the accumulation decides.
@@ -2294,10 +2312,13 @@ impl<'t, D: MaterializableScalar, Element: M, Chip: M, Element2: M, B: Backend>
     /// cells out as `hbm` does, since a backend moves bytes unchanged.
     async fn write(self, hbm: &mut HbmTensor<D, Chip, Element2, B>) -> Result<(), Error> {
         if same_layout::<Element, Pair<Chip, Element2>>() {
-            return B::to_hbm_into(self.host.storage(), self.dma, hbm).await;
+            return self
+                .dma
+                .to_hbm([(B::bytes(self.host.storage()), hbm.memory_mut())])
+                .await;
         }
         let staged: Tensor<D, m![{ Chip }, { Element2 }], B> = self.host.inner().transpose(true);
-        B::to_hbm_into(&staged.inner, self.dma, hbm).await
+        self.dma.to_hbm([(B::bytes(&staged.inner), hbm.memory_mut())]).await
     }
 }
 
@@ -2344,11 +2365,12 @@ impl<'t, D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend>
     /// Reads the HBM tensor into `host`, relaid out on the host after unless `host` lays the cells
     /// out as the HBM tensor does, since a backend moves bytes unchanged.
     async fn read(self, host: &mut HostTensor<D, Element2, B>) -> Result<(), Error> {
+        let from = self.hbm.memory();
         if same_layout::<Element2, Pair<Chip, Element>>() {
-            return B::from_hbm_into(self.hbm, self.dma, host.storage_mut()).await;
+            return from.to_host(self.dma).output(B::bytes_mut(host.storage_mut())).await;
         }
         let mut staged = Tensor::<D, m![{ Chip }, { Element }], B>::zeroed();
-        B::from_hbm_into(self.hbm, self.dma, &mut staged.inner).await?;
+        from.to_host(self.dma).output(B::bytes_mut(&mut staged.inner)).await?;
         *host = staged.transpose(true).into();
         Ok(())
     }

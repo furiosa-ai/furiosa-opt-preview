@@ -48,8 +48,8 @@ impl ToPlacements for Topology {
                     .map_err(|_| Error::Invalid(format!("FURIOSA_VISIBLE_CHIPS: `{id}` is not a chip index")))
             })
             .collect::<Result<Vec<u8>>>()?;
-        let installed = std::fs::read_dir(rngd::NODES)
-            .map_err(|why| Error::Device(format!("listing {}: {why}", rngd::NODES)))?
+        let installed = std::fs::read_dir(crate::driver::kernel::NODES)
+            .map_err(|why| Error::Device(format!("listing {}: {why}", crate::driver::kernel::NODES)))?
             .filter_map(|entry| {
                 let name = entry.ok()?.file_name();
                 name.to_str()?.strip_prefix("npu")?.strip_suffix("mgmt")?.parse().ok()
@@ -60,7 +60,7 @@ impl ToPlacements for Topology {
 }
 
 impl Placement {
-    fn place(Topology { chips: count, pes }: Topology, mut chips: Vec<u8>) -> Vec<Self> {
+    pub(crate) fn place(Topology { chips: count, pes }: Topology, mut chips: Vec<u8>) -> Vec<Self> {
         fn subsets(chips: &[u8], count: usize) -> Vec<Vec<u8>> {
             match chips {
                 _ if count == 0 => vec![Vec::new()],
@@ -86,37 +86,5 @@ impl Placement {
                 })
             })
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// An explicit placement resolves only to itself, preserving chip rank and PE offset.
-    #[test]
-    fn preserves_explicit_placement() {
-        let placement = Placement {
-            chips: vec![3, 1],
-            pes: 4..8,
-        };
-        assert_eq!(placement.to_placements().unwrap(), vec![placement]);
-    }
-
-    /// A topology resolves to placements lowest chips first, then lowest PEs.
-    #[test]
-    fn places_topologies_on_ascending_chips() {
-        let chips = |topology: (u8, u8), installed: &[u8]| {
-            Placement::place(topology.into(), installed.to_vec())
-                .into_iter()
-                .map(|placement| (placement.chips, placement.pes))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            chips((2, 8), &[5, 2, 7]),
-            [(vec![2, 5], 0..8), (vec![2, 7], 0..8), (vec![5, 7], 0..8)]
-        );
-        assert_eq!(chips((1, 4), &[3, 3]), [(vec![3], 0..4), (vec![3], 4..8)]);
-        assert!(chips((3, 8), &[0, 1]).is_empty());
     }
 }

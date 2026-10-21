@@ -33,7 +33,8 @@ pub struct ScatterPlan<
 
 #[derive(Debug)]
 enum Destination<'d, D: Scalar, Chip: M, Element: M, B: Backend> {
-    View(HbmTensorViewMut<'d, D, Chip, Element, B>),
+    /// Written by device DMA alone, so it need not span every chip.
+    View(HbmTensorViewMut<'d, D, Chip, Element, B, SomeChips>),
     /// Slice blocks from the selected entry onward, so indices cannot reach the blocks before it.
     Slice(&'d mut [HbmTensor<D, Chip, Element, B>]),
 }
@@ -102,7 +103,7 @@ fn declared_domain<Domain: M>(index: IndexMapping<'_>) -> Mapping {
     domain
 }
 
-impl<'d, D: Scalar, Chip: M, DstElement: M, B: Backend> HbmTensorViewMut<'d, D, Chip, DstElement, B> {
+impl<'d, D: Scalar, Chip: M, DstElement: M, B: Backend> HbmTensorViewMut<'d, D, Chip, DstElement, B, AllChips> {
     /// Starts a staged scatter of fixed payloads into a native byte allocation.
     /// Byte offsets supplied to the plan must select aligned, disjoint windows within its capacity.
     #[primitive(HbmTensorViewMut::scatter_buffer)]
@@ -111,7 +112,9 @@ impl<'d, D: Scalar, Chip: M, DstElement: M, B: Backend> HbmTensorViewMut<'d, D, 
     ) -> ScatterPlan<'d, D, Chip, DstElement, Identity, DstElement, Begin, B> {
         panic!("native buffer scatter requires device execution");
     }
+}
 
+impl<'d, D: Scalar, Chip: M, DstElement: M, B: Backend, Chips> HbmTensorViewMut<'d, D, Chip, DstElement, B, Chips> {
     /// Starts a scatter through `IndexedAxis`, writing `Payload` per index entry.
     /// `Payload` describes one update entry, including padding.
     #[primitive(HbmTensorViewMut::scatter)]
@@ -122,7 +125,10 @@ impl<'d, D: Scalar, Chip: M, DstElement: M, B: Backend> HbmTensorViewMut<'d, D, 
             .unwrap_or_else(|error| panic!("{error}"));
         validate_scatter_payload(&Payload::to_value(), &payload).unwrap_or_else(|error| panic!("{error}"));
         ScatterPlan {
-            destination: Destination::View(self),
+            destination: Destination::View(HbmTensorViewMut {
+                inner: self.inner,
+                chips: PhantomData,
+            }),
             payload,
             index: (),
             _marker: PhantomData,

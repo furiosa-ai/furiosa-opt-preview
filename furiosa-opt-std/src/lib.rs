@@ -33,40 +33,16 @@ pub mod runtime;
 /// Internal APIs used by generated code.
 #[doc(hidden)]
 pub mod __private {
-    // The compiler links its host program against these crates from the executable's dependency
-    // graph, together with `furiosa-opt-rt` and `furiosa-opt-abi` built with `serde`.
-    pub use furiosa_opt_rt::registry::Key;
-    pub use {bincode, tracing};
-
     use crate::backend::Runtime;
     pub use crate::control::__loop_hint_unroll;
     use crate::runtime::{CurrentBackend, DeviceOutput, DeviceSend, Kernel, Launched, Returns, Submitted};
 
-    /// Finds the device function `path`/`key` and loads it on `device`.
-    pub fn load<F>(
-        function: F,
-        device: &crate::Device,
-        path: &'static str,
-        key: Key<'_>,
-    ) -> Result<Kernel<F>, crate::Error> {
-        Ok(Kernel::new(
-            function,
-            CurrentBackend::load(device.pdma.device(), path, key)?,
-            key,
-        ))
-    }
-
-    /// `kernel`, when it is the instantiation registry key `key` names.
-    pub fn instance<F>(kernel: Kernel<F>, key: Key<'_>) -> Result<Kernel<F>, crate::Error> {
-        kernel.of(key)
-    }
-
     /// Runs `kernel` with `args` on the selected backend, writing its returns where `returns`
     /// says; `body` is the function's Rust body, which the host backend runs.
     #[allow(clippy::unit_arg, reason = "the host backend's kernel is `()`")]
-    pub fn launch<F, Args: DeviceSend, Output: DeviceOutput, R: Returns<Output>>(
+    pub fn launch<F, Inputs, Args: DeviceSend, Output: DeviceOutput, R: Returns<Output>>(
         device: &mut crate::Device,
-        kernel: Result<Kernel<F>, crate::Error>,
+        kernel: Result<Kernel<F, Inputs>, crate::Error>,
         args: Args,
         returns: R,
         body: impl FnOnce(&mut crate::Device, Args) -> Output,

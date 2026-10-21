@@ -3,6 +3,7 @@
 //! `unsafe` that says "this is a register, mapped for as long as I run" appears once per register
 //! and nowhere in the unit's logic. The host names registers the same way through a mapping.
 
+use core::ops::Range;
 use core::ptr;
 
 /// One register of `T`, accessed volatile.
@@ -51,52 +52,113 @@ impl<T: Copy> Register<T> {
 }
 
 // On the device, registers and rings are Device memory, which the core keeps in order only within
-// one peripheral, so every hand-off between memory and a register has a barrier.
+// one peripheral, so every hand-off between memory and a register goes through one of these.
+impl<T: Copy> Register<T> {
+    /// Reads the register; the memory reads after it see what the value announced
+    /// (load-acquire): a consumer reads the producer index, then the entries it covers.
+    pub fn read_acquire(&self) -> T {
+        let value = self.read();
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: a barrier alone.
+        unsafe {
+            core::arch::asm!("dmb oshld", options(nostack, preserves_flags))
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        value
+    }
 
-/// Orders register reads before the memory reads that follow.
-pub fn acquire() {
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: a barrier alone.
-    unsafe {
-        core::arch::asm!("dmb oshld", options(nostack, preserves_flags))
-    };
-    #[cfg(not(target_arch = "aarch64"))]
-    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+    /// Writes the register after the memory reads and writes before it (store-release): a
+    /// producer fills entries, then moves the index that publishes them; a consumer reads them,
+    /// then moves the index that frees them.
+    pub fn write_release(&self, value: T) {
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: a barrier alone.
+        unsafe {
+            core::arch::asm!("dmb osh", options(nostack, preserves_flags))
+        };
+        // Only `SeqCst` emits a fence instruction on x86 (`mfence`), which write-combined stores
+        // to mapped device memory need; `Release` orders only the compiler there.
+        #[cfg(not(target_arch = "aarch64"))]
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        self.write(value);
+    }
+
+    /// Writes the register once every memory access before it has completed (after a data
+    /// synchronization barrier), for an engine that fetches what it works on from memory.
+    pub fn write_synchronized(&self, value: T) {
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: a barrier alone.
+        unsafe {
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags))
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        self.write(value);
+    }
 }
 
-/// Orders memory writes before the register write that follows.
-pub fn release() {
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: a barrier alone.
-    unsafe {
-        core::arch::asm!("dmb oshst", options(nostack, preserves_flags))
-    };
-    // Only `SeqCst` emits a fence instruction on x86 (`mfence`), which write-combined stores to
-    // mapped device memory need; `Release` orders only the compiler there.
-    #[cfg(not(target_arch = "aarch64"))]
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+/// Memory another party shares, as offsets from an origin, mapped for as long as the value lives.
+/// A ring or doorbell set owns the memory it lies in, so it cannot outlive it.
+///
+/// # Safety
+///
+/// Every offset in [`Memory::mapped`] from [`Memory::origin`] addresses mapped memory, and stays
+/// mapped while the value lives.
+pub unsafe trait Memory {
+    /// Where offset zero lies; it need not be mapped itself.
+    fn origin(&self) -> *mut u8;
+    /// The offsets that are mapped.
+    fn mapped(&self) -> Range<usize>;
 }
 
-/// Orders memory reads and writes before the register write that follows, so a producer cannot
-/// overwrite an entry still being read.
-pub(crate) fn fence() {
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: a barrier alone.
-    unsafe {
-        core::arch::asm!("dmb osh", options(nostack, preserves_flags))
-    };
-    #[cfg(not(target_arch = "aarch64"))]
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+/// Memory at a fixed address, mapped for as long as the program runs: a core's own registers and
+/// the windows through which it sees its peers.
+#[derive(Clone, Copy, Debug)]
+pub struct Fixed {
+    origin: *mut u8,
+    start: usize,
+    end: usize,
 }
 
-/// Completes every memory access before the register write that follows, for an engine that
-/// fetches its descriptors from memory.
-pub fn complete() {
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: a barrier alone.
-    unsafe {
-        core::arch::asm!("dsb sy", options(nostack, preserves_flags))
-    };
-    #[cfg(not(target_arch = "aarch64"))]
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+// SAFETY: the memory is fixed and mapped for the program's lifetime; the hardware serializes
+// accesses to it.
+unsafe impl Send for Fixed {}
+// SAFETY: as above.
+unsafe impl Sync for Fixed {}
+
+impl Fixed {
+    /// # Safety
+    ///
+    /// The offsets `mapped` from `origin` must stay mapped for as long as the program runs.
+    pub const unsafe fn new(origin: *mut u8, mapped: Range<usize>) -> Self {
+        Self {
+            origin,
+            start: mapped.start,
+            end: mapped.end,
+        }
+    }
+}
+
+// SAFETY: `new` promised the range stays mapped.
+unsafe impl Memory for Fixed {
+    fn origin(&self) -> *mut u8 {
+        self.origin
+    }
+
+    fn mapped(&self) -> Range<usize> {
+        self.start..self.end
+    }
+}
+
+// SAFETY: the shared memory lives as long as any of its handles.
+#[cfg(feature = "alloc")]
+unsafe impl<M: Memory> Memory for alloc::sync::Arc<M> {
+    fn origin(&self) -> *mut u8 {
+        (**self).origin()
+    }
+
+    fn mapped(&self) -> Range<usize> {
+        (**self).mapped()
+    }
 }

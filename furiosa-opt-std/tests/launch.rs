@@ -94,21 +94,6 @@ async fn reads_what_a_submitted_launch_writes() -> Result<(), Error> {
     Ok(())
 }
 
-/// A generic function loads the instantiation its arguments select, and its kernel launches only
-/// that instantiation.
-#[tokio::test]
-async fn kernels_keep_their_instantiation() -> Result<(), Error> {
-    axes![B = 16];
-    let mut device = Device::new(forward.topology())?;
-    let model = HbmTensor::<f32, m![1], m![A]>::alloc(&device)?;
-    let other = HbmTensor::<f32, m![1], m![B]>::alloc(&device)?;
-    let kernel = Loadable::<(&mut Device, &HbmTensor<f32, m![1], m![A]>)>::load(forward, &device)?;
-    device.launch(kernel, (&model,)).await?;
-    let refused = device.launch(kernel, (&other,)).await;
-    assert!(matches!(refused, Err(Error::Invalid(_))), "{refused:?}");
-    Ok(())
-}
-
 #[device(chip = 1)]
 fn typed<T>(device: &mut Device, model: &T)
 where
@@ -116,17 +101,13 @@ where
 {
 }
 
-/// A type-keyed kernel rejects arguments selecting another instantiation.
+/// A function generic over a type that is not an axis loads and launches by its type key.
 #[tokio::test]
-async fn kernels_keep_their_type() -> Result<(), Error> {
-    axes![B = 16];
+async fn kernels_load_by_type() -> Result<(), Error> {
     let mut device = Device::new(typed.topology())?;
     let kernel = Loadable::<(&mut Device, &HbmTensor<f32, m![1], m![A]>)>::load(typed, &device)?;
     let model = HbmTensor::<f32, m![1], m![A]>::alloc(&device)?;
-    let other = HbmTensor::<f32, m![1], m![B]>::alloc(&device)?;
     device.launch(kernel, (&model,)).await?;
-    let refused = device.launch(kernel, (&other,)).await;
-    assert!(matches!(refused, Err(Error::Invalid(_))), "{refused:?}");
     Ok(())
 }
 

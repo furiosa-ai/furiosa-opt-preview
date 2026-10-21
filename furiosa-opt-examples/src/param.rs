@@ -64,6 +64,22 @@ pub fn array_passthrough(
     (first, second)
 }
 
+/// More tensors than one launch frame carries, so a launch of [`long_array_copy`] passes its
+/// arguments through a table in device memory.
+pub const MANY: usize = 128;
+
+#[device(chip = 1)]
+pub fn long_array_copy(
+    device: &mut Device,
+    inputs: &[HbmTensor<i8, Chip, m![A, B]>; MANY],
+    output: &mut HbmTensor<i8, Chip, m![A, B]>,
+) {
+    inputs[0]
+        .to_dm::<Cluster, m![A / 16], m![A / 8 % 2, A % 8, B]>(&mut device.tdma)
+        .view()
+        .to_hbm_view(&mut device.tdma, output.view_mut());
+}
+
 #[device(chip = 1)]
 pub fn borrowed_model_passthrough(
     device: &mut Device,

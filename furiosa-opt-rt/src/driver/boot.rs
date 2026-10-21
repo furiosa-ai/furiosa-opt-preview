@@ -1,35 +1,35 @@
 //! How a driver opens: firmware boot on every cluster, then each chip's PDMA configuration.
 
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::task::Waker;
 
 use furiosa_opt_abi::bootloader;
-use furiosa_opt_ipc::{Request, Response};
+use furiosa_opt_ipc::{Configure, ConfigureOption, Identity, Staged};
 
-use super::chip::Chip;
-use super::cluster::Cluster;
+use super::chip::{Group, Pdma};
+use super::cluster::{Cluster, PeRange};
 use super::dma::DmaQueue;
 use super::dram::Dram;
-use super::link::{Link, PATIENCE};
-use super::window::Window;
+use super::kernel::{self, window::Window};
+use super::mailbox::{self, Boot, Bootloader, Mailbox, PATIENCE};
 use super::{DRAM_BASE, Driver};
-use crate::arch::rngd::{self, PeRange};
+use crate::arch::rngd;
 use crate::buffer::Ranges;
 use crate::{Error, Placement, Result};
 
-const FIRMWARE: &[u8] = include_bytes!(env!("FURIOSA_OPT_DEVICE_IMAGE"));
-const _: () = assert!(FIRMWARE.len() > 8, "the firmware image opens with its magic word");
-const BOOTLOADER: &[u8] = include_bytes!(env!("FURIOSA_OPT_BOOTLOADER"));
-
 impl Driver {
-    /// Reserves `placement` and boots every cluster on firmware staged through BAR4; the ranges
-    /// are what the device's allocator may hand out. `worker` retires host transfers nobody
-    /// observes.
-    pub(crate) fn open(placement: Placement, worker: Waker) -> Result<(Self, Ranges)> {
-        let (mut chips, shared_end, opened) = Self::reserve(&placement)?;
+    /// Reserves `placement`, boots every cluster on firmware staged through BAR4 and hands each
+    /// its chip's PDMA channels. `worker` is woken to collect host transfers nobody observes.
+    pub(crate) fn open(placement: Placement, worker: Waker) -> Result<Self> {
+        let Reserved {
+            group: Group {
+                chips: joined,
+                shared_end,
+            },
+            clusters: reserved,
+        } = Self::reserve(&placement)?;
         let Placement { chips: members, pes } = placement;
-        if let Some(deadline) = members.iter().filter_map(|&chip| rngd::timeout(chip)).min()
+        if let Some(deadline) = members.iter().filter_map(|&chip| kernel::timeout(chip)).min()
             && PATIENCE >= deadline
         {
             return Err(Error::Device(format!(
@@ -41,7 +41,7 @@ impl Driver {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos() as u64)
             ^ u64::from(std::process::id()) << 48;
-        let clusters = opened.len() / members.len();
+        let clusters = reserved.len() / members.len();
         // A chip's window is shared by its clusters, so its share is theirs together.
         let mask = pes.clone().fold(0, |mask, pe| mask | 1 << pe);
         let mut drams = members
@@ -53,78 +53,74 @@ impl Driver {
             .filter(|&level| log::log_enabled!(target: "furiosa_opt_firmware", level))
             .last()
             .map_or(0, |level| level as u8);
-        let mut links = opened
+        let mut mailboxes = reserved
             .into_iter()
             .enumerate()
-            .map(|(cluster, queues)| {
-                let rank = cluster / clusters;
-                let mut link = Link::new(queues);
-                let window = Self::boot(&mut link, &mut drams[rank], &chips[rank].window, token)?;
-                chips[rank].base = DRAM_BASE + window;
-                match link.call(&Request::Initialize {
-                    physical: chips[rank].physical,
-                    rank: rank as u8,
-                    chips: members.len() as u8,
-                    cluster: cluster as u8,
-                    log_level,
-                })? {
-                    Response::Initialize => Ok(link),
-                    response => Err(Error::Device(format!(
-                        "npu{} initialization: {response:?}",
-                        members[rank]
-                    ))),
-                }
+            .map(|(index, loader)| {
+                let rank = index / clusters;
+                Self::boot(loader, &mut drams[rank], &joined[rank].window, token)
             })
             .collect::<Result<Vec<_>>>()?;
-        for (rank, (dram, chip)) in drams.iter().zip(&mut chips).enumerate() {
-            let (peers, base) = (chip.peers, chip.base);
-            let Some(pdma) = chip.open_dma(rank, members.len())? else {
-                continue;
+        let physical = joined.iter().map(|chip| chip.physical).collect::<Vec<_>>();
+        let chips = joined
+            .into_iter()
+            .zip(&drams)
+            .map(|(chip, dram)| chip.open(DRAM_BASE + dram.at.expect("every chip's first cluster booted")))
+            .collect::<Vec<_>>();
+        let pdma = Pdma::reserve(&chips)?;
+        for (index, mailbox) in mailboxes.iter_mut().enumerate() {
+            let (rank, column) = (index / clusters, index % clusters);
+            let (chip, dram) = (&chips[rank], &drams[rank]);
+            let configure = Configure {
+                options: [
+                    Some(ConfigureOption::Identity(Identity {
+                        physical: physical[rank],
+                        rank: rank as u8,
+                        chips: members.len() as u8,
+                        cluster: index as u8,
+                    })),
+                    Some(ConfigureOption::LogLevel(log_level)),
+                    (pdma.as_ref()).map(|pdma| {
+                        let scratch = chip.base + dram.free.end as u64;
+                        ConfigureOption::Dma(pdma.config(chip, rank, scratch, column, clusters))
+                    }),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
             };
-            for column in 0..clusters {
-                let link = &mut links[rank * clusters + column];
-                let config = pdma.config(
-                    base + dram.free().end as u64,
-                    peers,
-                    members.len() as u8,
-                    column,
-                    clusters,
-                );
-                link.queues.channels = pdma.channels(config.channels);
-                match link.call(&Request::Dma(config))? {
-                    Response::Dma => {}
-                    response => return Err(Error::Device(format!("DMA configuration: {response:?}"))),
-                }
-            }
+            mailbox
+                .call(&configure)?
+                .map_err(|failure| mailbox::refused::<Configure>(index, &failure))?;
         }
         // An allocation is one offset on every chip.
         let free = drams
             .iter()
-            .map(Dram::free)
+            .map(|dram| dram.free.clone())
             .fold(0..usize::MAX, |all, one| all.start.max(one.start)..all.end.min(one.end));
         let window = chips.iter().map(|chip| chip.base - DRAM_BASE).max().unwrap_or(0);
-        let links = Arc::new(Mutex::new(links));
-        let transfers = DmaQueue::open(members.iter().copied(), Arc::clone(&links), worker)?;
-        let driver = Self {
-            links,
-            topology: (members.len() as u8, pes.len() as u8).into(),
-            chips,
-            transfers,
-            failure: OnceLock::new(),
-            tokens: AtomicU64::new(0),
-            owners: AtomicU64::new(0),
-        };
         let end = if members.len() == 1 {
             free.end
         } else {
+            // Counted from the device's share of DRAM.
             shared_end.saturating_sub(window as usize)
         };
-        Ok((driver, Ranges::new(free, end)))
+        let mailboxes = Arc::new(Mutex::new(mailboxes));
+        let transfers = DmaQueue::open(members.iter().copied(), Arc::clone(&mailboxes), worker)?;
+        Ok(Self {
+            poison: Arc::clone(transfers.poison()),
+            transfers,
+            mailboxes,
+            pdma,
+            topology: (members.len() as u8, pes.len() as u8).into(),
+            chips,
+            allocatable: Ranges::new(free, end),
+        })
     }
 
     /// Reserves `placement`'s PEs on every one of its chips; PEs another process holds are
     /// [`Error::Reserved`]. Holding PEs is the only way to learn they are free.
-    pub(crate) fn reserve(Placement { chips, pes }: &Placement) -> Result<(Vec<Chip>, usize, Vec<Cluster>)> {
+    pub(crate) fn reserve(Placement { chips, pes }: &Placement) -> Result<Reserved> {
         let ascending = chips.windows(2).all(|pair| pair[0] < pair[1]);
         let max = rngd::MAX_CHIPS;
         if !(1..=usize::from(max)).contains(&chips.len()) || !ascending || chips.len() > 1 && pes.len() < 8 {
@@ -133,13 +129,18 @@ impl Driver {
             )));
         }
         let ranges = PeRange::clusters(pes.clone())?;
-        let (joined, shared_end) = Chip::join(chips)?;
+        let group = Group::join(chips)?;
         let clusters = std::thread::scope(|scope| {
             let opens = chips
                 .iter()
                 .enumerate()
                 .flat_map(|(rank, &chip)| ranges.iter().map(move |&pes| (rank, chip, pes)))
-                .map(|(rank, chip, pes)| scope.spawn(move || Cluster::open(chip, pes, rank as u8, BOOTLOADER)))
+                .map(|(rank, chip, pes)| {
+                    scope.spawn(move || {
+                        let (cluster, link) = Cluster::open(chip, pes, rank as u8, BOOTLOADER)?;
+                        Ok(Bootloader::new(cluster, link))
+                    })
+                })
                 .collect::<Vec<_>>();
             opens
                 .into_iter()
@@ -149,33 +150,34 @@ impl Driver {
                 })
                 .collect::<Result<Vec<_>>>()
         })?;
-        Ok((joined, shared_end, clusters))
+        Ok(Reserved { group, clusters })
     }
 
-    /// Has the bootloader on `link` start the firmware image staged in `dram`, returning where
-    /// the cluster sees the chip's window. A chip's first cluster writes the image through the
-    /// chip's BAR4 `window`, which shows the same bytes wherever the cluster sees them, then finds
-    /// the window, trying each candidate until a boot lands on it.
-    fn boot(link: &mut Link, dram: &mut Dram, window: &Window, token: u64) -> Result<u64> {
+    /// Has the bootloader `loader` start the firmware image staged in `dram`, recording in
+    /// `dram.at` where the cluster sees the chip's window. A chip's first cluster writes the image
+    /// through the chip's BAR4 `window`, which shows the same bytes wherever the cluster sees
+    /// them, then finds the window, trying each candidate until a boot lands on it.
+    fn boot(mut loader: Bootloader, dram: &mut Dram, window: &Window, token: u64) -> Result<Mailbox> {
         if dram.at.is_none() {
             let bytes = [&bootloader::magic(token).to_le_bytes()[..], &FIRMWARE[8..]].concat();
             window.write(dram.offset as u64, &bytes)?;
         }
-        for candidate in dram.candidates() {
-            let address = DRAM_BASE + candidate + dram.offset as u64;
-            match link.boot(address, FIRMWARE.len() as u64, token)? {
-                bootloader::Code::Booted => {
+        // Before a boot found the window, every candidate place is tried; after, the found one.
+        let candidates = dram.at.map_or(rngd::CANDIDATES.to_vec(), |at| vec![at]);
+        for candidate in candidates {
+            let image = Staged {
+                addr: DRAM_BASE + candidate + dram.offset as u64,
+                len: FIRMWARE.len() as u64,
+                token,
+            };
+            loader = match loader.boot(image)? {
+                Boot::Running(mailbox) => {
                     log::debug!("npu{} booted, its window at {candidate:#x}", dram.chip);
                     dram.at = Some(candidate);
-                    return Ok(candidate);
+                    return Ok(*mailbox);
                 }
-                bootloader::Code::NoImage => {}
-                other => {
-                    return Err(Error::Device(format!(
-                        "the bootloader refused the firmware image: {other:?}"
-                    )));
-                }
-            }
+                Boot::NoImage(loader) => loader,
+            };
         }
         Err(Error::Device(format!(
             "no candidate window showed the firmware image staged at {:#x}",
@@ -184,13 +186,34 @@ impl Driver {
     }
 }
 
+/// `placement`'s chips locked and joined, and its clusters reserved, before any boot.
+pub(crate) struct Reserved {
+    pub(crate) group: Group,
+    /// Every chip's clusters, chip after chip, each running its bootloader.
+    pub(crate) clusters: Vec<Bootloader>,
+}
+
+const FIRMWARE: &[u8] = include_bytes!(env!("FURIOSA_OPT_DEVICE_IMAGE"));
+const _: () = assert!(FIRMWARE.len() > 8, "the firmware image opens with its magic word");
+const BOOTLOADER: &[u8] = include_bytes!(env!("FURIOSA_OPT_BOOTLOADER"));
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Device, ToPlacements};
 
-    /// `Device::new` refuses a placement that is not ascending chips, all PEs when several.
+    /// An explicit placement resolves to itself; no placement at all, or one that is not ascending
+    /// chips with all PEs when several, opens no device.
     #[test]
     fn rejects_placements_that_are_not_devices() {
+        let placement = Placement {
+            chips: vec![3, 1],
+            pes: 4..8,
+        };
+        assert_eq!(placement.to_placements().unwrap(), vec![placement]);
+        // A topology the installed chips cannot hold has no placement.
+        assert!(Placement::place((3, 8).into(), vec![0, 1]).is_empty());
+        assert!(matches!(Device::new(&[] as &[Placement]), Err(Error::Invalid(_))));
         for (chips, pes) in [(vec![], 0..8), (vec![3, 2], 0..8), (vec![0, 1], 0..4)] {
             let open = Driver::open(Placement { chips, pes }, Waker::noop().clone());
             assert!(matches!(open, Err(Error::Invalid(_))));

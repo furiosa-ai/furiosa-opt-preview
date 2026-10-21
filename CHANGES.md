@@ -45,25 +45,44 @@ How entries are written:
   `Insufficient resources` for `Sram`.
 - `Device::new` takes a `Topology`, which opens the first free placement of that shape, or a
   `Placement`, which opens exactly there; `device.placement()` tells where it opened.
+- `cargo furiosa-opt` writes a new compiler image format. Recompile programs with this SDK.
+- Linking a binary no longer compiles code for its kernels: the binary carries each kernel's
+  image as data, and `furiosa-opt-rt`'s `registry` loads it.
 - Switching kernels avoids the code copy at launch when the next launch is already submitted
   and its first chunk can be prefetched while the current launch runs.
-- NPU profile spans on `span::npu` are timed in microseconds instead of device cycles: `ts` is on
-  the host's `CLOCK_MONOTONIC_RAW` once the device clock is calibrated against it (`calibrated`,
-  `clock_uncertainty_ns`), and on the device clock otherwise. Spans also carry `kernel`,
-  `begin_ns` / `end_ns`, `host_begin_ns` / `host_end_ns`, `end_bound`, and `source` /
-  `instruction_index` where the compiler knows them. Migrate: read device cycles from
-  `begin_cycle` / `end_cycle`.
-- `cargo furiosa-opt` writes a new compiler image format. Why: each device function is linked into
-  the program as a loader and an executable that the runtime's own firmware runs. Migrate:
-  recompile programs with this SDK.
-- `furiosa-opt-rt`, `furiosa-opt-abi` and `furiosa-opt-ipc` are internal to `furiosa-opt-std`.
-  Why: std is the one API whose behavior both backends share. Migrate: open devices with
-  `Device::new(topology)`, allocate with `HbmBuffer::alloc(&device, bytes)`, move bytes with
-  `to_hbm` / `to_host` as tensors move, and launch with `launch(f, args)` or a `Kernel` from
-  `f.load(&device)`.
-- Chip-local DRAM fills upward from the end of the peer-visible window, as shared DRAM fills the
-  window, so buffers allocated back to back stay in ascending order and a slice over them keeps one
-  stride. Chip-local allocations used to fill downward from the top of DRAM.
+- A function's profile is fixed when it first loads on a device: set `FURIOSA_OPT_PROFILE` and
+  install the `span::npu` subscriber before its first launch.
+- A submitted launch runs to completion even when its Future is dropped or forgotten, and its
+  memory stays in use until the device finishes. Why: the runtime, not the Future, owns the work.
+  Compiled launches reuse chip-local memory in submission order; multi-chip peer memory and
+  generic tasks stay exclusive. A host transfer waits for the launches and transfers submitted
+  before it on its bytes.
+  Exhausted launch identities fail with `Error::Device(DeviceError::Capacity)` rather than wrapping.
+- A hand-written `DeviceSend` implements `arguments(&self, access)` instead of `bind`, yielding
+  `(HbmBufferSlice, Access)` pairs in declaration order. `#[derive(DeviceSend)]` needs no change.
+- `Device::memory()` returns `Memory` on both backends: `capacity()` is the DRAM bytes per chip it
+  can allocate and `usage()` a snapshot of what is free. Migrate: use `memory().usage().available`.
+  CPU memory is placed by the NPU runtime's allocator, so addresses, alignment, fragmentation
+  (`usage().largest`), `OutOfMemory` and the chip-local / shared split match a device's. It starts
+  from fixed upper bounds of the ranges a device of the topology learns when it boots.
+- CPU HBM tensors and views share their buffer's bytes instead of copying them. Launch writes
+  reach every alias; conflicts and foreign buffers fail as they do on the NPU.
+- `HbmTensor::new()` is for device functions. Allocate host-side tensors with `HbmTensor::alloc(&device)`.
+- `HbmBuffer::alloc` and `HbmTensor::alloc` place chip-local DRAM, all of each chip, and `memory()`
+  counts all of it. Why: a chip sees its peers' DRAM through (16 - chips) / chips windows of 4 GiB,
+  28 GiB of each chip at two chips, and every allocation used to sit in that window. A function
+  writing a caller's buffer from another chip declares that argument peer-written, and binding
+  chip-local memory there is refused. Migrate: allocate such a buffer with `HbmBuffer::alloc_shared`;
+  a launch's own returns are already shared. Chip-local DRAM fills upward from the window's end, as
+  shared DRAM fills the window, so buffers allocated back to back stay in ascending order.
+- Replace `scalar.write(value, dma)` with `HbmScalar::from_host(value, dma).output(&mut scalar)`.
+- The prelude exports runtime API items rather than every runtime and backend item.
+  Import plumbing types explicitly from `furiosa_opt_std::runtime` or `furiosa_opt_std::backend`.
+- `Kernel<F>` becomes `Kernel<F, Args>`: a kernel launches only with the arguments `Args` it was
+  loaded for, and another instantiation's arguments are a compile error, not an `Error::Invalid`
+  launch. Instantiations whose axes differ in type but not in size are separate kernels: load each.
+- `chip_tile` on an HBM view returns `HbmTensorView<.., SomeChips>` (or the `Mut` form): device DMA
+  takes it, and a launch refuses it at compile time, since a launch binds every chip of an argument.
 
 ### Added
 
@@ -85,6 +104,10 @@ How entries are written:
   tag matches `guard` and keeps the others.
 - A `&DmTensor` that holds one scalar per slice is a vector-engine register operand: each slice
   reads its own value from SRAM, without a register-file transfer.
+- `ContractPacketTensor::contract_time_prefix::<OutTime, Depth>(count)` reduces `Depth`, an axis of
+  `Time` that `OutTime` drops, over its first `count` units, clamped to `1..=Depth::SIZE`, with
+  `count` known at run time: the fetch and the accumulation stop after the live units, so a value
+  product over a window of keys sums only the valid ones.
 
 ### Fixed
 
@@ -169,6 +192,16 @@ How entries are written:
 - On the CPU backend, a copy into the capacity prefix of a resized axis writes each source cell
   once and keeps the rest, and a view renamed or tiled after a padded prefix keeps its
   coordinates.
+- A multi-chip kernel whose chips take different arms of a runtime branch, each by its own value,
+  and then exchange data runs to the end. The arm with fewer syncs advanced the chip's base
+  timestamps less than the other arm, so after the branch the chips named every sync from a
+  different base and one waited for a release its peer never made ("rank N left request M
+  unanswered"); that arm now releases the missing timestamps as barriers of the chip's own
+  clusters.
+- `contract_time_prefix` over values whose reduced units the fetch streams with their flits as one
+  iterator, such as each key's 32-channel chunk right after the previous key's, compiles; it stopped
+  in LIR with "no fetch iterator ... streams the accumulated DPE iterator".
+- NPU tensor transfers rearrange bytes on the host when host and HBM layouts differ.
 - A launch of many short Tensor Unit operations no longer runs past its time limit while one
   cluster waits for the other; profiling at `info` or `debug` made this likely.
 

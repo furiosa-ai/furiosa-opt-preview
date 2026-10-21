@@ -12,13 +12,11 @@ use core::future::poll_fn;
 use core::ptr;
 
 use furiosa_opt_abi::arch::rngd::{self, COMPLETION};
-use furiosa_opt_abi::block_on;
 use furiosa_opt_abi::bootloader::{Code, FIRMWARE_BASE, Request};
 use furiosa_opt_abi::doorbell::Doorbells;
-use furiosa_opt_abi::ring::{Completion, Consumer, Producer, header};
-use furiosa_opt_bootloader::{Image, in_range};
-
-const FIRMWARE_DIGEST: &[u8; 32] = include_bytes!(concat!(env!("OUT_DIR"), "/firmware.sha256"));
+use furiosa_opt_abi::mmio::Fixed;
+use furiosa_opt_abi::ring::{Completion, Consumer, Producer, Ring, header};
+use furiosa_opt_bootloader::Image;
 
 global_asm!(
     r#"
@@ -72,52 +70,52 @@ exception_halt:
     counter_hz = const rngd::COUNTER_HZ,
 );
 
-// SAFETY: the standalone memory map places this core's doorbells at zero.
-const DOORBELLS: Doorbells = unsafe { Doorbells::at(ptr::null_mut(), &rngd::DOORBELLS) };
-
 #[unsafe(no_mangle)]
 extern "C" fn boot_main() -> ! {
+    // SAFETY: the standalone memory map places this core's doorbells at zero.
+    let memory = unsafe { Fixed::new(ptr::null_mut(), rngd::DOORBELLS.extent()) };
+    let doorbells = Doorbells::new(memory, &rngd::DOORBELLS);
     loop {
-        let status = DOORBELLS.status();
-        for slot in (0..rngd::DOORBELLS.slots).filter(|slot| status & (1 << slot) != 0) {
-            serve(slot);
+        if let Ok(doorbells) = &doorbells {
+            let status = doorbells.status();
+            for slot in (0..rngd::DOORBELLS.slots).filter(|slot| status & (1 << slot) != 0) {
+                serve(doorbells, slot);
+            }
         }
         core::hint::spin_loop();
     }
 }
 
 /// Answers whatever complete request waits in doorbell `slot`, and jumps when it was a boot.
-fn serve(slot: u8) {
-    let Ok(doorbell) = DOORBELLS.ring(slot).and_then(Consumer::new) else {
+fn serve(doorbells: &Doorbells<Fixed>, slot: u8) {
+    let Ok(doorbell) = doorbells.ring(slot).and_then(Consumer::new) else {
         return;
     };
     let mut frame = [0; _];
     let (Ok(available), Ok(())) = (doorbell.available(), doorbell.copy(0, &mut frame[..1])) else {
         return;
     };
+    // A word that is no frame header is dropped, so the next word can open a frame.
     let Some((id, words)) = header::unpack(frame[0]) else {
         let _ = doorbell.consume(1);
         return;
     };
+    // The rest of the frame has not arrived yet.
     if available <= usize::from(words) {
         return;
     }
     let request = doorbell.copy(1, &mut frame[1..]).ok().and(Request::decode(frame));
     let _ = doorbell.consume(1 + usize::from(words));
-    let code = match request {
+    let code = match request.map(|request| (request.addr, Image::try_from(request))) {
         None => Code::NotBoot,
-        Some(Request { addr, len, .. }) if !in_range(addr, len) => Code::BadRange,
-        Some(Request { addr, len, token }) => {
+        Some((_, Err(code))) => code,
+        Some((addr, Ok(image))) => {
             let source = ptr::without_provenance::<u64>(addr as usize);
             let destination = ptr::without_provenance_mut::<u64>(FIRMWARE_BASE);
             // SAFETY: the range owns the source memory and the bootloader owns the destination;
             // `Image::land` writes and hashes the same local value from each source word.
-            Image {
-                words: len as usize / 8,
-                token,
-                digest: FIRMWARE_DIGEST,
-            }
-            .land(
+            image.land(
+                FIRMWARE_DIGEST,
                 |word| unsafe { ptr::read_volatile(source.add(word)) },
                 |word, value| unsafe { ptr::write_volatile(destination.add(word), value) },
             )
@@ -134,10 +132,23 @@ fn serve(slot: u8) {
 
 /// Publishes one completion answering `id`, waiting for room.
 fn complete(id: u32, code: Code) {
-    if let Ok(completion) = Producer::new(COMPLETION) {
+    if let Ok(completion) = Ring::completion(COMPLETION, rngd::COMPLETION_RING).and_then(Producer::new) {
         for words in Completion::encode(id, &[code as u64]) {
             let _ = block_on(poll_fn(|_| completion.write_all(&words)));
         }
+    }
+}
+
+/// Polls `future` until it is ready, spinning between polls: the hardware units answer `Poll` and
+/// wake no one, so a caller with nothing else to do waits like this.
+fn block_on<F: core::future::Future>(future: F) -> F::Output {
+    let mut future = core::pin::pin!(future);
+    let mut context = core::task::Context::from_waker(core::task::Waker::noop());
+    loop {
+        if let core::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+        core::hint::spin_loop();
     }
 }
 
@@ -147,3 +158,5 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
         core::hint::spin_loop();
     }
 }
+
+const FIRMWARE_DIGEST: &[u8; 32] = include_bytes!(concat!(env!("OUT_DIR"), "/firmware.sha256"));

@@ -68,11 +68,11 @@ impl<const DMA: Dma, B: Backend> DmaContext<DMA, B> {
         let mut host = HostBuffer::from_vec(vec![0; memory.region.host_len()]);
         futures_executor::block_on(B::read(&self.device, memory, (&mut host).into()))
             .expect("device-body DMA reads admitted memory into an equally sized host buffer");
-        B::host_storage(host)
+        host.into()
     }
 
     pub(crate) fn store<D: Scalar>(&self, memory: HbmBufferSliceMut<'_, B>, value: &B::Storage<D>) {
-        let host = B::host_buffer(value.clone());
+        let host: HostBuffer = value.clone().into();
         futures_executor::block_on(B::write(&self.device, vec![((&host).into(), memory)]))
             .expect("device-body DMA writes an equally sized value into admitted memory");
     }
@@ -127,11 +127,11 @@ mod tests {
         let buffer = HbmBuffer::alloc(&device, 4).unwrap();
         let mut alias = buffer.alias(1..3).unwrap();
         let bytes = vec![0x18, 0x7f, 0x20, 0x96];
-        let value = Cpu::host_storage::<i4>(HostBuffer::from_vec(bytes.clone()));
+        let value = <<Cpu as Backend>::Storage<i4>>::from(HostBuffer::from_vec(bytes.clone()));
 
         device.tdma.store(alias.slice_mut(.., ..).unwrap(), &value);
         let loaded = device.tdma.load::<i4>(buffer.slice(.., 1..3).unwrap());
 
-        assert_eq!(&*Cpu::host_buffer(loaded), bytes);
+        assert_eq!(&*HostBuffer::from(loaded), bytes);
     }
 }

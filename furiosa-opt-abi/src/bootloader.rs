@@ -6,18 +6,6 @@
 
 use crate::ring::header;
 
-/// Where a firmware image runs in the scratchpad, above the bootloader.
-pub const FIRMWARE_BASE: usize = 0x1_0000;
-/// First byte reserved for task shared fields by firmware.lds and libpe/tuc.h.
-pub const FIRMWARE_END: usize = 0xe_b000;
-const REQUEST_WORDS: usize = 3;
-
-/// The first word of a firmware image staged under `token`, so a stale image at a reused address is
-/// never booted. An image as built carries token zero.
-pub const fn magic(token: u64) -> u64 {
-    u64::from_be_bytes(*b"RESIDENT") ^ token
-}
-
 /// The request that boots the firmware image staged at `addr..addr + len` under `token`.
 pub struct Request {
     pub addr: u64,
@@ -26,32 +14,60 @@ pub struct Request {
 }
 
 impl Request {
-    pub const fn encode(&self, id: u32) -> [u64; 1 + REQUEST_WORDS] {
-        [header::pack(id, REQUEST_WORDS as u8), self.addr, self.len, self.token]
-    }
-
     pub fn decode([header, addr, len, token]: [u64; 1 + REQUEST_WORDS]) -> Option<Self> {
         let (_, words) = header::unpack(header)?;
         (usize::from(words) == REQUEST_WORDS).then_some(Self { addr, len, token })
     }
-}
 
-crate::enum_try_from! {
-    /// The first payload word of the bootloader's answer.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Code: u64 {
-        /// The image is in place and about to run.
-        Booted = 0,
-        /// `addr..addr + len` is outside device memory or the image limit.
-        BadRange = 1,
-        /// The bytes at `addr` do not open with the token's [`magic`].
-        NoImage = 2,
-        /// The request had another shape; nothing else is served before the firmware image runs.
-        NotBoot = 3,
-        /// The image does not match the firmware digest bound into this signed bootloader.
-        BadDigest = 4,
+    pub const fn encode(&self, id: u32) -> [u64; 1 + REQUEST_WORDS] {
+        [header::pack(id, REQUEST_WORDS as u8), self.addr, self.len, self.token]
     }
 }
+
+/// The first payload word of the bootloader's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u64)]
+pub enum Code {
+    /// The image is in place and about to run.
+    Booted = 0,
+    /// `addr..addr + len` is outside device memory or the image limit.
+    BadRange = 1,
+    /// The bytes at `addr` do not open with the token's [`magic`].
+    NoImage = 2,
+    /// The request had another shape; nothing else is served before the firmware image runs.
+    NotBoot = 3,
+    /// The image does not match the firmware digest bound into this signed bootloader.
+    BadDigest = 4,
+}
+
+impl TryFrom<u64> for Code {
+    /// A value this side does not name, as it came.
+    type Error = u64;
+
+    fn try_from(value: u64) -> Result<Self, u64> {
+        match value {
+            0 => Ok(Self::Booted),
+            1 => Ok(Self::BadRange),
+            2 => Ok(Self::NoImage),
+            3 => Ok(Self::NotBoot),
+            4 => Ok(Self::BadDigest),
+            _ => Err(value),
+        }
+    }
+}
+
+/// The first word of a firmware image staged under `token`, so a stale image at a reused address is
+/// never booted. An image as built carries token zero.
+pub const fn magic(token: u64) -> u64 {
+    u64::from_be_bytes(*b"FIRMWARE") ^ token
+}
+
+/// Where a firmware image runs in the scratchpad, above the bootloader.
+pub const FIRMWARE_BASE: usize = 0x1_0000;
+/// First byte reserved for task shared fields by firmware.lds and libpe/tuc.h.
+pub const FIRMWARE_END: usize = 0xe_b000;
+
+const REQUEST_WORDS: usize = 3;
 
 #[cfg(test)]
 mod tests {
@@ -70,5 +86,14 @@ mod tests {
         assert_eq!((last, replies.next()), ([header::pack(4, 3), 4, 5, 0], None));
         assert!(Completion::decode(last).is_some_and(|reply| reply.id == 4 && reply.payload == [4, 5, 0]));
         assert!(Completion::decode([7, 0, 0, 0]).is_none());
+        let codes = [
+            Code::Booted,
+            Code::BadRange,
+            Code::NoImage,
+            Code::NotBoot,
+            Code::BadDigest,
+        ];
+        assert!((0..).zip(codes).all(|(value, code)| Code::try_from(value) == Ok(code)));
+        assert_eq!(Code::try_from(5), Err(5));
     }
 }

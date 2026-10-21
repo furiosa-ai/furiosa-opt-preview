@@ -322,19 +322,17 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
     let (impl_generics, _, where_clause) = generics.split_for_impl();
     let (key_attribute, key) = key::expansion(generics, &hidden);
 
-    // A kernel names one registry entry: a generic function's arguments select the instantiation
-    // `load` finds, and launching a kernel checks that its arguments select that same one.
+    let path = quote!(concat!(module_path!(), "::", #name_str));
+
+    // A registry entry per instantiation, the fn's path and its key (`key::expansion`); `load`
+    // returns a kernel whose type keeps the arguments that selected it.
     let loadable = {
         quote! {
             impl #impl_generics furiosa_opt_std::runtime::Loadable<#tuple_type> for #hidden #where_clause {
-                fn load(
-                    self,
-                    device: &furiosa_opt_std::Device,
-                ) -> ::std::result::Result<furiosa_opt_std::runtime::Kernel<Self>, furiosa_opt_std::Error> {
-                    furiosa_opt_std::__private::load(self, device, self.path(), #key)
-                }
+                const PATH: &'static str = #path;
+                #key
                 fn run<__FuriosaOptReturns: furiosa_opt_std::runtime::Returns<Self::Output>>(
-                    __furiosa_opt_kernel: furiosa_opt_std::runtime::Kernel<Self>,
+                    __furiosa_opt_kernel: furiosa_opt_std::runtime::Kernel<Self, #tuple_type>,
                     #body_destructure: #tuple_type,
                     __furiosa_opt_returns: __FuriosaOptReturns,
                 ) -> furiosa_opt_std::runtime::Submitted<
@@ -342,7 +340,7 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
                 > {
                     furiosa_opt_std::__private::launch(
                         #context,
-                        furiosa_opt_std::__private::instance(__furiosa_opt_kernel, #key),
+                        ::core::result::Result::Ok(__furiosa_opt_kernel),
                         (#(#arg_names,)*),
                         __furiosa_opt_returns,
                         |#context, (#(#arg_names,)*)| self::#hidden(#(#param_names),*),
@@ -383,7 +381,7 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
             /// A caller that filters functions takes it from here rather than restating the path.
             #[doc(hidden)]
             pub fn path(&self) -> &'static str {
-                concat!(module_path!(), "::", #name_str)
+                #path
             }
 
         }
@@ -395,8 +393,8 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
                 #body_destructure: #tuple_type,
                 __furiosa_opt_returns: __FuriosaOptReturns,
             ) -> furiosa_opt_std::runtime::Submitted<furiosa_opt_std::runtime::Launched<__FuriosaOptReturns::Value>> {
-                let __furiosa_opt_kernel =
-                    furiosa_opt_std::__private::load(self, #context, self.path(), #key);
+                // The host backend runs the Rust body instead of the loaded kernel.
+                let __furiosa_opt_kernel = furiosa_opt_std::runtime::Loadable::<#tuple_type>::load(self, #context);
                 furiosa_opt_std::__private::launch(
                     #context,
                     __furiosa_opt_kernel,

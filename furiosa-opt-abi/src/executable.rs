@@ -2,18 +2,11 @@
 
 use core::ops::Range;
 
-const MAGIC: &[u8; 4] = b"FOE1";
-const HEADER: usize = 16;
-const ENTRY: usize = 16;
-const ALIGNMENT: usize = 256;
+use zerocopy::byteorder::little_endian::{U16, U32, U64};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-/// Preferred chunk budget; an indivisible instruction may use the full reserved code region.
-pub const CHUNK_LIMIT: usize = 1 << 20;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("invalid device executable")]
-pub struct Error;
-
+/// A device executable [`Executable::parse`] checked: each chunk's code lies aligned and in
+/// order inside its bytes, and its entry inside that code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Executable<'a> {
     bytes: &'a [u8],
@@ -23,31 +16,18 @@ pub struct Executable<'a> {
     clusters: usize,
 }
 
-/// One cluster's code for one chunk, and where it is entered.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Chunk {
-    pub code: Range<usize>,
-    pub entry: usize,
-}
-
-impl Chunk {
-    /// The code's length in whole alignment units, as the encoder pads it.
-    pub fn padded_len(&self) -> usize {
-        self.code.len().next_multiple_of(ALIGNMENT)
-    }
-}
-
 impl<'a> Executable<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
-        if bytes.get(..4) != Some(MAGIC) || bytes.len() < HEADER {
+        let (header, _) = Header::ref_from_prefix(bytes).map_err(|_| Error)?;
+        if header.magic != MAGIC {
             return Err(Error);
         }
         let executable = Self {
             bytes,
-            table: u16::from_le_bytes(bytes[4..6].try_into().unwrap()) as usize,
-            stride: u16::from_le_bytes(bytes[6..8].try_into().unwrap()) as usize,
-            chunks: u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize,
-            clusters: u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize,
+            table: usize::from(header.table.get()),
+            stride: usize::from(header.stride.get()),
+            chunks: header.chunks.get() as usize,
+            clusters: header.clusters.get() as usize,
         };
         if executable.table < HEADER || executable.stride < ENTRY || executable.chunks == 0 || executable.clusters == 0
         {
@@ -74,6 +54,55 @@ impl<'a> Executable<'a> {
         Ok(executable)
     }
 
+    /// Encodes `chunks[chunk][cluster]`, every chunk with the same cluster count.
+    #[cfg(feature = "alloc")]
+    pub fn encode(chunks: &[alloc::vec::Vec<&[u8]>]) -> Result<alloc::vec::Vec<u8>, Error> {
+        let clusters = chunks.first().ok_or(Error)?.len();
+        if clusters == 0 || chunks.iter().any(|chunk| chunk.len() != clusters) {
+            return Err(Error);
+        }
+        let count = chunks.len().checked_mul(clusters).ok_or(Error)?;
+        let mut end = HEADER
+            .checked_add(count.checked_mul(ENTRY).ok_or(Error)?)
+            .ok_or(Error)?;
+        let mut entries = alloc::vec::Vec::with_capacity(count);
+        for code in chunks.iter().flatten() {
+            if code.is_empty() {
+                return Err(Error);
+            }
+            let offset = end.next_multiple_of(ALIGNMENT);
+            entries.push(Entry {
+                offset: U64::new(offset as u64),
+                len: U32::new(u32::try_from(code.len()).map_err(|_| Error)?),
+                entry: U32::ZERO,
+            });
+            end = offset + code.len();
+        }
+        let header = Header {
+            magic: MAGIC,
+            table: U16::new(HEADER as u16),
+            stride: U16::new(ENTRY as u16),
+            chunks: U32::new(u32::try_from(chunks.len()).map_err(|_| Error)?),
+            clusters: U32::new(u32::try_from(clusters).map_err(|_| Error)?),
+        };
+        let mut bytes = header.as_bytes().to_vec();
+        bytes.extend_from_slice(entries.as_bytes());
+        for (entry, code) in entries.iter().zip(chunks.iter().flatten()) {
+            bytes.resize(entry.offset.get() as usize, 0);
+            bytes.extend_from_slice(code);
+        }
+        bytes.resize(bytes.len().next_multiple_of(ALIGNMENT), 0);
+        Ok(bytes)
+    }
+
+    /// One cluster's chunks, in run order.
+    pub fn code(self, cluster: usize) -> Result<impl Iterator<Item = Chunk> + 'a, Error> {
+        if cluster >= self.clusters {
+            return Err(Error);
+        }
+        Ok((0..self.chunks).map(move |chunk| self.at(chunk * self.clusters + cluster)))
+    }
+
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
@@ -86,58 +115,34 @@ impl<'a> Executable<'a> {
         self.clusters
     }
 
-    /// One cluster's chunks, in run order.
-    pub fn code(self, cluster: usize) -> Result<impl Iterator<Item = Chunk> + 'a, Error> {
-        if cluster >= self.clusters {
-            return Err(Error);
-        }
-        Ok((0..self.chunks).map(move |chunk| self.at(chunk * self.clusters + cluster)))
-    }
-
     /// Table entry `index`; an offset past `usize` saturates, so [`Self::parse`] rejects it.
     fn at(&self, index: usize) -> Chunk {
-        let words = &self.bytes[self.table + index * self.stride..][..ENTRY];
-        let offset = usize::try_from(u64::from_le_bytes(words[..8].try_into().unwrap())).unwrap_or(usize::MAX);
-        let len = u32::from_le_bytes(words[8..12].try_into().unwrap()) as usize;
+        let (entry, _) = Entry::ref_from_prefix(&self.bytes[self.table + index * self.stride..])
+            .unwrap_or_else(|_| unreachable!("parse checked that the table lies inside the bytes"));
+        let offset = usize::try_from(entry.offset.get()).unwrap_or(usize::MAX);
         Chunk {
-            code: offset..offset.saturating_add(len),
-            entry: u32::from_le_bytes(words[12..16].try_into().unwrap()) as usize,
+            code: offset..offset.saturating_add(entry.len.get() as usize),
+            entry: entry.entry.get() as usize,
         }
-    }
-
-    /// Encodes `chunks[chunk][cluster]`, every chunk with the same cluster count.
-    #[cfg(feature = "alloc")]
-    pub fn encode(chunks: &[alloc::vec::Vec<&[u8]>]) -> Result<alloc::vec::Vec<u8>, Error> {
-        let clusters = chunks.first().ok_or(Error)?.len();
-        if clusters == 0 || chunks.iter().any(|chunk| chunk.len() != clusters) {
-            return Err(Error);
-        }
-        let count = chunks.len().checked_mul(clusters).ok_or(Error)?;
-        let table = HEADER
-            .checked_add(count.checked_mul(ENTRY).ok_or(Error)?)
-            .ok_or(Error)?;
-        let mut bytes = alloc::vec![0; table];
-        bytes[..4].copy_from_slice(MAGIC);
-        bytes[4..6].copy_from_slice(&(HEADER as u16).to_le_bytes());
-        bytes[6..8].copy_from_slice(&(ENTRY as u16).to_le_bytes());
-        bytes[8..12].copy_from_slice(&u32::try_from(chunks.len()).map_err(|_| Error)?.to_le_bytes());
-        bytes[12..16].copy_from_slice(&u32::try_from(clusters).map_err(|_| Error)?.to_le_bytes());
-        for (index, code) in chunks.iter().flatten().enumerate() {
-            if code.is_empty() {
-                return Err(Error);
-            }
-            bytes.resize(bytes.len().next_multiple_of(ALIGNMENT), 0);
-            let offset = bytes.len() as u64;
-            let len = u32::try_from(code.len()).map_err(|_| Error)?;
-            let at = HEADER + index * ENTRY;
-            bytes[at..at + 8].copy_from_slice(&offset.to_le_bytes());
-            bytes[at + 8..at + 12].copy_from_slice(&len.to_le_bytes());
-            bytes.extend_from_slice(code);
-        }
-        bytes.resize(bytes.len().next_multiple_of(ALIGNMENT), 0);
-        Ok(bytes)
     }
 }
+
+/// One cluster's code for one chunk, and where it is entered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chunk {
+    pub code: Range<usize>,
+    pub entry: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("invalid device executable")]
+pub struct Error;
+
+/// Every chunk's code starts on this boundary, and the bytes up to the next one are padding.
+pub const ALIGNMENT: usize = 256;
+
+/// Preferred chunk budget; an indivisible instruction may use the full reserved code region.
+pub const CHUNK_LIMIT: usize = 1 << 20;
 
 #[cfg(feature = "serde")]
 mod codec {
@@ -158,6 +163,32 @@ mod codec {
     }
 }
 
+/// The executable's first bytes.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable)]
+#[repr(C)]
+struct Header {
+    magic: [u8; 4],
+    /// Where the entry table starts.
+    table: U16,
+    /// Bytes from one table entry to the next.
+    stride: U16,
+    chunks: U32,
+    clusters: U32,
+}
+
+/// One table entry: where one cluster's code for one chunk lies, and where it is entered.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable)]
+#[repr(C)]
+struct Entry {
+    offset: U64,
+    len: U32,
+    entry: U32,
+}
+
+const MAGIC: [u8; 4] = *b"FOE1";
+const HEADER: usize = size_of::<Header>();
+const ENTRY: usize = size_of::<Entry>();
+
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
@@ -168,7 +199,14 @@ mod tests {
     fn preserves_each_clusters_chunks() {
         let chunks = vec![vec![&b"abcd"[..], &b"efghijkl"[..]], vec![&b"mnop"[..], &b"qrst"[..]]];
         let mut bytes = Executable::encode(&chunks).unwrap();
-        bytes[HEADER + ENTRY + 12..][..4].copy_from_slice(&4_u32.to_le_bytes());
+        assert_eq!(
+            bytes[..HEADER],
+            *b"FOE1\x10\x00\x10\x00\x02\x00\x00\x00\x02\x00\x00\x00"
+        );
+        fn entry(bytes: &mut [u8], index: usize) -> &mut Entry {
+            Entry::mut_from_prefix(&mut bytes[HEADER + index * ENTRY..]).unwrap().0
+        }
+        entry(&mut bytes, 1).entry = U32::new(4);
         let executable = Executable::parse(&bytes).unwrap();
         for cluster in 0..2 {
             let code = executable
@@ -181,7 +219,7 @@ mod tests {
         assert!(executable.code(2).is_err());
         for offset in [0u64, 256, u64::MAX] {
             let mut invalid = bytes.clone();
-            invalid[HEADER + ENTRY..HEADER + ENTRY + 8].copy_from_slice(&offset.to_le_bytes());
+            entry(&mut invalid, 1).offset = U64::new(offset);
             assert!(Executable::parse(&invalid).is_err());
         }
         for len in 0..bytes.len() - ALIGNMENT {

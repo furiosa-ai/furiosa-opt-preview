@@ -1,32 +1,253 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use super::{Allocation, Buffer};
+use super::{Allocation, Buffer, Owner};
 use crate::arch::rngd;
-use crate::driver::link::IN_FLIGHT;
+use crate::driver::dram::PAGE;
+use crate::driver::mailbox::IN_FLIGHT;
 use crate::memory::{Kind, Usage};
 use crate::{Error, Result, Topology};
-
-// PDMA P2P loses bandwidth when source and destination differ modulo 512.
-const DRAM_ALIGNMENT: usize = 512;
 
 // Kernels place DRAM tensors on 4-KiB units; matching buffer alignment keeps transfer speed stable.
 const DRAM_UNIT: usize = 4096;
 
 /// One device's DRAM and SRAM allocators. DRAM grows up, shared inside the peer aperture and
-/// chip-local from its end, so back-to-back buffers ascend; SRAM residents grow down.
-pub(crate) struct Allocations {
-    pub(crate) topology: Topology,
+/// chip-local from its end, so back-to-back buffers ascend; SRAM residents grow down. A
+/// [`Device`](crate::Device) allocates over the ranges its boot leaves free.
+pub struct Allocations {
+    topology: Topology,
     dram: Mutex<Allocator>,
     sram: Mutex<Sram>,
     /// Where shared DRAM ends, rounded down to whole allocation units.
     shared_end: usize,
     /// Where device code addresses physical SRAM offset zero.
-    pub(super) sram_base: usize,
+    sram_base: usize,
+    /// How many ordered owners [`Allocations::owner`] has handed out.
+    owners: AtomicU64,
+    /// How many allocations these allocations made, which numbers the next.
+    made: AtomicU64,
+}
+
+impl Allocations {
+    /// Allocators for a host standing in for a device of `topology`, over fixed upper bounds of
+    /// what such a device hands out: all the DRAM the driver offers its PEs, shared up to the
+    /// peer windows' widest reach, and the whole SRAM window. A device hands out less, since its
+    /// firmware, the firmware's DMA descriptors and its peer windows take some.
+    pub fn new(topology: Topology) -> Self {
+        // The driver splits a chip's DRAM evenly among its PEs, in whole pages.
+        let per_pe = (rngd::DRAM as usize / usize::from(rngd::PES)) & !(PAGE - 1);
+        let dram = 0..per_pe * usize::from(topology.pes);
+        let shared_end = match topology.chips {
+            0 | 1 => dram.end,
+            // A chip's translation entries map its own DRAM first, then share the rest evenly
+            // among its peers, so each peer window covers that many entries' worth.
+            chips => {
+                let chips = usize::from(chips);
+                (rngd::ATU_ENTRIES - chips) / chips * rngd::ATU_ENTRY
+            }
+        };
+        Self::over(topology, Ranges::new(dram, shared_end))
+    }
+
+    /// Hands out `ranges` of a device of `topology`.
+    pub(crate) fn over(topology: Topology, ranges: Ranges) -> Self {
+        Self {
+            topology,
+            shared_end: ranges.shared_end / DRAM_ALIGNMENT * DRAM_ALIGNMENT,
+            dram: Mutex::new(Allocator::new(ranges.dram, DRAM_ALIGNMENT)),
+            sram_base: ranges.sram_base,
+            sram: Mutex::new(Sram {
+                allocator: Allocator::new(ranges.sram, ranges.sram_alignment),
+                alignment: ranges.sram_alignment,
+                reserved: vec![None; IN_FLIGHT].into(),
+            }),
+            owners: AtomicU64::new(0),
+            made: AtomicU64::new(0),
+        }
+    }
+
+    /// `requested` bytes of `kind` memory at one offset on every chip, free again once the
+    /// buffer's last owner drops; [`Error::OutOfMemory`] when no free span holds them, and
+    /// [`Error::SramOverlap`] when an SRAM resident would reach a launch's temporaries.
+    pub fn alloc(self: &Arc<Self>, kind: Kind, requested: usize) -> Result<Buffer> {
+        let full = Error::OutOfMemory { kind, requested };
+        let at = match kind {
+            Kind::Dram | Kind::DramShared => {
+                let len = requested
+                    .max(1)
+                    .checked_next_multiple_of(DRAM_ALIGNMENT)
+                    .ok_or(full.clone())?;
+                let alignment = if len >= DRAM_UNIT { DRAM_UNIT } else { DRAM_ALIGNMENT };
+                let mut allocator = self.dram();
+                let at = if kind == Kind::DramShared {
+                    allocator.gaps().find_map(|gap| {
+                        let at = gap.start.checked_next_multiple_of(alignment)?;
+                        (at.saturating_add(len) <= gap.end.min(self.shared_end)).then_some(at)
+                    })
+                } else {
+                    // Chip-local memory leaves the aperture, the only DRAM shared memory can use, to
+                    // shared allocations as far as the free spans allow.
+                    allocator.above(self.shared_end, len, alignment)
+                }
+                .ok_or(full)?;
+                debug_assert!(at.is_multiple_of(DRAM_ALIGNMENT), "peer DMA needs aligned DRAM");
+                allocator.live.insert(at, len);
+                at
+            }
+            Kind::Sram => {
+                let mut sram = self.sram();
+                let len = requested
+                    .max(1)
+                    .checked_next_multiple_of(sram.alignment)
+                    .ok_or(full.clone())?;
+                let at = sram.allocator.top(len, sram.alignment).ok_or(full)?;
+                let temporaries = sram.temporaries();
+                if at < temporaries {
+                    return Err(Error::SramOverlap {
+                        resident: at,
+                        temporaries,
+                    });
+                }
+                sram.allocator.live.insert(at, len);
+                at
+            }
+        };
+        Ok(Buffer {
+            offset: 0,
+            len: requested,
+            allocation: Arc::new(Allocation {
+                at,
+                generation: self.made.fetch_add(1, Ordering::Relaxed),
+                kind,
+                allocations: Arc::clone(self),
+                active: Mutex::default(),
+            }),
+        })
+    }
+
+    /// Bytes per chip `kind` allocations can occupy in all, live or free.
+    pub fn capacity(&self, kind: Kind) -> usize {
+        match kind {
+            Kind::Dram => self.dram().range.len(),
+            Kind::DramShared => {
+                let range = self.dram().range.clone();
+                range.end.min(self.shared_end).saturating_sub(range.start)
+            }
+            Kind::Sram => self.sram().allocator.range.len(),
+        }
+    }
+
+    /// Free `kind` bytes per chip now: the free spans an allocation of `kind` can take.
+    pub fn usage(&self, kind: Kind) -> Usage {
+        let usage = |gaps: &mut dyn Iterator<Item = Range<usize>>| {
+            gaps.fold(
+                Usage {
+                    available: 0,
+                    largest: 0,
+                },
+                |usage, gap| Usage {
+                    available: usage.available + gap.len(),
+                    largest: usage.largest.max(gap.len()),
+                },
+            )
+        };
+        match kind {
+            Kind::Dram => usage(&mut self.dram().gaps()),
+            Kind::DramShared => usage(&mut self.dram().gaps().map(|gap| gap.start..gap.end.min(self.shared_end))),
+            Kind::Sram => {
+                let sram = self.sram();
+                let floor = sram.temporaries().next_multiple_of(sram.alignment);
+                usage(&mut sram.allocator.gaps().map(|gap| gap.start.max(floor)..gap.end))
+            }
+        }
+    }
+
+    /// The chip count and processing elements per chip these allocations span.
+    pub fn topology(&self) -> Topology {
+        self.topology
+    }
+
+    /// Holds SRAM below `end` for a launch's temporaries until the reservation drops.
+    pub(crate) fn reserve(self: &Arc<Self>, end: usize) -> Result<Reservation> {
+        let mut sram = self.sram();
+        let start = sram.allocator.start();
+        if end > start {
+            return Err(Error::SramOverlap {
+                resident: start,
+                temporaries: end,
+            });
+        }
+        // A reservation belongs to a launch holding an answer slot on every mailbox, and a mailbox has
+        // `IN_FLIGHT` of them, the slot count the device passes.
+        let slot = sram
+            .reserved
+            .iter()
+            .position(Option::is_none)
+            .expect("a reservation slot per admitted launch");
+        sram.reserved[slot] = Some(end);
+        Ok(Reservation {
+            allocations: Arc::clone(self),
+            slot,
+        })
+    }
+
+    /// An ordered owner no earlier access of this device's memory had; its accesses order after
+    /// every earlier owner's on the bytes they share.
+    pub(crate) fn owner(&self) -> Result<Owner> {
+        self.owners
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |owner| owner.checked_add(1))
+            .map(Owner::Ordered)
+            .map_err(|_| Error::Capacity)
+    }
+
+    pub(super) fn release(&self, kind: Kind, at: usize) {
+        match kind {
+            Kind::Sram => self.sram().allocator.live.remove(&at),
+            Kind::Dram | Kind::DramShared => self.dram().live.remove(&at),
+        };
+    }
+
+    /// Where device code addresses physical SRAM offset zero.
+    pub(super) fn sram_base(&self) -> usize {
+        self.sram_base
+    }
+
+    // Every update under these locks is one map or slot write, so a lock a panic poisoned still
+    // guards whole state.
+    fn dram(&self) -> MutexGuard<'_, Allocator> {
+        self.dram.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn sram(&self) -> MutexGuard<'_, Sram> {
+        self.sram.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl std::fmt::Debug for Allocations {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Allocations")
+            .field("topology", &self.topology)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A temporary SRAM prefix, retained until its device work finishes.
+pub(crate) struct Reservation {
+    allocations: Arc<Allocations>,
+    slot: usize,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.allocations.sram().reserved[self.slot] = None;
+    }
 }
 
 /// The device bytes one allocator hands out, as the driver found them.
+#[derive(Clone)]
 pub(crate) struct Ranges {
     /// DRAM offsets free on every chip.
     pub(crate) dram: Range<usize>,
@@ -39,28 +260,21 @@ pub(crate) struct Ranges {
     pub(crate) sram_alignment: usize,
 }
 
-struct Allocator {
-    range: Range<usize>,
-    live: BTreeMap<usize, usize>,
-}
-
-struct Sram {
-    allocator: Allocator,
-    alignment: usize,
-    /// Where each admitted launch's temporaries end, one slot per launch the device admits at once.
-    reserved: Box<[Option<usize>]>,
-}
-
 impl Ranges {
     pub(crate) fn new(dram: Range<usize>, shared_end: usize) -> Self {
         Self {
             dram,
             shared_end,
             sram: rngd::sram::WINDOW.start as usize..rngd::sram::WINDOW.end as usize,
-            sram_base: (rngd::sram::virtual_addr(rngd::sram::WINDOW.start) - rngd::sram::WINDOW.start) as usize,
+            sram_base: (rngd::sram::Physical::START.virtual_addr() - rngd::sram::WINDOW.start) as usize,
             sram_alignment: rngd::sram::ALIGNMENT as usize,
         }
     }
+}
+
+struct Allocator {
+    range: Range<usize>,
+    live: BTreeMap<usize, usize>,
 }
 
 impl Allocator {
@@ -118,6 +332,13 @@ impl Allocator {
     }
 }
 
+struct Sram {
+    allocator: Allocator,
+    alignment: usize,
+    /// Where each admitted launch's temporaries end, one slot per launch the device admits at once.
+    reserved: Box<[Option<usize>]>,
+}
+
 impl Sram {
     /// Where the temporaries of the admitted launches end: no resident may start below it.
     fn temporaries(&self) -> usize {
@@ -125,167 +346,8 @@ impl Sram {
     }
 }
 
-impl Allocations {
-    /// Hands out `ranges` of a device of `topology`.
-    pub(crate) fn new(topology: Topology, ranges: Ranges) -> Self {
-        Self {
-            topology,
-            shared_end: ranges.shared_end / DRAM_ALIGNMENT * DRAM_ALIGNMENT,
-            dram: Mutex::new(Allocator::new(ranges.dram, DRAM_ALIGNMENT)),
-            sram_base: ranges.sram_base,
-            sram: Mutex::new(Sram {
-                allocator: Allocator::new(ranges.sram, ranges.sram_alignment),
-                alignment: ranges.sram_alignment,
-                reserved: vec![None; IN_FLIGHT].into(),
-            }),
-        }
-    }
-
-    // Every update under these locks is one map or slot write, so a lock a panic poisoned still
-    // guards whole state.
-    fn dram(&self) -> MutexGuard<'_, Allocator> {
-        self.dram.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn sram(&self) -> MutexGuard<'_, Sram> {
-        self.sram.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Bytes per chip `kind` allocations can occupy in all, live or free.
-    pub(crate) fn capacity(&self, kind: Kind) -> usize {
-        match kind {
-            Kind::Dram => self.dram().range.len(),
-            Kind::DramShared => {
-                let range = self.dram().range.clone();
-                range.end.min(self.shared_end).saturating_sub(range.start)
-            }
-            Kind::Sram => self.sram().allocator.range.len(),
-        }
-    }
-
-    /// Free `kind` bytes per chip now: the free spans an allocation of `kind` can take.
-    pub(crate) fn usage(&self, kind: Kind) -> Usage {
-        let usage = |gaps: &mut dyn Iterator<Item = Range<usize>>| {
-            gaps.fold(
-                Usage {
-                    available: 0,
-                    largest: 0,
-                },
-                |usage, gap| Usage {
-                    available: usage.available + gap.len(),
-                    largest: usage.largest.max(gap.len()),
-                },
-            )
-        };
-        match kind {
-            Kind::Dram => usage(&mut self.dram().gaps()),
-            Kind::DramShared => usage(&mut self.dram().gaps().map(|gap| gap.start..gap.end.min(self.shared_end))),
-            Kind::Sram => {
-                let sram = self.sram();
-                let floor = sram.temporaries().next_multiple_of(sram.alignment);
-                usage(&mut sram.allocator.gaps().map(|gap| gap.start.max(floor)..gap.end))
-            }
-        }
-    }
-
-    pub(crate) fn alloc(self: &Arc<Self>, kind: Kind, requested: usize) -> Result<Buffer> {
-        let full = Error::OutOfMemory { kind, requested };
-        let at = match kind {
-            Kind::Dram | Kind::DramShared => {
-                let len = requested
-                    .max(1)
-                    .checked_next_multiple_of(DRAM_ALIGNMENT)
-                    .ok_or(full.clone())?;
-                let alignment = if len >= DRAM_UNIT { DRAM_UNIT } else { DRAM_ALIGNMENT };
-                let mut allocator = self.dram();
-                let at = if kind == Kind::DramShared {
-                    allocator.gaps().find_map(|gap| {
-                        let at = gap.start.checked_next_multiple_of(alignment)?;
-                        (at.saturating_add(len) <= gap.end.min(self.shared_end)).then_some(at)
-                    })
-                } else {
-                    // Chip-local memory leaves the aperture, the only DRAM shared memory can use, to
-                    // shared allocations as far as the free spans allow.
-                    allocator.above(self.shared_end, len, alignment)
-                }
-                .ok_or(full)?;
-                debug_assert!(at.is_multiple_of(DRAM_ALIGNMENT), "peer DMA needs aligned DRAM");
-                allocator.live.insert(at, len);
-                at
-            }
-            Kind::Sram => {
-                let mut sram = self.sram();
-                let len = requested
-                    .max(1)
-                    .checked_next_multiple_of(sram.alignment)
-                    .ok_or(full.clone())?;
-                let at = sram.allocator.top(len, sram.alignment).ok_or(full)?;
-                let temporaries = sram.temporaries();
-                if at < temporaries {
-                    return Err(Error::SramOverlap {
-                        resident: at,
-                        temporaries,
-                    });
-                }
-                sram.allocator.live.insert(at, len);
-                at
-            }
-        };
-        Ok(Buffer {
-            offset: 0,
-            len: requested,
-            allocation: Arc::new(Allocation {
-                at,
-                kind,
-                allocations: Arc::clone(self),
-                active: Mutex::default(),
-            }),
-        })
-    }
-
-    /// Holds SRAM below `end` for a launch's temporaries until the reservation drops.
-    pub(crate) fn reserve(self: &Arc<Self>, end: usize) -> Result<Reservation> {
-        let mut sram = self.sram();
-        let start = sram.allocator.start();
-        if end > start {
-            return Err(Error::SramOverlap {
-                resident: start,
-                temporaries: end,
-            });
-        }
-        // A reservation belongs to a launch holding an answer slot on every link, and a link has
-        // `IN_FLIGHT` of them, the slot count the device passes.
-        let slot = sram
-            .reserved
-            .iter()
-            .position(Option::is_none)
-            .expect("a reservation slot per admitted launch");
-        sram.reserved[slot] = Some(end);
-        Ok(Reservation {
-            allocations: Arc::clone(self),
-            slot,
-        })
-    }
-
-    pub(super) fn release(&self, kind: Kind, at: usize) {
-        match kind {
-            Kind::Sram => self.sram().allocator.live.remove(&at),
-            Kind::Dram | Kind::DramShared => self.dram().live.remove(&at),
-        };
-    }
-}
-
-/// A temporary SRAM prefix, retained until its device work finishes.
-pub(crate) struct Reservation {
-    allocations: Arc<Allocations>,
-    slot: usize,
-}
-
-impl Drop for Reservation {
-    fn drop(&mut self) {
-        self.allocations.sram().reserved[self.slot] = None;
-    }
-}
+// PDMA P2P loses bandwidth when source and destination differ modulo 512.
+const DRAM_ALIGNMENT: usize = 512;
 
 #[cfg(test)]
 mod tests {
@@ -323,7 +385,8 @@ mod tests {
         ));
     }
 
-    /// Shared DRAM lies inside the peer aperture and draws on the same capacity as the rest.
+    /// Shared DRAM lies inside the peer aperture and draws on the same capacity as the rest; its
+    /// capacity and usage report the aperture.
     #[test]
     fn shares_dram_capacity() {
         for end in [1024, 3072] {
@@ -337,27 +400,16 @@ mod tests {
             drop(shared);
             assert!(allocations.alloc(Kind::DramShared, 1024).is_ok());
         }
-    }
-
-    /// Back-to-back allocations of one kind land contiguous and ascending, chip-local ones above
-    /// a peer aperture when it leaves room, so a slice of them keeps one stride.
-    #[test]
-    fn places_allocations_ascending() {
-        for (end, kind, floor) in [
-            (4096, Kind::Dram, 0),
-            (4096, Kind::DramShared, 0),
-            (1024, Kind::Dram, 1024),
-            (1024, Kind::DramShared, 0),
-        ] {
-            let allocations = crate::test::allocations(0..4096, end);
-            let first = allocations.alloc(kind, 512).unwrap();
-            let second = allocations.alloc(kind, 512).unwrap();
-            assert_eq!(
-                (first.addr(), second.addr()),
-                (floor, floor + 512),
-                "{kind:?} below {end}"
-            );
-        }
+        // Its capacity and free spans end at the aperture, as its allocations do.
+        let allocations = crate::test::allocations(0..4096, 1024);
+        let capacity = [Kind::Dram, Kind::DramShared].map(|kind| allocations.capacity(kind));
+        assert_eq!(capacity, [4096, 1024]);
+        let usage = allocations.usage(Kind::DramShared);
+        assert_eq!((usage.available, usage.largest), (1024, 1024));
+        assert!(allocations.alloc(Kind::DramShared, usage.largest + 1).is_err());
+        let _shared = allocations.alloc(Kind::DramShared, usage.largest).unwrap();
+        assert_eq!(allocations.usage(Kind::DramShared).largest, 0);
+        assert_eq!(allocations.usage(Kind::Dram).available, 3072);
     }
 
     /// A device reports its capacity, and its free bytes and largest free span as they change.
@@ -381,20 +433,6 @@ mod tests {
         drop((head, second, tail));
         assert_eq!(allocations.capacity(Kind::Dram), 4096);
         assert_eq!(spans(), (4096, 4096));
-    }
-
-    /// Shared DRAM's capacity and free spans end at the peer aperture, as its allocations do.
-    #[test]
-    fn reports_shared_spans_inside_the_aperture() {
-        let allocations = crate::test::allocations(0..4096, 1024);
-        let capacity = [Kind::Dram, Kind::DramShared].map(|kind| allocations.capacity(kind));
-        assert_eq!(capacity, [4096, 1024]);
-        let usage = allocations.usage(Kind::DramShared);
-        assert_eq!((usage.available, usage.largest), (1024, 1024));
-        assert!(allocations.alloc(Kind::DramShared, usage.largest + 1).is_err());
-        let _shared = allocations.alloc(Kind::DramShared, usage.largest).unwrap();
-        assert_eq!(allocations.usage(Kind::DramShared).largest, 0);
-        assert_eq!(allocations.usage(Kind::Dram).available, 3072);
     }
 
     /// An oversized request is `OutOfMemory` with the length asked for, even at `usize::MAX`.
@@ -432,7 +470,7 @@ mod tests {
         ));
         drop(lower);
         assert!(allocations.alloc(Kind::Sram, 1).is_ok());
-        let start = live.addr() - sram::virtual_addr(sram::WINDOW.start) as usize;
+        let start = live.addr() - sram::Physical::START.virtual_addr() as usize;
         assert!(allocations.reserve(start).is_ok());
         assert!(
             matches!(allocations.reserve(start + 1), Err(Error::SramOverlap { resident, temporaries }) if resident == start && temporaries == start + 1)

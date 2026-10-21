@@ -1,16 +1,17 @@
 //! Eager execution with device-owned operands and the compiler's epilogues.
 
-// allow: SIZE_OK — The slot lifecycle and its private-boundary tests share completion invariants.
-
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use furiosa_opt_ipc::{Profile, Records};
+
 use crate::buffer::Waiters;
-use crate::driver::link::IN_FLIGHT;
-use crate::driver::{Driver, Ticket};
+use crate::device::Contention;
+use crate::driver::mailbox::IN_FLIGHT;
+use crate::driver::{Driver, Replies, Ticket};
 use crate::memory::Kind;
 use crate::{Access, Buffer, BufferSlice, Device, Error, Result};
 
@@ -18,18 +19,8 @@ mod argument;
 mod table;
 pub(crate) use argument::Operand;
 pub use argument::{Argument, Arguments};
-#[cfg(test)]
-pub(crate) use table::Indirect;
 use table::Table;
 pub(crate) use table::{Inline, Prepared};
-
-/// A function's compiled program in device DRAM.
-pub(crate) struct Executable {
-    pub(crate) device: Arc<Device>,
-    pub(crate) staging: Arc<Buffer>,
-    pub(crate) token: u64,
-    pub(crate) sram_end: usize,
-}
 
 /// A loaded program that launches on its device with arguments its binder turns into operands.
 pub struct Function {
@@ -37,38 +28,32 @@ pub struct Function {
     ordered: bool,
 }
 
-type Callable = dyn for<'a> Fn(&mut dyn Iterator<Item = Argument<'a>>, &[(BufferSlice<'a>, Access)], bool) -> Result<Launch>
-    + Send
-    + Sync;
-
 impl Function {
     /// Stages `bytes` on every chip and allocates slots for `capacity` arguments once.
     /// Launch temporaries hold SRAM below `sram_end`. `bind` turns a launch's arguments
-    /// into operands and returns its epilogue, which runs only after the hardware finished; polling
-    /// an epilogue must not block or launch a function, and its readback must use pinned host views.
+    /// into operands and returns its [`Epilogue`], which runs only after the hardware finished;
+    /// polling an epilogue must not block or launch a function, and its readback must use pinned
+    /// host views.
     ///
     /// # Safety
     /// Binding must declare every caller-memory access with its mode; memory reached through an
     /// operand's contents must be declared through `launch_holding`.
     /// Device code must stay within those regions; writes to compiler storage need their own ordering proof.
-    pub async unsafe fn load<F>(
+    pub async unsafe fn load<F: Epilogue>(
         device: &Arc<Device>,
         bytes: &[u8],
         sram_end: usize,
         capacity: usize,
         bind: impl for<'a> Fn(&mut dyn Iterator<Item = Argument<'a>>, &mut Arguments) -> Result<F> + Send + Sync + 'static,
-    ) -> Result<Self>
-    where
-        F: Future<Output = Result<()>> + Send + 'static,
-    {
+    ) -> Result<Self> {
         let mut staging = device.alloc(Kind::Dram, bytes.len())?;
         device
             .write(std::iter::repeat(bytes.into()).zip(staging.slice_mut(..)?.chips()))
             .await?;
         let executable = Executable {
             device: Arc::clone(device),
+            token: staging.generation(),
             staging: Arc::new(staging),
-            token: device.driver.token()?,
             sram_end,
         };
         u32::try_from(capacity).map_err(|_| Error::Invalid("argument count exceeds u32".into()))?;
@@ -95,18 +80,18 @@ impl Function {
                 })
                 .collect::<Result<_>>()?,
             failure: OnceLock::new(),
-            worker: device.worker.waker.clone(),
+            worker: device.worker.waker().clone(),
             waiters: Mutex::default(),
         });
-        device.worker.launches.push(slots.clone());
+        device.launches.push(slots.clone());
         Ok(Self {
             launch: Box::new(move |args, held, ordered| {
                 slots.launch(&executable, held, |arguments| {
-                    arguments.owner = if ordered {
-                        crate::buffer::Owner::Ordered(executable.device.driver.owner()?)
+                    arguments.set_owner(if ordered {
+                        executable.device.allocations.owner()?
                     } else {
                         crate::buffer::Owner::Unordered
-                    };
+                    });
                     bind(args, arguments)
                 })
             }),
@@ -139,7 +124,162 @@ impl Function {
     }
 }
 
-impl<F: Future<Output = Result<()>> + Send + 'static> Slots<F> {
+/// One submitted launch of a [`Function`], resolving to the outcome of its hardware and epilogue.
+/// Dropping it cancels nothing.
+#[must_use = "await the launch to observe its result"]
+pub struct Launch {
+    completion: Arc<dyn Completion>,
+    index: usize,
+    generation: u64,
+}
+
+impl Future for Launch {
+    type Output = Result<()>;
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let started = Instant::now();
+        loop {
+            let result = self.completion.poll(self.index, self.generation, context);
+            if result.is_ready() || started.elapsed() >= SPIN {
+                return result;
+            }
+            std::hint::spin_loop();
+        }
+    }
+}
+
+impl Drop for Launch {
+    fn drop(&mut self) {
+        self.completion.release(self.index, self.generation);
+    }
+}
+
+/// What one launch runs on every cluster's reply once its hardware finished, and the profile it
+/// asks every chunk to record into those replies. A future is an epilogue that asks for none.
+pub trait Epilogue: Send + 'static {
+    /// What every chunk records into the replies, if anything.
+    fn profile(&self) -> Option<Profile>;
+
+    /// Runs on each cluster's records, in cluster order, until it is ready.
+    fn run(self: Pin<&mut Self>, replies: &[Records]) -> Poll<Result<()>>;
+}
+
+impl<F: Future<Output = Result<()>> + Send + 'static> Epilogue for F {
+    fn profile(&self) -> Option<Profile> {
+        None
+    }
+
+    fn run(self: Pin<&mut Self>, _: &[Records]) -> Poll<Result<()>> {
+        self.poll(&mut Context::from_waker(Waker::noop()))
+    }
+}
+
+/// A function's compiled program in device DRAM.
+pub(crate) struct Executable {
+    pub(crate) device: Arc<Device>,
+    pub(crate) staging: Arc<Buffer>,
+    /// The staging allocation's generation, which tells this image from another staged later at
+    /// the same address.
+    pub(crate) token: u64,
+    pub(crate) sram_end: usize,
+}
+
+/// Every function's launch slots on one device, polled by its worker so that launches nobody
+/// observes still complete and run their epilogues.
+#[derive(Default)]
+pub(crate) struct Launches(Mutex<Vec<Arc<dyn Completion>>>);
+
+/// Neither walk holds the list while it polls, since an epilogue's transfer may complete launches.
+impl Launches {
+    /// Collects every function's finished launches; true when none is in flight. Skipping
+    /// contended slots is the worker's walk, which alone removes a function nothing holds any
+    /// more, so the one it removes is the one at `index`. Waiting walks down, so a concurrent
+    /// removal shifts only functions it already passed.
+    pub(crate) fn complete(&self, contention: Contention) -> bool {
+        let mut idle = true;
+        match contention {
+            Contention::Skip => {
+                let mut index = 0;
+                while let Some(function) = self.get(index) {
+                    let complete = function.complete(contention);
+                    idle &= complete;
+                    let mut functions = self.0.lock().unwrap();
+                    // The list and this clone: no Function or Launch holds the slots any more.
+                    if complete && Arc::strong_count(&function) == 2 {
+                        functions.remove(index);
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            Contention::Wait => {
+                let mut index = self.0.lock().unwrap().len();
+                while let Some(next) = index.checked_sub(1) {
+                    index = next;
+                    if let Some(function) = self.get(index) {
+                        idle &= function.complete(contention);
+                    }
+                }
+            }
+        }
+        idle
+    }
+
+    /// The launches submitted so far that have not ended.
+    pub(crate) fn launched(&self) -> Launched {
+        Launched(
+            (self.0.lock().unwrap().iter())
+                .filter_map(|function| Some((Arc::clone(function), function.launched()?)))
+                .collect(),
+        )
+    }
+
+    fn push(&self, function: Arc<dyn Completion>) {
+        self.0.lock().unwrap().push(function);
+    }
+
+    fn get(&self, index: usize) -> Option<Arc<dyn Completion>> {
+        self.0.lock().unwrap().get(index).cloned()
+    }
+}
+
+/// Launches of a device, each by its function and the generation of each of its slots.
+pub(crate) struct Launched(Vec<(Arc<dyn Completion>, [u64; IN_FLIGHT])>);
+
+impl Launched {
+    /// Whether every launch ended; `waker` is woken at the next end otherwise.
+    pub(crate) fn ended(&self, waker: &Waker) -> bool {
+        self.0
+            .iter()
+            .all(|(function, launched)| function.ended(launched, waker))
+    }
+}
+
+type Callable = dyn for<'a> Fn(&mut dyn Iterator<Item = Argument<'a>>, &[(BufferSlice<'a>, Access)], bool) -> Result<Launch>
+    + Send
+    + Sync;
+
+trait Completion: Send + Sync {
+    /// Collects the launches the hardware finished and runs their epilogues; true when none of
+    /// them is in flight.
+    fn complete(&self, contention: Contention) -> bool;
+    fn poll(&self, index: usize, generation: u64, context: &mut Context<'_>) -> Poll<Result<()>>;
+    /// The observer of launch `generation` in slot `index` is gone.
+    fn release(&self, index: usize, generation: u64);
+    /// The generation each slot launched last, unless every one of them ended.
+    fn launched(&self) -> Option<[u64; IN_FLIGHT]>;
+    /// Whether every launch of `launched` ended; `waker` is woken at the next end otherwise.
+    fn ended(&self, launched: &[u64; IN_FLIGHT], waker: &Waker) -> bool;
+}
+
+struct Slots<F> {
+    slots: Box<[Slot<F>]>,
+    failure: OnceLock<Error>,
+    worker: Waker,
+    /// Woken whenever one of these launches ends.
+    waiters: Mutex<Waiters>,
+}
+
+impl<F: Epilogue> Slots<F> {
     fn launch(
         self: &Arc<Self>,
         executable: &Executable,
@@ -157,8 +297,8 @@ impl<F: Future<Output = Result<()>> + Send + 'static> Slots<F> {
         let generation = slot.generation.checked_add(1).ok_or(Error::Capacity)?;
         let submitted = bind(&mut slot.arguments).and_then(|future| {
             slot.arguments.reserve(held.len());
-            slot.hardware = Some(self.submit(executable, &mut slot, held)?);
-            slot.future = Some((future, Arc::clone(&executable.device.driver)));
+            slot.hardware = Some(self.submit(executable, &mut slot, held, future.profile())?);
+            slot.future = Some((future, Arc::clone(&executable.device.driver), Replies::new()));
             Ok(())
         });
         if let Err(error) = submitted {
@@ -173,7 +313,6 @@ impl<F: Future<Output = Result<()>> + Send + 'static> Slots<F> {
             completion: self.clone(),
             index,
             generation,
-            _device: Arc::clone(&executable.device),
         })
     }
 
@@ -196,10 +335,11 @@ impl<F: Future<Output = Result<()>> + Send + 'static> Slots<F> {
         executable: &Executable,
         state: &mut State<F>,
         held: &[(BufferSlice<'_>, Access)],
-    ) -> Result<Hardware> {
+        profile: Option<Profile>,
+    ) -> Result<Ticket> {
         let device = &executable.device;
         let chips = u32::from(device.topology().chips);
-        for operand in &state.arguments.values {
+        for operand in state.arguments.operands() {
             match operand {
                 Operand::Unbound | Operand::Value(_) => {}
                 Operand::Device {
@@ -216,27 +356,33 @@ impl<F: Future<Output = Result<()>> + Send + 'static> Slots<F> {
                         ));
                     }
                 }
-                Operand::Host { mapping, .. } => {
-                    if !mapping.table.belongs_to(&device.allocations) {
+                Operand::Host { registration, .. } => {
+                    if !registration.buffer.belongs_to(&device.allocations) {
                         return Err(Error::ForeignBuffer);
                     }
                 }
             }
         }
         for (view, _) in held {
-            if !view.buffer.belongs_to(&device.allocations) {
+            if !view.buffer().belongs_to(&device.allocations) {
                 return Err(Error::ForeignBuffer);
             }
-            if view.chips.count_ones() != chips {
+            if view.chip_mask().count_ones() != chips {
                 return Err(Error::Invalid("held memory must cover every chip of the device".into()));
             }
         }
-        device.admit(|| state.arguments.acquire(held))?;
-        let prepared = match Inline::new(device, &state.arguments.values) {
+        // The clusters read the staged image while the launch runs.
+        let image = executable.staging.slice(..).expect("a buffer holds its own range");
+        device.admit(|| {
+            state
+                .arguments
+                .acquire(held.iter().copied().chain([(image, Access::Read)]))
+        })?;
+        let prepared = match Inline::new(device, state.arguments.operands()) {
             Some(inline) => Prepared::Inline(inline),
             None => {
                 let table = state.indirect.as_mut().expect("capacity allocates an indirect table");
-                let bytes = table.encode(device, &state.arguments.values);
+                let bytes = table.encode(device, state.arguments.operands());
                 if !table.cached(bytes) {
                     let mut empty = None;
                     for slot in &self.slots {
@@ -258,21 +404,17 @@ impl<F: Future<Output = Result<()>> + Send + 'static> Slots<F> {
                         table.swap(idle.indirect.as_mut().expect("slots share argument capacity"));
                     }
                 }
-                Prepared::Indirect(table.upload(device, state.arguments.values.len())?)
+                Prepared::Indirect(table.upload(device, state.arguments.operands().len())?)
             }
         };
-        let ticket = self.wait(|| device.driver.submit(executable, &prepared))?;
-        Ok(Hardware {
-            ticket,
-            _staging: Arc::clone(&executable.staging),
-        })
+        self.wait(|| device.driver.submit(executable, &prepared, profile))
     }
 
     fn advance(&self, slot: &Slot<F>) -> bool {
         try_lock(&slot.state).is_some_and(|state| self.step(slot, state))
     }
 
-    /// Retires `slot`'s finished hardware, then its epilogue; true once the slot is idle.
+    /// Collects `slot`'s finished hardware, then runs its epilogue; true once the slot is idle.
     fn step(&self, slot: &Slot<F>, mut state: MutexGuard<'_, State<F>>) -> bool {
         let mut ended = false;
         if state.future.is_some()
@@ -307,211 +449,22 @@ impl<F: Future<Output = Result<()>> + Send + 'static> Slots<F> {
     }
 }
 
-struct Hardware {
-    ticket: Ticket,
-    _staging: Arc<Buffer>,
-}
-
-impl<F: Future<Output = Result<()>>> State<F> {
-    /// The worker polls every active slot while anything runs, so epilogues need no waker.
-    /// `running` falls once the hardware released the operands, before the epilogue runs.
-    fn poll(&mut self, running: &AtomicBool) -> Poll<Result<()>> {
-        let (future, driver) = self.future.as_mut().expect("active launch");
-        if let Some(hardware) = &mut self.hardware {
-            match driver.poll(&mut hardware.ticket) {
-                Ok(false) => return Poll::Pending,
-                Ok(true) => {
-                    self.hardware = None;
-                    self.arguments.clear();
-                    running.store(false, Ordering::Release);
-                }
-                Err(error) => {
-                    self.arguments.poison();
-                    return Poll::Ready(Err(error));
+impl<F: Epilogue> Completion for Slots<F> {
+    /// Waiting advances every running slot once, spinning while another thread holds it; an
+    /// admission holds a slot that is not running, so this never waits for one.
+    fn complete(&self, contention: Contention) -> bool {
+        if contention == Contention::Wait {
+            for slot in &self.slots {
+                while slot.running.load(Ordering::Acquire) {
+                    if let Some(state) = try_lock(&slot.state) {
+                        self.step(slot, state);
+                        break;
+                    }
+                    std::thread::yield_now();
                 }
             }
         }
-        // SAFETY: the future stays in this fixed slot until it is dropped in place.
-        unsafe { Pin::new_unchecked(future) }.poll(&mut Context::from_waker(Waker::noop()))
-    }
-}
-
-/// One submitted launch of a [`Function`], resolving to the outcome of its hardware and epilogue.
-/// Dropping it cancels nothing.
-#[must_use = "await the launch to observe its result"]
-pub struct Launch {
-    completion: Arc<dyn Completion>,
-    index: usize,
-    generation: u64,
-    _device: Arc<Device>,
-}
-
-trait Completion: Send + Sync {
-    fn progress(&self) -> bool;
-    /// Retires every launch the device finished, waiting out a poller retiring one now.
-    fn retire(&self);
-    fn poll(&self, index: usize, generation: u64, context: &mut Context<'_>) -> Poll<Result<()>>;
-    /// The observer of launch `generation` in slot `index` is gone.
-    fn release(&self, index: usize, generation: u64);
-    /// The generation each slot launched last, unless every one of them ended.
-    fn launched(&self) -> Option<[u64; IN_FLIGHT]>;
-    /// Whether every launch of `launched` ended; `waker` is woken at the next end otherwise.
-    fn ended(&self, launched: &[u64; IN_FLIGHT], waker: &Waker) -> bool;
-}
-
-/// How long a poll waits for a launch to finish before it returns `Pending`: a launch finishing
-/// sooner is seen without a wake-up round trip through the executor.
-const SPIN: Duration = Duration::from_micros(10);
-
-impl Future for Launch {
-    type Output = Result<()>;
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let started = Instant::now();
-        loop {
-            let result = self.completion.poll(self.index, self.generation, context);
-            if result.is_ready() || started.elapsed() >= SPIN {
-                return result;
-            }
-            std::hint::spin_loop();
-        }
-    }
-}
-
-impl Drop for Launch {
-    fn drop(&mut self) {
-        self.completion.release(self.index, self.generation);
-    }
-}
-
-/// Every function's launch slots on one device, polled by its worker so that launches nobody
-/// observes still retire and run their epilogues.
-#[derive(Default)]
-pub(crate) struct Launches(Mutex<Vec<Arc<dyn Completion>>>);
-
-/// Neither walk holds the list while it polls, since an epilogue's transfer may retire launches.
-impl Launches {
-    fn push(&self, function: Arc<dyn Completion>) {
-        self.0.lock().unwrap().push(function);
-    }
-
-    /// Only the worker calls this, so a function it removes is the one at `index`.
-    pub(crate) fn progress(&self) -> bool {
-        let (mut idle, mut index) = (true, 0);
-        while let Some(function) = self.get(index) {
-            let complete = function.progress();
-            idle &= complete;
-            let mut functions = self.0.lock().unwrap();
-            // The list and this clone: no Function or Launch holds the slots any more.
-            if complete && Arc::strong_count(&function) == 2 {
-                functions.remove(index);
-            } else {
-                index += 1;
-            }
-        }
-        idle
-    }
-
-    /// Walks down: a concurrent removal shifts only later functions, so it skips none.
-    pub(crate) fn retire(&self) {
-        let mut index = self.0.lock().unwrap().len();
-        while let Some(next) = index.checked_sub(1) {
-            index = next;
-            self.get(index).inspect(|function| function.retire());
-        }
-    }
-
-    fn get(&self, index: usize) -> Option<Arc<dyn Completion>> {
-        self.0.lock().unwrap().get(index).cloned()
-    }
-
-    /// The launches submitted so far that have not ended.
-    pub(crate) fn launched(&self) -> Launched {
-        Launched(
-            (self.0.lock().unwrap().iter())
-                .filter_map(|function| Some((Arc::clone(function), function.launched()?)))
-                .collect(),
-        )
-    }
-}
-
-/// Launches of a device, each by its function and the generation of each of its slots.
-pub(crate) struct Launched(Vec<(Arc<dyn Completion>, [u64; IN_FLIGHT])>);
-
-impl Launched {
-    /// Whether every launch ended; `waker` is woken at the next end otherwise.
-    pub(crate) fn ended(&self, waker: &Waker) -> bool {
-        self.0
-            .iter()
-            .all(|(function, launched)| function.ended(launched, waker))
-    }
-}
-
-struct Slots<F> {
-    slots: Box<[Slot<F>]>,
-    failure: OnceLock<Error>,
-    worker: Waker,
-    /// Woken whenever one of these launches ends.
-    waiters: Mutex<Waiters>,
-}
-
-struct Slot<F> {
-    /// The latest generation submitted.
-    launched: AtomicU64,
-    /// The latest generation whose hardware and epilogue ended, either way.
-    ended: AtomicU64,
-    completed: AtomicU64,
-    /// The latest generation whose observer is gone.
-    released: AtomicU64,
-    /// The hardware holds the operands: set at submission, cleared once they are released.
-    running: AtomicBool,
-    state: Mutex<State<F>>,
-}
-
-struct State<F> {
-    hardware: Option<Hardware>,
-    /// The epilogue, and the driver it waits on: the device itself goes with its last handle.
-    future: Option<(F, Arc<Driver>)>,
-    arguments: Arguments,
-    indirect: Option<Table>,
-    generation: u64,
-    result: Result<()>,
-    waker: Option<Waker>,
-}
-
-// Binding one call may wait for resources released by another call's epilogue.
-// Progress must skip that slot rather than wait for its bind callback.
-fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
-    match mutex.try_lock() {
-        Ok(guard) => Some(guard),
-        Err(TryLockError::WouldBlock) => None,
-        Err(TryLockError::Poisoned(error)) => panic!("{error}"),
-    }
-}
-
-impl<F> Drop for State<F> {
-    fn drop(&mut self) {
-        if self.hardware.is_some() {
-            self.arguments.poison();
-        }
-    }
-}
-
-impl<F: Future<Output = Result<()>> + Send + 'static> Completion for Slots<F> {
-    fn progress(&self) -> bool {
         self.slots.iter().fold(true, |idle, slot| self.advance(slot) & idle)
-    }
-
-    /// An admission holds a slot that is not running, so this never waits for one.
-    fn retire(&self) {
-        for slot in &self.slots {
-            while slot.running.load(Ordering::Acquire) {
-                if let Some(state) = try_lock(&slot.state) {
-                    self.step(slot, state);
-                    break;
-                }
-                std::thread::yield_now();
-            }
-        }
     }
 
     fn release(&self, index: usize, generation: u64) {
@@ -559,45 +512,121 @@ impl<F: Future<Output = Result<()>> + Send + 'static> Completion for Slots<F> {
     }
 }
 
+struct Slot<F> {
+    /// The latest generation submitted.
+    launched: AtomicU64,
+    /// The latest generation whose hardware and epilogue ended, either way.
+    ended: AtomicU64,
+    completed: AtomicU64,
+    /// The latest generation whose observer is gone.
+    released: AtomicU64,
+    /// The hardware holds the operands: set at submission, cleared once they are released.
+    running: AtomicBool,
+    state: Mutex<State<F>>,
+}
+
+struct State<F> {
+    /// The launch on the clusters, until every one answered.
+    hardware: Option<Ticket>,
+    /// The epilogue, the driver it waits on and, once every cluster answered, their replies it
+    /// runs on: the device itself goes with its last handle.
+    future: Option<(F, Arc<Driver>, Replies)>,
+    arguments: Arguments,
+    indirect: Option<Table>,
+    generation: u64,
+    result: Result<()>,
+    waker: Option<Waker>,
+}
+
+impl<F: Epilogue> State<F> {
+    /// The worker polls every active slot while anything runs, so epilogues need no waker.
+    /// `running` falls once the hardware released the operands, before the epilogue runs.
+    fn poll(&mut self, running: &AtomicBool) -> Poll<Result<()>> {
+        let (future, driver, replies) = self.future.as_mut().expect("active launch");
+        if let Some(ticket) = &mut self.hardware {
+            match driver.poll(ticket) {
+                Ok(None) => return Poll::Pending,
+                Ok(Some(answered)) => {
+                    *replies = answered;
+                    self.hardware = None;
+                    self.arguments.clear();
+                    running.store(false, Ordering::Release);
+                }
+                Err(error) => {
+                    self.arguments.poison();
+                    return Poll::Ready(Err(error));
+                }
+            }
+        }
+        // SAFETY: the future stays in this fixed slot until it is dropped in place.
+        unsafe { Pin::new_unchecked(future) }.run(replies)
+    }
+}
+
+impl<F> Drop for State<F> {
+    fn drop(&mut self) {
+        if self.hardware.is_some() {
+            self.arguments.poison();
+        }
+    }
+}
+
+// Binding one call may wait for resources released by another call's epilogue.
+// Progress must skip that slot rather than wait for its bind callback.
+fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::WouldBlock) => None,
+        Err(TryLockError::Poisoned(error)) => panic!("{error}"),
+    }
+}
+
+/// How long a poll waits for a launch to finish before it returns `Pending`: a launch finishing
+/// sooner is seen without a wake-up round trip through the executor.
+const SPIN: Duration = Duration::from_micros(10);
+
 #[cfg(test)]
 mod tests {
     use std::marker::PhantomPinned;
 
     use super::*;
+    use crate::test::{Wakes, create, function, poll, woken};
     use arrayvec::ArrayVec;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    fn create<F: Future<Output = Result<()>> + Send + 'static>(
-        device: &Arc<Device>,
-        capacity: usize,
-        bind: impl for<'a> Fn(&mut dyn Iterator<Item = Argument<'a>>, &mut Arguments) -> Result<F> + Send + Sync + 'static,
-    ) -> Function {
-        // SAFETY: stub executables do not access memory; these callbacks only exercise runtime ownership.
-        let load = unsafe {
-            Function::load(
-                device,
-                &[0],
-                crate::arch::rngd::sram::WINDOW.end as usize,
-                capacity,
-                bind,
-            )
-        };
-        match std::pin::pin!(load).poll(&mut Context::from_waker(Waker::noop())) {
-            Poll::Ready(function) => function.unwrap(),
-            Poll::Pending => panic!("the fixture's small BAR4 write must finish synchronously"),
-        }
-    }
-
-    fn function(device: &Arc<Device>) -> Function {
-        create(device, 8, |args, bound| {
-            args.enumerate()
-                .try_for_each(|(index, argument)| bound.bind(index, argument))?;
-            Ok(std::future::ready(Ok(())))
-        })
-    }
-
     fn observe(launch: &mut Launch) -> Poll<Result<()>> {
         Pin::new(launch).poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// A launch, its completion and its slot's reuse allocate nothing, whether its arguments fit
+    /// the frame or go in a table that changes with every launch.
+    #[test]
+    fn submits_without_allocations() {
+        for count in [1, furiosa_opt_ipc::MAX_LAUNCH_ARGS + 1] {
+            let device = Arc::new(crate::test::with(&[0], 1, Vec::new(), 1 << 16));
+            let function = crate::test::create(&device, count, |args, bound| {
+                args.enumerate()
+                    .try_for_each(|(index, argument)| bound.bind(index, argument))?;
+                Ok(std::future::ready(Ok(())))
+            });
+            let input = device.alloc(Kind::Dram, 1).unwrap();
+            let mut launches = ArrayVec::<Launch, IN_FLIGHT>::new();
+            let round = |launches: &mut ArrayVec<Launch, IN_FLIGHT>, round: u64| {
+                for index in 0..launches.capacity() as u64 {
+                    let values = (1..count as u64).map(|value| Argument::Value(value + (round * 100 + index) * 10000));
+                    let args = std::iter::once(input.slice(..).unwrap().into()).chain(values);
+                    launches.push(function.launch(args).unwrap());
+                }
+                device.launches.complete(Contention::Skip);
+                for launch in launches.iter_mut() {
+                    assert_eq!(observe(launch), Poll::Ready(Ok(())), "{count} arguments");
+                }
+                launches.clear();
+            };
+            // The first round sizes the runtime's pools.
+            round(&mut launches, 0);
+            crate::test::without_allocations(|| (1..3).for_each(|index| round(&mut launches, index)));
+        }
     }
 
     fn ordered(device: &Arc<Device>) -> Function {
@@ -622,9 +651,10 @@ mod tests {
         }
     }
 
-    /// Compiled launches admit dependencies before completion, including aliases and indirect uses.
+    /// Distinct ordered launches of one device share memory before completion, aliases and indirect
+    /// uses included, except peer-visible memory; every other overlap is excluded.
     #[test]
-    fn admits_dependent_launches() {
+    fn admits_overlap_only_between_ordered_launches() {
         for (chips, kind) in [
             (&[0][..], Kind::Dram),
             (&[0][..], Kind::Sram),
@@ -653,435 +683,504 @@ mod tests {
                     assert_eq!(observe(&mut before), Poll::Pending);
                     assert_eq!(observe(&mut after), Poll::Pending);
                     crate::test::answer(&file, 2);
-                    assert!(device.worker.launches.progress());
+                    assert!(device.launches.complete(Contention::Skip));
                 }
             }
         }
-    }
 
-    /// Peer-visible memory excludes conflicting compiled launches, including indirect uses.
-    #[test]
-    fn excludes_peer_conflicts() {
-        for access in [Access::Read, Access::Write] {
-            for case in 0..4 {
-                let (device, file) = crate::test::running(&[0, 1], 8);
-                let function = ordered(&device);
-                let buffer = device.alloc(Kind::DramShared, 256).unwrap();
-                let alias = buffer.alias(..).unwrap();
-                let mut first = match case {
-                    0 | 1 => function.launch([Argument::Write(buffer.slice(..).unwrap())]),
-                    _ => function.launch_holding([], &[(buffer.slice(..).unwrap(), Access::Write)]),
-                }
-                .unwrap();
-                let view = alias.slice(..).unwrap();
-                let second = match case {
-                    0 | 2 => function.launch([match access {
-                        Access::Read => Argument::Read(view),
-                        Access::Write => Argument::Write(view),
-                    }]),
-                    _ => function.launch_holding([], &[(view, access)]),
-                };
-                assert!(matches!(second, Err(Error::Busy)), "{access:?}/case {case}");
-                crate::test::answer(&file, 1);
-                assert_eq!(observe(&mut first), Poll::Ready(Ok(())));
-            }
-        }
-    }
-
-    /// Exhausted launch identities stay exhausted rather than reusing an earlier identity.
-    #[test]
-    fn rejects_exhausted_launches() {
-        let (device, file) = crate::test::running(&[0], 8);
-        let function = ordered(&device);
-        device.driver.owners.store(u64::MAX - 1, Ordering::Relaxed);
-        let mut first = function.launch([]).unwrap();
-        for _ in 0..2 {
-            assert!(matches!(function.launch([]), Err(Error::Capacity)));
-        }
-        crate::test::answer(&file, 1);
-        assert_eq!(observe(&mut first), Poll::Ready(Ok(())));
-    }
-
-    /// Each queued launch excludes leases, and delays BAR4 writes, until its own completion, observer
-    /// or not.
-    #[test]
-    fn retains_successor_access() {
-        let (device, file) = crate::test::running(&[0], 8);
-        let function = ordered(&device);
-        let mut buffer = device.alloc(Kind::Dram, 256).unwrap();
-        let mut first = function.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap();
-        let mut second = Some(function.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap());
-        crate::test::answer(&file, 1);
-        assert_eq!(observe(&mut first), Poll::Ready(Ok(())));
-        let bytes = [0; 256];
-        for _ in 0..2 {
-            assert!(matches!(
-                crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Read)]),
-                Err(Error::Busy)
-            ));
-            let write = std::pin::pin!(device.write([(bytes.as_slice().into(), buffer.slice_mut(..).unwrap())]));
-            assert_eq!(write.poll(&mut Context::from_waker(Waker::noop())), Poll::Pending);
-            drop(second.take());
-        }
-        crate::test::answer(&file, 2);
-        assert!(device.worker.launches.progress());
-        assert!(crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Write)]).is_ok());
-        let write = std::pin::pin!(device.write([(bytes.as_slice().into(), buffer.slice_mut(..).unwrap())]));
-        assert_eq!(write.poll(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(())));
-    }
-
-    /// A queued dependency keeps its memory until every cluster answers that launch.
-    #[test]
-    fn retains_unanswered_clusters() {
-        let (device, files) = crate::test::clusters(8, 4096);
-        let function = ordered(&device);
-        let buffer = device.alloc(Kind::Dram, 256).unwrap();
-        let mut first = function.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap();
-        let mut second = function.launch([Argument::Read(buffer.slice(..).unwrap())]).unwrap();
-        crate::test::answer(&files[0], 2);
-        assert_eq!(observe(&mut first), Poll::Pending);
-        assert_eq!(observe(&mut second), Poll::Pending);
-        assert!(matches!(
-            crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Write)]),
-            Err(Error::Busy)
-        ));
-        for file in &files[1..] {
-            crate::test::answer(file, 1);
-        }
-        assert_eq!(observe(&mut first), Poll::Ready(Ok(())));
-        assert_eq!(observe(&mut second), Poll::Pending);
-        assert!(matches!(
-            crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Write)]),
-            Err(Error::Busy)
-        ));
-        for file in &files[1..] {
-            crate::test::answer(file, 2);
-        }
-        assert_eq!(observe(&mut second), Poll::Ready(Ok(())));
-        assert!(crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Write)]).is_ok());
-    }
-
-    /// Generic tasks exclude both generic and compiled dependencies in either submission order.
-    #[test]
-    fn excludes_generic_tasks() {
-        for generic_first in [false, true] {
-            let (device, file) = crate::test::running(&[0], 8);
-            let generic = function(&device);
-            let compiled = ordered(&device);
-            let buffer = device.alloc(Kind::Dram, 256).unwrap();
-            let (first, second) = if generic_first {
-                (&generic, &compiled)
-            } else {
-                (&compiled, &generic)
-            };
-            let mut launch = first.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap();
-            assert!(matches!(
-                second.launch([Argument::Read(buffer.slice(..).unwrap())]),
-                Err(Error::Busy)
-            ));
-            if generic_first {
-                assert!(matches!(
-                    generic.launch([Argument::Write(buffer.slice(..).unwrap())]),
-                    Err(Error::Busy)
-                ));
-            }
-            crate::test::answer(&file, 1);
-            assert_eq!(observe(&mut launch), Poll::Ready(Ok(())));
-            assert!(second.launch([Argument::Write(buffer.slice(..).unwrap())]).is_ok());
-            crate::test::answer(&file, 2);
-            assert!(device.worker.launches.progress());
-        }
-    }
-
-    /// Alternating operands reuse uploaded tables after completion as well as during overlap.
-    #[test]
-    fn reuses_alternating_tables() {
-        use std::os::unix::fs::FileExt;
-
-        for overlapped in [true, false] {
-            // Given: two distinct indirect argument sets and explicitly controlled completion.
-            let (mut device, files) = crate::test::clusters(8, 1 << 20);
-            let driver = Arc::get_mut(&mut Arc::get_mut(&mut device).unwrap().driver).unwrap();
-            let windows = driver
-                .chips
-                .iter_mut()
-                .map(|chip| {
-                    let bar4 = tempfile::tempfile().unwrap();
-                    bar4.set_len(crate::arch::rngd::BAR4_DRAM + (1 << 20)).unwrap();
-                    chip.window = crate::driver::window::Window::new(bar4.try_clone().unwrap());
-                    bar4
-                })
-                .collect::<Vec<_>>();
-            let function = create(&device, 128, |args, bound| {
-                args.enumerate()
-                    .try_for_each(|(index, argument)| bound.bind(index, argument))?;
-                Ok(std::future::ready(Ok(())))
-            });
-            let mut cached = None;
-            // When: A and B alternate, with the preceding launch either finished or still pending.
-            for launch in 0..6_u32 {
-                let args = (0..128).map(|index| Argument::Value(index + u64::from(launch % 2)));
-                drop(function.launch(args).unwrap());
-                let count = if overlapped { launch } else { launch + 1 };
-                files.iter().for_each(|file| crate::test::answer(file, count));
-                device.worker.launches.progress();
-                let tables = windows
-                    .iter()
-                    .map(|window| {
-                        let mut bytes = vec![0; 1 << 20];
-                        window.read_exact_at(&mut bytes, crate::arch::rngd::BAR4_DRAM).unwrap();
-                        bytes
-                    })
-                    .collect::<Vec<_>>();
-                if launch == 1 {
-                    cached = Some(tables);
-                } else if launch > 1 {
-                    assert!(
-                        cached.as_ref().unwrap() == &tables,
-                        "alternating cached operands rewrote device tables"
-                    );
-                }
-            }
-            files.iter().for_each(|file| crate::test::answer(file, 6));
-            device.worker.launches.progress();
-        }
-    }
-
-    /// Distinct ordered launches, including different functions, may share device writes.
-    #[test]
-    fn ordered_device_overlap() {
-        // Given: file-backed hardware does not access caller memory.
-        let (device, file) = crate::test::running(&[0], 8);
-        // SAFETY: the stub has no memory accesses on any cluster.
-        let first = unsafe { function(&device).ordered() };
-        // SAFETY: the stub has no memory accesses on any cluster.
-        let second = unsafe { function(&device).ordered() };
-        let buffer = device.alloc(Kind::Dram, 256).unwrap();
-        drop(first.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap());
-        // When: another ordered launch names the same bytes through indirect holdings.
-        let admitted = second.launch_holding([], &[(buffer.slice(..).unwrap(), Access::Write)]);
-        // Then: admission succeeds before either completion is observed.
-        assert!(
-            admitted.is_ok(),
-            "ordered HBM overlap must be admitted: {:?}",
-            admitted.err()
-        );
-        crate::test::answer(&file, 2);
-        device.worker.launches.progress();
-    }
-
-    /// Ordered host leases share one mapping while the earlier launch remains in flight.
-    #[test]
-    fn ordered_host_overlap() {
-        let (device, file) = crate::test::running(&[0], 8);
-        // SAFETY: the stub has no memory accesses on any cluster.
-        let function = unsafe { function(&device).ordered() };
-        let mut host = crate::test::mapped(&device, vec![0], 4096);
-        drop(function.launch([Argument::Host(host.slice_mut(..))]).unwrap());
-        let admitted = function.launch([Argument::Host(host.slice_mut(..))]);
-        assert!(
-            admitted.is_ok(),
-            "ordered Host overlap must be admitted: {:?}",
-            admitted.err()
-        );
-        crate::test::answer(&file, 2);
-        device.worker.launches.progress();
-    }
-
-    /// A remapped host allocation cannot share ordered leases across publication domains.
-    #[test]
-    fn ordered_mapping_conflict() {
-        let (device, file) = crate::test::running(&[0], 8);
-        let (other, _) = crate::test::running(&[1], 8);
-        // SAFETY: neither stub accesses caller memory.
-        let first = unsafe { function(&device).ordered() };
-        // SAFETY: neither stub accesses caller memory.
-        let second = unsafe { function(&other).ordered() };
-        let mut host = crate::test::mapped(&device, vec![0], 4096);
-        drop(first.launch([Argument::Host(host.slice_mut(..))]).unwrap());
-        host.mapping = crate::test::mapped(&other, vec![0], 4096).mapping;
-        assert_eq!(
-            second.launch([Argument::Host(host.slice_mut(..))]).err(),
-            Some(Error::Busy)
-        );
-        crate::test::answer(&file, 1);
-        device.worker.launches.progress();
-        assert!(second.launch([Argument::Host(host.slice_mut(..))]).is_ok());
-        other.driver.stop();
-    }
-
-    /// Only two ordered launches are exempt, in either submission order and memory kind.
-    #[test]
-    fn ordered_unordered_conflict() {
-        for ordered_first in [false, true] {
+        // Distinct ordered launches, including different functions, may share device writes.
+        {
+            // Given: file-backed hardware does not access caller memory.
             let (device, file) = crate::test::running(&[0], 8);
             // SAFETY: the stub has no memory accesses on any cluster.
-            let ordered = unsafe { function(&device).ordered() };
-            let unordered = function(&device);
-            let (first, second) = if ordered_first {
-                (&ordered, &unordered)
-            } else {
-                (&unordered, &ordered)
-            };
+            let first = unsafe { function(&device).ordered() };
+            // SAFETY: the stub has no memory accesses on any cluster.
+            let second = unsafe { function(&device).ordered() };
             let buffer = device.alloc(Kind::Dram, 256).unwrap();
+            drop(first.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap());
+            // When: another ordered launch names the same bytes through indirect holdings.
+            let admitted = second.launch_holding([], &[(buffer.slice(..).unwrap(), Access::Write)]);
+            // Then: admission succeeds before either completion is observed.
+            assert!(
+                admitted.is_ok(),
+                "ordered HBM overlap must be admitted: {:?}",
+                admitted.err()
+            );
+            crate::test::answer(&file, 2);
+            device.launches.complete(Contention::Skip);
+        }
+
+        // Ordered host leases share one registration while the earlier launch remains in flight.
+        {
+            let (device, file) = crate::test::running(&[0], 8);
+            // SAFETY: the stub has no memory accesses on any cluster.
+            let function = unsafe { function(&device).ordered() };
             let mut host = crate::test::mapped(&device, vec![0], 4096);
-            drop(
-                first
-                    .launch([
-                        Argument::Write(buffer.slice(..).unwrap()),
-                        Argument::Host(host.slice_mut(..)),
-                    ])
-                    .unwrap(),
+            drop(function.launch([Argument::Host(host.slice_mut(..))]).unwrap());
+            let admitted = function.launch([Argument::Host(host.slice_mut(..))]);
+            assert!(
+                admitted.is_ok(),
+                "ordered Host overlap must be admitted: {:?}",
+                admitted.err()
             );
-            assert_eq!(
-                second.launch([Argument::Write(buffer.slice(..).unwrap())]).err(),
-                Some(Error::Busy)
-            );
+            crate::test::answer(&file, 2);
+            device.launches.complete(Contention::Skip);
+        }
+
+        // Peer-visible memory excludes conflicting compiled launches, including indirect uses.
+        {
+            for access in [Access::Read, Access::Write] {
+                for case in 0..4 {
+                    let (device, file) = crate::test::running(&[0, 1], 8);
+                    let function = ordered(&device);
+                    let buffer = device.alloc(Kind::DramShared, 256).unwrap();
+                    let alias = buffer.alias(..).unwrap();
+                    let mut first = match case {
+                        0 | 1 => function.launch([Argument::Write(buffer.slice(..).unwrap())]),
+                        _ => function.launch_holding([], &[(buffer.slice(..).unwrap(), Access::Write)]),
+                    }
+                    .unwrap();
+                    let view = alias.slice(..).unwrap();
+                    let second = match case {
+                        0 | 2 => function.launch([match access {
+                            Access::Read => Argument::Read(view),
+                            Access::Write => Argument::Write(view),
+                        }]),
+                        _ => function.launch_holding([], &[(view, access)]),
+                    };
+                    assert!(matches!(second, Err(Error::Busy)), "{access:?}/case {case}");
+                    crate::test::answer(&file, 1);
+                    assert_eq!(observe(&mut first), Poll::Ready(Ok(())));
+                }
+            }
+        }
+
+        // Generic tasks exclude both generic and compiled dependencies in either submission order.
+        {
+            for generic_first in [false, true] {
+                let (device, file) = crate::test::running(&[0], 8);
+                let generic = function(&device);
+                let compiled = ordered(&device);
+                let buffer = device.alloc(Kind::Dram, 256).unwrap();
+                let (first, second) = if generic_first {
+                    (&generic, &compiled)
+                } else {
+                    (&compiled, &generic)
+                };
+                let mut launch = first.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap();
+                assert!(matches!(
+                    second.launch([Argument::Read(buffer.slice(..).unwrap())]),
+                    Err(Error::Busy)
+                ));
+                if generic_first {
+                    assert!(matches!(
+                        generic.launch([Argument::Write(buffer.slice(..).unwrap())]),
+                        Err(Error::Busy)
+                    ));
+                }
+                crate::test::answer(&file, 1);
+                assert_eq!(observe(&mut launch), Poll::Ready(Ok(())));
+                assert!(second.launch([Argument::Write(buffer.slice(..).unwrap())]).is_ok());
+                crate::test::answer(&file, 2);
+                assert!(device.launches.complete(Contention::Skip));
+            }
+        }
+
+        // A remapped host allocation cannot share ordered leases across publication domains.
+        {
+            let (device, file) = crate::test::running(&[0], 8);
+            let (other, _) = crate::test::running(&[1], 8);
+            // SAFETY: neither stub accesses caller memory.
+            let first = unsafe { function(&device).ordered() };
+            // SAFETY: neither stub accesses caller memory.
+            let second = unsafe { function(&other).ordered() };
+            let mut host = crate::test::mapped(&device, vec![0], 4096);
+            drop(first.launch([Argument::Host(host.slice_mut(..))]).unwrap());
+            host.set_registration(crate::test::mapped(&other, vec![0], 4096).registration().cloned());
             assert_eq!(
                 second.launch([Argument::Host(host.slice_mut(..))]).err(),
                 Some(Error::Busy)
             );
             crate::test::answer(&file, 1);
-            device.worker.launches.progress();
+            device.launches.complete(Contention::Skip);
+            assert!(second.launch([Argument::Host(host.slice_mut(..))]).is_ok());
+            other.driver.stop();
         }
-    }
 
-    /// A transfer waits for a launch's HBM operands and is refused its mapped host operands; a launch
-    /// is refused memory a transfer holds.
-    #[test]
-    fn ordered_transfer_conflict() {
-        for host_operand in [false, true] {
-            for launch_first in [false, true] {
+        // Only two ordered launches are exempt, in either submission order and memory kind.
+        {
+            for ordered_first in [false, true] {
                 let (device, file) = crate::test::running(&[0], 8);
                 // SAFETY: the stub has no memory accesses on any cluster.
-                let function = unsafe { function(&device).ordered() };
+                let ordered = unsafe { function(&device).ordered() };
+                let unordered = function(&device);
+                let (first, second) = if ordered_first {
+                    (&ordered, &unordered)
+                } else {
+                    (&unordered, &ordered)
+                };
                 let buffer = device.alloc(Kind::Dram, 256).unwrap();
                 let mut host = crate::test::mapped(&device, vec![0], 4096);
-                if launch_first {
-                    let argument = if host_operand {
-                        Argument::Host(host.slice_mut(..))
-                    } else {
-                        Argument::Write(buffer.slice(..).unwrap())
-                    };
-                    drop(function.launch([argument]).unwrap());
-                    let mut transfer = Box::pin(device.read([(buffer.slice(..).unwrap(), host.slice_mut(..256))]));
-                    assert_eq!(
-                        transfer.as_mut().poll(&mut Context::from_waker(Waker::noop())),
-                        if host_operand {
-                            Poll::Ready(Err(Error::Busy))
+                drop(
+                    first
+                        .launch([
+                            Argument::Write(buffer.slice(..).unwrap()),
+                            Argument::Host(host.slice_mut(..)),
+                        ])
+                        .unwrap(),
+                );
+                assert_eq!(
+                    second.launch([Argument::Write(buffer.slice(..).unwrap())]).err(),
+                    Some(Error::Busy)
+                );
+                assert_eq!(
+                    second.launch([Argument::Host(host.slice_mut(..))]).err(),
+                    Some(Error::Busy)
+                );
+                crate::test::answer(&file, 1);
+                device.launches.complete(Contention::Skip);
+            }
+        }
+
+        // A transfer waits for a launch's HBM operands and is refused its mapped host operands; a
+        // launch is refused memory a transfer holds.
+        {
+            for host_operand in [false, true] {
+                for launch_first in [false, true] {
+                    let (device, file) = crate::test::running(&[0], 8);
+                    // SAFETY: the stub has no memory accesses on any cluster.
+                    let function = unsafe { function(&device).ordered() };
+                    let buffer = device.alloc(Kind::Dram, 256).unwrap();
+                    let mut host = crate::test::mapped(&device, vec![0], 4096);
+                    if launch_first {
+                        let argument = if host_operand {
+                            Argument::Host(host.slice_mut(..))
                         } else {
-                            Poll::Pending
-                        }
-                    );
-                    drop(transfer);
-                    crate::test::answer(&file, 1);
-                    device.worker.launches.progress();
-                } else {
-                    let mut transfer = Box::pin(device.read([(buffer.slice(..).unwrap(), host.slice_mut(..256))]));
-                    assert!(
-                        transfer
-                            .as_mut()
-                            .poll(&mut Context::from_waker(Waker::noop()))
-                            .is_pending()
-                    );
-                    drop(transfer);
-                    let argument = if host_operand {
-                        Argument::Host(host.slice_mut(..))
+                            Argument::Write(buffer.slice(..).unwrap())
+                        };
+                        drop(function.launch([argument]).unwrap());
+                        let mut transfer = Box::pin(device.read([(buffer.slice(..).unwrap(), host.slice_mut(..256))]));
+                        assert_eq!(
+                            transfer.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                            if host_operand {
+                                Poll::Ready(Err(Error::Busy))
+                            } else {
+                                Poll::Pending
+                            }
+                        );
+                        drop(transfer);
+                        crate::test::answer(&file, 1);
+                        device.launches.complete(Contention::Skip);
                     } else {
-                        Argument::Write(buffer.slice(..).unwrap())
-                    };
-                    assert_eq!(function.launch([argument]).err(), Some(Error::Busy));
-                    device.driver.stop();
+                        let mut transfer = Box::pin(device.read([(buffer.slice(..).unwrap(), host.slice_mut(..256))]));
+                        assert!(
+                            transfer
+                                .as_mut()
+                                .poll(&mut Context::from_waker(Waker::noop()))
+                                .is_pending()
+                        );
+                        drop(transfer);
+                        let argument = if host_operand {
+                            Argument::Host(host.slice_mut(..))
+                        } else {
+                            Argument::Write(buffer.slice(..).unwrap())
+                        };
+                        assert_eq!(function.launch([argument]).err(), Some(Error::Busy));
+                        device.driver.stop();
+                    }
                 }
             }
         }
+
+        // User leases and aliases within one ordered launch retain their existing exclusion.
+        {
+            let (device, file) = crate::test::running(&[0], 8);
+            // SAFETY: the stub has no memory accesses on any cluster.
+            let function = unsafe { function(&device).ordered() };
+            let buffer = device.alloc(Kind::Dram, 256).unwrap();
+            let view = buffer.slice(..).unwrap();
+            let lease = crate::Lease::acquire([(view, Access::Read)]).unwrap();
+            assert_eq!(function.launch([Argument::Write(view)]).err(), Some(Error::Busy));
+            drop(lease);
+            assert_eq!(
+                function.launch([Argument::Write(view), Argument::Read(view)]).err(),
+                Some(Error::Busy)
+            );
+            assert_eq!(
+                function
+                    .launch_holding([Argument::Write(view)], &[(view, Access::Read)])
+                    .err(),
+                Some(Error::Busy)
+            );
+            let mut host = crate::test::mapped(&device, vec![0], 4096);
+            assert_eq!(
+                function
+                    .launch(host.slice_mut(..512).chunks(256).map(Argument::Host))
+                    .err(),
+                Some(Error::Busy)
+            );
+            drop(function.launch([Argument::Write(view)]).unwrap());
+            assert_eq!(crate::Lease::acquire([(view, Access::Read)]).err(), Some(Error::Busy));
+            crate::test::answer(&file, 1);
+            device.launches.complete(Contention::Skip);
+        }
+
+        // Non-ordered accesses exclude ordered leases even amid many exempt records.
+        {
+            use Access::{Read, Write};
+            let buffer = crate::test::allocations(0..512, 512).alloc(Kind::Dram, 256).unwrap();
+            let whole = buffer.slice(..).unwrap();
+            let mut first = crate::Lease::new(1);
+            first.set_owner(crate::buffer::Owner::Ordered(1));
+            first.extend([(whole, Write)]).unwrap();
+            let mut transfer = crate::Lease::new(1);
+            assert_eq!(transfer.extend([(whole, Read)]), Err(Error::Busy));
+            first.clear();
+            transfer.extend([(buffer.slice(128..).unwrap(), Write)]).unwrap();
+            first.extend([(buffer.slice(..128).unwrap(), Write)]).unwrap();
+            let mut second = crate::Lease::new(1);
+            second.set_owner(crate::buffer::Owner::Ordered(2));
+            assert_eq!(second.extend([(whole, Write)]), Err(Error::Busy));
+            transfer.clear();
+            second.extend([(whole, Write)]).unwrap();
+            assert_eq!(transfer.extend([(whole, Read)]), Err(Error::Busy));
+            first.poison();
+            first.clear();
+            second.clear();
+            assert_eq!(second.extend([(whole, Write)]), Err(Error::Poisoned));
+        }
     }
 
-    /// User leases and aliases within one ordered launch retain their existing exclusion.
-    #[test]
-    fn ordered_alias_conflict() {
-        let (device, file) = crate::test::running(&[0], 8);
-        // SAFETY: the stub has no memory accesses on any cluster.
-        let function = unsafe { function(&device).ordered() };
-        let buffer = device.alloc(Kind::Dram, 256).unwrap();
-        let view = buffer.slice(..).unwrap();
-        let lease = crate::Lease::acquire([(view, Access::Read)]).unwrap();
-        assert_eq!(function.launch([Argument::Write(view)]).err(), Some(Error::Busy));
-        drop(lease);
-        assert_eq!(
-            function.launch([Argument::Write(view), Argument::Read(view)]).err(),
-            Some(Error::Busy)
-        );
-        assert_eq!(
-            function
-                .launch_holding([Argument::Write(view)], &[(view, Access::Read)])
-                .err(),
-            Some(Error::Busy)
-        );
-        let mut host = crate::test::mapped(&device, vec![0], 4096);
-        assert_eq!(
-            function
-                .launch(host.slice_mut(..512).chunks(256).map(Argument::Host))
-                .err(),
-            Some(Error::Busy)
-        );
-        drop(function.launch([Argument::Write(view)]).unwrap());
-        assert_eq!(crate::Lease::acquire([(view, Access::Read)]).err(), Some(Error::Busy));
-        crate::test::answer(&file, 1);
-        device.worker.launches.progress();
-    }
-
-    /// Hardware failure poisons ordered operands and rejects later ordered launches.
-    #[test]
-    fn ordered_failure_poison() {
-        let (device, _) = crate::test::running(&[0], 8);
-        // SAFETY: the stub has no memory accesses on any cluster.
-        let function = unsafe { function(&device).ordered() };
-        let buffer = device.alloc(Kind::Dram, 256).unwrap();
-        let mut host = crate::test::mapped(&device, vec![0], 4096);
-        drop(
-            function
-                .launch([
-                    Argument::Write(buffer.slice(..).unwrap()),
-                    Argument::Host(host.slice_mut(..)),
-                ])
-                .unwrap(),
-        );
-        let error = Error::Device("lost completion".into());
-        device.driver.failure.set(error.clone()).unwrap();
-        device.worker.launches.progress();
-        assert_eq!(function.launch([]).err(), Some(error));
-        assert_eq!(
-            crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Read)]).err(),
-            Some(Error::Poisoned)
-        );
-        assert_eq!(
-            host.slice(..).backing.unwrap().lease(Access::Read).err(),
-            Some(Error::Poisoned)
-        );
-        device.driver.stop();
-    }
-
-    /// Indirect memory remains leased until hardware completion after its observer is dropped.
-    #[test]
-    fn holds_indirect_memory_until_completion() {
+    /// Work holds its memory until the hardware answers, whether it is observed, dropped, forgotten
+    /// or cancelled, then releases it.
+    #[tokio::test]
+    async fn holds_memory_until_the_hardware_answers() {
         let (device, file) = crate::test::running(&[0], 8);
         let function = function(&device);
-        let buffer = device.alloc(Kind::Dram, 256).unwrap();
-        let alias = buffer.alias(..).unwrap();
-        drop(
-            function
-                .launch_holding([], &[(buffer.slice(..).unwrap(), crate::Access::Read)])
-                .unwrap(),
-        );
-        drop(buffer);
-        assert!(matches!(
-            crate::Lease::acquire([(alias.slice(..).unwrap(), crate::Access::Write)]),
-            Err(Error::Busy)
-        ));
+        let mut buffer = device.alloc(Kind::Dram, 256).unwrap();
+        let write = |buffer: &mut Buffer| function.launch([buffer.slice_mut(..).unwrap().into()]).map(drop);
+        assert_eq!(write(&mut buffer), Ok(()));
+        assert_eq!(write(&mut buffer), Err(Error::Busy));
         crate::test::answer(&file, 1);
-        assert!(device.worker.launches.progress());
-        assert!(crate::Lease::acquire([(alias.slice(..).unwrap(), crate::Access::Write)]).is_ok());
+        assert_eq!(write(&mut buffer), Ok(()));
+        crate::test::answer(&file, 2);
+        let bytes = [0; 256];
+        let transfer = std::pin::pin!(device.write([(bytes.as_slice().into(), buffer.slice_mut(..).unwrap())]));
+        assert_eq!(
+            transfer.poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(()))
+        );
+
+        // Each queued launch excludes leases, and delays BAR4 writes, until its own completion,
+        // observer or not.
+        {
+            let (device, file) = crate::test::running(&[0], 8);
+            let function = ordered(&device);
+            let mut buffer = device.alloc(Kind::Dram, 256).unwrap();
+            let mut first = function.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap();
+            let mut second = Some(function.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap());
+            crate::test::answer(&file, 1);
+            assert_eq!(observe(&mut first), Poll::Ready(Ok(())));
+            let bytes = [0; 256];
+            for _ in 0..2 {
+                assert!(matches!(
+                    crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Read)]),
+                    Err(Error::Busy)
+                ));
+                let write = std::pin::pin!(device.write([(bytes.as_slice().into(), buffer.slice_mut(..).unwrap())]));
+                assert_eq!(write.poll(&mut Context::from_waker(Waker::noop())), Poll::Pending);
+                drop(second.take());
+            }
+            crate::test::answer(&file, 2);
+            assert!(device.launches.complete(Contention::Skip));
+            assert!(crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Write)]).is_ok());
+            let write = std::pin::pin!(device.write([(bytes.as_slice().into(), buffer.slice_mut(..).unwrap())]));
+            assert_eq!(write.poll(&mut Context::from_waker(Waker::noop())), Poll::Ready(Ok(())));
+        }
+
+        // A queued dependency keeps its memory until every cluster answers that launch.
+        {
+            let (device, files) = crate::test::clusters(8, 4096);
+            let function = ordered(&device);
+            let buffer = device.alloc(Kind::Dram, 256).unwrap();
+            let mut first = function.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap();
+            let mut second = function.launch([Argument::Read(buffer.slice(..).unwrap())]).unwrap();
+            crate::test::answer(&files[0], 2);
+            assert_eq!(observe(&mut first), Poll::Pending);
+            assert_eq!(observe(&mut second), Poll::Pending);
+            assert!(matches!(
+                crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Write)]),
+                Err(Error::Busy)
+            ));
+            for file in &files[1..] {
+                crate::test::answer(file, 1);
+            }
+            assert_eq!(observe(&mut first), Poll::Ready(Ok(())));
+            assert_eq!(observe(&mut second), Poll::Pending);
+            assert!(matches!(
+                crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Write)]),
+                Err(Error::Busy)
+            ));
+            for file in &files[1..] {
+                crate::test::answer(file, 2);
+            }
+            assert_eq!(observe(&mut second), Poll::Ready(Ok(())));
+            assert!(crate::Lease::acquire([(buffer.slice(..).unwrap(), Access::Write)]).is_ok());
+        }
+
+        // Indirect memory remains leased until hardware completion after its observer is dropped.
+        {
+            let (device, file) = crate::test::running(&[0], 8);
+            let function = crate::test::function(&device);
+            let buffer = device.alloc(Kind::Dram, 256).unwrap();
+            let alias = buffer.alias(..).unwrap();
+            drop(
+                function
+                    .launch_holding([], &[(buffer.slice(..).unwrap(), crate::Access::Read)])
+                    .unwrap(),
+            );
+            drop(buffer);
+            assert!(matches!(
+                crate::Lease::acquire([(alias.slice(..).unwrap(), crate::Access::Write)]),
+                Err(Error::Busy)
+            ));
+            crate::test::answer(&file, 1);
+            assert!(device.launches.complete(Contention::Skip));
+            assert!(crate::Lease::acquire([(alias.slice(..).unwrap(), crate::Access::Write)]).is_ok());
+        }
+
+        // A transfer that retried a conflict with finished work still holds every view it reads.
+        {
+            let (device, file) = crate::test::running(&[0], 8);
+            let function = crate::test::function(&device);
+            let [mut x, mut y] = [(); 2].map(|()| device.alloc(Kind::Dram, 256).unwrap());
+            drop(function.launch([y.slice_mut(..).unwrap().into()]).unwrap());
+            crate::test::answer(&file, 1);
+            let mut hosts = [(); 2].map(|()| crate::test::pinned());
+            let [to_x, to_y] = hosts.each_mut().map(|host| host.slice_mut(..256));
+            let mut read = Box::pin(device.read([(x.slice(..).unwrap(), to_x), (y.slice(..).unwrap(), to_y)]));
+            assert!(read.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            drop(read);
+            assert_eq!(
+                function.launch([x.slice_mut(..).unwrap().into()]).map(drop),
+                Err(Error::Busy)
+            );
+        }
+
+        // A multi-chip read into one pinned allocation holds it as a writer until every piece answers.
+        {
+            let device = crate::test::device(&[0, 1], 8);
+            let buffer = device.alloc(Kind::Dram, 1024).unwrap();
+            let mut host = crate::test::pinned();
+            let host = host.slice_mut(..2048);
+            let backing = host.backing.unwrap();
+            let pairs = buffer.slice(..).unwrap().chips().zip(host.chunks(1024));
+            let mut read = Box::pin(device.read(pairs));
+            let published = read.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            assert!(published.is_pending(), "{published:?}");
+            assert!(matches!(backing.lease(Access::Read), Err(Error::Busy)));
+        }
+
+        // A cancelled large read keeps host writers exclusive until the driver answers.
+        {
+            let size = 48_usize << 30;
+            let mut device = crate::test::device(&[0, 1, 2, 3, 4, 5, 6, 7], 8);
+            device.allocations = Arc::new(crate::buffer::Allocations::over(
+                device.topology(),
+                crate::buffer::Ranges::new(0..size, size),
+            ));
+            let buffer = device.alloc(Kind::Dram, size).unwrap();
+            let file = tempfile::tempfile().unwrap();
+            file.set_len((size * 8) as u64).unwrap();
+            let mut host = crate::Pinned::new(file.into(), size * 8).unwrap();
+            let host = host.slice_mut(..);
+            let backing = host.backing.unwrap();
+            let mut transfer = Box::pin(device.read([(buffer.slice(..).unwrap(), host)]));
+            assert!(
+                transfer
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            drop(transfer);
+            assert!(matches!(backing.lease(Access::Read), Err(Error::Busy)));
+        }
+
+        // Only a transport answer releases a transfer's memory; driver errors reach the observer.
+        {
+            use crate::driver::dma::fixture::{push, tag};
+            use crate::driver::dma::{DmaQueue, Transport, fake::Fake};
+            for fails in [false, true] {
+                let buffer = crate::test::allocations(0..512, 512).alloc(Kind::Dram, 1).unwrap();
+                let host = crate::test::pinned();
+                let fake = Fake::default();
+                let queue = DmaQueue::new(Transport::Fake(fake.clone()), Arc::default(), Waker::noop().clone());
+                let mut transfer = queue.acquire().await.unwrap();
+                push(&mut transfer, &buffer, Some(&host));
+                let tag = tag(&transfer);
+                let mut observer = std::pin::pin!(transfer.submit());
+                let mut context = Context::from_waker(Waker::noop());
+                assert_eq!(observer.as_mut().poll(&mut context), Poll::Pending);
+                let mut access = crate::Lease::new(1);
+                let view = buffer.slice(..).unwrap();
+                assert_eq!(access.extend([(view, Access::Write)]), Err(Error::Busy));
+
+                let result = if fails {
+                    Err(std::io::Error::from_raw_os_error(nix::libc::EIO))
+                } else {
+                    Ok(1)
+                };
+                fake.respond(tag, result);
+                assert!(queue.complete());
+
+                access.extend([(view, Access::Write)]).unwrap();
+                let result = observer.as_mut().poll(&mut context);
+                if fails {
+                    assert!(matches!(result, Poll::Ready(Err(Error::Device(_)))));
+                } else {
+                    assert_eq!(result, Poll::Ready(Ok(())));
+                }
+            }
+        }
+
+        // A transfer holds its device and host memory until every answer, its observer dropped or
+        // forgotten.
+        {
+            use crate::driver::dma::fixture::{activate, finish, push, tag};
+            use crate::driver::dma::{DmaQueue, Transport, fake::Fake};
+            for forget in [false, true] {
+                for fails in [false, true] {
+                    let buffer = crate::test::allocations(0..512, 512).alloc(Kind::Dram, 1).unwrap();
+                    let hosts = [crate::test::pinned(), crate::test::pinned()];
+                    let queue = DmaQueue::new(Transport::Fake(Fake::default()), Arc::default(), Waker::noop().clone());
+                    let mut transfer = queue.acquire().await.unwrap();
+                    hosts.iter().for_each(|host| push(&mut transfer, &buffer, Some(host)));
+                    let tag = tag(&transfer);
+                    let mut observer = Box::pin(transfer.submit());
+                    assert_eq!(
+                        observer.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+                        Poll::Pending
+                    );
+                    let mut access = crate::Lease::new(1);
+                    let view = buffer.slice(..).unwrap();
+                    activate(&queue, tag, fails.then(|| Error::Device("failed DMA".into())));
+                    if forget {
+                        std::mem::forget(observer);
+                    } else {
+                        drop(observer);
+                    }
+                    // One of two answers, or a duplicate of it, does not release the slot.
+                    for _ in 0..1 + usize::from(fails) {
+                        assert!(finish(&queue, tag + 1, Ok(())).is_none());
+                        assert_eq!(access.extend([(view, Access::Write)]), Err(Error::Busy));
+                    }
+                    finish(&queue, tag, Ok(()));
+                    access.extend([(view, Access::Write)]).unwrap();
+                    assert_eq!(hosts[0][0], 0);
+                    assert_eq!(queue.acquire().await.is_err(), fails);
+                }
+            }
+        }
     }
 
     /// Indirect memory must belong to the launch device and cover all its chips.
@@ -1100,45 +1199,6 @@ mod tests {
             Err(Error::Invalid(_))
         ));
         assert!(crate::Lease::acquire([(buffer.slice(..).unwrap(), crate::Access::Write)]).is_ok());
-    }
-
-    /// A refused indirect access releases operand leases before another launch retries.
-    #[test]
-    fn indirect_conflicts_release_operands() {
-        let device = Arc::new(crate::test::device(&[0], 8));
-        let function = function(&device);
-        let buffer = device.alloc(Kind::Dram, 256).unwrap();
-        for _ in 0..2 {
-            assert!(matches!(
-                function.launch_holding(
-                    [crate::Argument::Write(buffer.slice(..).unwrap())],
-                    &[(buffer.slice(..).unwrap(), crate::Access::Read)]
-                ),
-                Err(Error::Busy)
-            ));
-            assert!(crate::Lease::acquire([(buffer.slice(..).unwrap(), crate::Access::Write)]).is_ok());
-        }
-    }
-
-    /// A launch, its completion and its slot's reuse allocate nothing.
-    #[test]
-    fn submits_without_allocations() {
-        let device = Arc::new(crate::test::device(&[0], 1));
-        let function = function(&device);
-        let input = device.alloc(Kind::Dram, 1).unwrap();
-        let mut launches = ArrayVec::<Launch, IN_FLIGHT>::new();
-        crate::test::without_allocations(|| {
-            for _ in 0..3 {
-                for _ in 0..launches.capacity() {
-                    launches.push(function.launch([input.slice(..).unwrap().into()]).unwrap());
-                }
-                device.worker.launches.progress();
-                for launch in &mut launches {
-                    assert_eq!(observe(launch), Poll::Ready(Ok(())));
-                }
-                launches.clear();
-            }
-        });
     }
 
     /// A refused launch holds neither a slot nor its operands.
@@ -1169,43 +1229,39 @@ mod tests {
         assert!(matches!(function.launch(overflow), Err(Error::Capacity)));
         drop(function.launch([first.slice_mut(..).unwrap().into()]).unwrap());
         crate::test::answer(&file, 2);
-        assert!(device.worker.launches.progress());
+        assert!(device.launches.complete(Contention::Skip));
+
+        // A refused indirect access releases operand leases before another launch retries.
+        {
+            let device = Arc::new(crate::test::device(&[0], 8));
+            let function = crate::test::function(&device);
+            let buffer = device.alloc(Kind::Dram, 256).unwrap();
+            for _ in 0..2 {
+                assert!(matches!(
+                    function.launch_holding(
+                        [crate::Argument::Write(buffer.slice(..).unwrap())],
+                        &[(buffer.slice(..).unwrap(), crate::Access::Read)]
+                    ),
+                    Err(Error::Busy)
+                ));
+                assert!(crate::Lease::acquire([(buffer.slice(..).unwrap(), crate::Access::Write)]).is_ok());
+            }
+        }
     }
 
-    /// A write to bytes a launch uses is `Busy` while the device runs it, and admitted, by a launch
-    /// or a transfer, once the device finished it, though nobody observed it.
+    /// A wait covers the conflicting work admitted before it: a read waits for writers, a write for
+    /// every access. A transfer waits holding nothing, then moves its bytes after that work.
     #[test]
-    fn admits_writes_after_unobserved_completion() {
-        let (device, file) = crate::test::running(&[0], 8);
-        let function = function(&device);
-        let mut buffer = device.alloc(Kind::Dram, 256).unwrap();
-        let write = |buffer: &mut Buffer| function.launch([buffer.slice_mut(..).unwrap().into()]).map(drop);
-        assert_eq!(write(&mut buffer), Ok(()));
-        assert_eq!(write(&mut buffer), Err(Error::Busy));
-        crate::test::answer(&file, 1);
-        assert_eq!(write(&mut buffer), Ok(()));
-        crate::test::answer(&file, 2);
-        let bytes = [0; 256];
-        let transfer = std::pin::pin!(device.write([(bytes.as_slice().into(), buffer.slice_mut(..).unwrap())]));
-        assert_eq!(
-            transfer.poll(&mut Context::from_waker(Waker::noop())),
-            Poll::Ready(Ok(()))
-        );
-    }
-
-    /// A transfer of bytes a running launch writes waits for the launch, holding nothing, then
-    /// moves them: a write lands in device memory, a read takes its host memory, only afterwards.
-    #[test]
-    fn transfers_wait_for_running_writers() {
+    fn waits_for_earlier_conflicting_work() {
         use std::os::unix::fs::FileExt;
         let (mut device, file) = crate::test::running(&[0], 8);
         let bar4 = tempfile::tempfile().unwrap();
-        bar4.set_len(crate::arch::rngd::BAR4_DRAM + 4096).unwrap();
+        bar4.set_len(crate::driver::kernel::BAR4_DRAM + 4096).unwrap();
         let driver = Arc::get_mut(&mut Arc::get_mut(&mut device).unwrap().driver).unwrap();
-        driver.chips[0].window = crate::driver::window::Window::new(bar4.try_clone().unwrap());
+        driver.chips[0].window = crate::driver::kernel::window::Window::new(bar4.try_clone().unwrap());
         let function = function(&device);
         let mut buffer = device.alloc(Kind::Dram, 256).unwrap();
-        let at = crate::arch::rngd::BAR4_DRAM + buffer.addr() as u64;
+        let at = crate::driver::kernel::BAR4_DRAM + buffer.addr() as u64;
         let mut context = Context::from_waker(Waker::noop());
         drop(function.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap());
         let bytes = [7; 256];
@@ -1215,7 +1271,7 @@ mod tests {
         bar4.read_exact_at(&mut landed, at).unwrap();
         assert_eq!(landed, [0; 256]);
         crate::test::answer(&file, 1);
-        device.worker.launches.progress();
+        device.launches.complete(Contention::Skip);
         assert_eq!(write.as_mut().poll(&mut context), Poll::Ready(Ok(())));
         bar4.read_exact_at(&mut landed, at).unwrap();
         assert_eq!(landed, bytes);
@@ -1224,28 +1280,68 @@ mod tests {
         drop(function.launch([Argument::Write(buffer.slice(..).unwrap())]).unwrap());
         let mut host = crate::test::pinned();
         // Each lease of the host memory retains its allocation.
-        let allocation = Arc::clone(&host.allocation);
+        let allocation = Arc::clone(host.allocation());
         let mut read = Box::pin(device.read([(buffer.slice(..).unwrap(), host.slice_mut(..256))]));
         assert_eq!(read.as_mut().poll(&mut context), Poll::Pending);
         let leased = || Arc::strong_count(&allocation) > 2;
         assert!(!leased(), "a waiting read holds no host memory");
         crate::test::answer(&file, 2);
-        device.worker.launches.progress();
+        device.launches.complete(Contention::Skip);
         assert_eq!(read.as_mut().poll(&mut context), Poll::Pending);
         assert!(leased(), "the read's DMA holds its host memory");
+
+        // A read waits for overlapping writers on a shared chip, not for readers; a write waits for
+        // both, and each wakes when the last record it waits for leaves.
+        {
+            use Access::{Read, Write};
+            let buffer = crate::test::allocations(0..512, 512).alloc(Kind::Dram, 256).unwrap();
+            let wakes = Arc::new(Wakes::default());
+            let (mut reader, mut writer) = (crate::Lease::new(1), crate::Lease::new(1));
+            reader.extend([(buffer.slice(..128).unwrap(), Read)]).unwrap();
+            assert_eq!(
+                poll(&mut buffer.slice(..).unwrap().ready(Read), &wakes),
+                Poll::Ready(Ok(()))
+            );
+            writer.extend([(buffer.slice(128..).unwrap(), Write)]).unwrap();
+            for (bytes, chips, access, waits) in [
+                (0..128, 1, Read, false),
+                (128..256, 2, Read, false),
+                (100..129, 1, Read, true),
+                (0..64, 1, Write, true),
+                (128..256, 1, Write, true),
+            ] {
+                let ready = poll(&mut buffer.slice(bytes).unwrap().selecting(chips).ready(access), &wakes);
+                assert_eq!(ready.is_pending(), waits, "{access:?}");
+            }
+            let mut write = buffer.slice(..).unwrap().ready(Write);
+            assert!(poll(&mut write, &wakes).is_pending());
+            writer.clear();
+            assert!(woken(&wakes) > 0);
+            assert!(poll(&mut write, &wakes).is_pending());
+            reader.clear();
+            assert_eq!(poll(&mut write, &wakes), Poll::Ready(Ok(())));
+        }
+
+        // A wait covers the records admitted before it, not those admitted while it waits.
+        {
+            use Access::{Read, Write};
+            let buffer = crate::test::allocations(0..512, 512).alloc(Kind::Dram, 256).unwrap();
+            let wakes = Arc::new(Wakes::default());
+            let (mut first, mut later) = (crate::Lease::new(1), crate::Lease::new(1));
+            first.extend([(buffer.slice(..).unwrap(), Read)]).unwrap();
+            let mut write = buffer.slice(..).unwrap().ready(Write);
+            later.extend([(buffer.slice(..).unwrap(), Read)]).unwrap();
+            assert!(poll(&mut write, &wakes).is_pending());
+            first.clear();
+            assert_eq!(poll(&mut write, &wakes), Poll::Ready(Ok(())));
+            assert!(poll(&mut buffer.ready(Write), &wakes).is_pending());
+        }
     }
 
     /// `synchronize` waits for the launches admitted before it, woken when they end, not for later
     /// ones, and fails once the device failed.
     #[test]
     fn synchronizes_admitted_launches() {
-        #[derive(Default)]
-        struct Wakes(AtomicUsize);
-        impl std::task::Wake for Wakes {
-            fn wake(self: Arc<Self>) {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
-        }
         let (device, file) = crate::test::running(&[0], 8);
         let function = function(&device);
         let wakes = Arc::new(Wakes::default());
@@ -1260,36 +1356,16 @@ mod tests {
         drop(function.launch([]).unwrap());
         assert_eq!(first.as_mut().poll(&mut context), Poll::Pending);
         crate::test::answer(&file, 1);
-        device.worker.launches.progress();
-        assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+        device.launches.complete(Contention::Skip);
+        assert_eq!(woken(&wakes), 1);
         assert_eq!(first.as_mut().poll(&mut context), Poll::Ready(Ok(())));
         let mut second = Box::pin(device.synchronize());
         assert_eq!(second.as_mut().poll(&mut context), Poll::Pending);
         let error = Error::Device("lost completion".into());
-        device.driver.failure.set(error.clone()).unwrap();
-        device.worker.launches.progress();
+        device.driver.poison.set(error.clone());
+        device.launches.complete(Contention::Skip);
         assert_eq!(second.as_mut().poll(&mut context), Poll::Ready(Err(error)));
         device.driver.stop();
-    }
-
-    /// A transfer that retried a conflict with finished work still holds every view it reads, so
-    /// a write to one is `Busy` while its unobserved DMA runs.
-    #[test]
-    fn holds_transfer_views_after_retried_conflict() {
-        let (device, file) = crate::test::running(&[0], 8);
-        let function = function(&device);
-        let [mut x, mut y] = [(); 2].map(|()| device.alloc(Kind::Dram, 256).unwrap());
-        drop(function.launch([y.slice_mut(..).unwrap().into()]).unwrap());
-        crate::test::answer(&file, 1);
-        let mut hosts = [(); 2].map(|()| crate::test::pinned());
-        let [to_x, to_y] = hosts.each_mut().map(|host| host.slice_mut(..256));
-        let mut read = Box::pin(device.read([(x.slice(..).unwrap(), to_x), (y.slice(..).unwrap(), to_y)]));
-        assert!(read.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        drop(read);
-        assert_eq!(
-            function.launch([x.slice_mut(..).unwrap().into()]).map(drop),
-            Err(Error::Busy)
-        );
     }
 
     /// The compiler's binder may bind each operand index to one storage only.
@@ -1321,7 +1397,7 @@ mod tests {
             function.launch([Argument::Value(1), Argument::Value(2)]).err(),
             Some(Error::Invalid("operand 0 is bound to different storage".into()))
         );
-        assert!(device.worker.launches.progress());
+        assert!(device.launches.complete(Contention::Skip));
     }
 
     struct Work {
@@ -1376,7 +1452,7 @@ mod tests {
     fn retains_active_work() {
         for failed in [false, true] {
             let device = Arc::new(crate::test::device(&[0], 1));
-            let launches = Arc::clone(&device.worker.launches);
+            let launches = Arc::clone(&device.launches);
             let allocations = Arc::clone(&device.allocations);
             let weak = Arc::downgrade(&device);
             let ready = Arc::new(AtomicBool::new(false));
@@ -1400,9 +1476,9 @@ mod tests {
             drop(input);
             let error = Error::Device("lost completion".into());
             if failed {
-                device.driver.failure.set(error.clone()).unwrap();
+                device.driver.poison.set(error.clone());
             }
-            assert!(!launches.progress());
+            assert!(!launches.complete(Contention::Skip));
             assert_eq!(
                 observe(&mut launch),
                 if failed { Poll::Ready(Err(error)) } else { Poll::Pending }
@@ -1419,7 +1495,7 @@ mod tests {
                 drop(launches);
             } else {
                 ready.store(true, Ordering::Release);
-                assert!(launches.progress());
+                assert!(launches.complete(Contention::Skip));
             }
             assert_eq!(completed.load(Ordering::Relaxed), usize::from(!failed));
             let usage = allocations.usage(Kind::Dram);
@@ -1445,54 +1521,9 @@ mod tests {
                 Poll::Ready(Err(Error::Invalid("decode".into())))
             );
         }
-        assert!(device.driver.failure.get().is_none());
+        assert!(device.driver.poison.get().is_none());
         assert!(good.launch([]).is_ok());
-        assert!(device.worker.launches.progress());
-    }
-
-    /// A launch being bound never stalls the worker other launches complete through.
-    #[test]
-    fn progresses_during_binding() {
-        let device = Arc::new(crate::test::device(&[0], 1));
-        let binding = Arc::new(AtomicBool::new(false));
-        let completed = Arc::new(AtomicUsize::new(0));
-        let ready = Arc::new(AtomicBool::new(false));
-        let function = Arc::new({
-            let (binding, completed) = (Arc::clone(&binding), Arc::clone(&completed));
-            let ready = [Arc::new(AtomicBool::new(true)), Arc::clone(&ready)];
-            create(&device, 0, move |args, _| {
-                let Some(Argument::Value(index)) = args.next() else {
-                    panic!("call index")
-                };
-                if index == 2 {
-                    binding.store(true, Ordering::Release);
-                    let deadline = Instant::now() + Duration::from_secs(2);
-                    while completed.load(Ordering::Acquire) < IN_FLIGHT {
-                        assert!(Instant::now() < deadline, "binding blocked another call's epilogue");
-                        std::thread::yield_now();
-                    }
-                }
-                Ok(Work::new(&ready[usize::from(index != 0)], &completed))
-            })
-        });
-        let mut first = function.launch([Argument::Value(0)]).unwrap();
-        drop(function.launch([Argument::Value(1)]).unwrap());
-        for _ in 2..IN_FLIGHT {
-            drop(function.launch([Argument::Value(0)]).unwrap());
-        }
-        assert!(!device.worker.launches.progress());
-        let thread = std::thread::spawn(move || function.launch([Argument::Value(2)]).unwrap());
-        while !binding.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
-        let observed = observe(&mut first);
-        ready.store(true, Ordering::Release);
-        device.worker.launches.progress();
-        let next = thread.join().unwrap();
-        assert_eq!(first.index, next.index);
-        assert_eq!(observed, Poll::Ready(Ok(())));
-        assert!(device.worker.launches.progress());
-        assert_eq!(completed.load(Ordering::Relaxed), IN_FLIGHT + 1);
+        assert!(device.launches.complete(Contention::Skip));
     }
 
     /// A launch waits only for a free slot, and a receipt stays observable after its slot's reuse.
@@ -1524,7 +1555,7 @@ mod tests {
         assert!(admitted.recv_timeout(Duration::from_millis(10)).is_err());
         assert_eq!(observe(&mut first), Poll::Pending);
         ready[0].store(true, Ordering::Release);
-        device.worker.launches.progress();
+        device.launches.complete(Contention::Skip);
         let mut last = admitted.recv_timeout(Duration::from_secs(1)).unwrap();
         thread.join().unwrap();
         for launch in completed.iter_mut().chain([&mut first, &mut last]) {
@@ -1554,15 +1585,11 @@ mod tests {
             waiting.recv().unwrap();
             assert!(completed.recv_timeout(Duration::from_millis(10)).is_err());
             if failed {
-                device
-                    .driver
-                    .failure
-                    .set(crate::Error::Device("lost completion".into()))
-                    .unwrap();
+                device.driver.poison.set(crate::Error::Device("lost completion".into()));
             } else {
                 crate::test::answer(&file, 1);
             }
-            device.worker.launches.progress();
+            device.launches.complete(Contention::Skip);
             assert_eq!(completed.recv_timeout(Duration::from_secs(1)).unwrap(), !failed);
             assert_eq!(observe(&mut launch).map(|result| result.is_ok()), Poll::Ready(!failed));
             thread.join().unwrap();
@@ -1570,27 +1597,25 @@ mod tests {
         }
     }
 
-    /// Without firmware DMA a launch refuses host operands, and one whose task issued DMA fails
-    /// naming the missing driver support.
+    /// Without firmware DMA a launch refuses host operands, and one whose task issued DMA fails,
+    /// both with `Error::Unsupported`.
     #[test]
     fn refuses_device_dma_without_driver_support() {
-        use furiosa_opt_ipc::{Response, Status};
-        let missing = crate::driver::NO_FIRMWARE_DMA;
+        use furiosa_opt_ipc::{Answer, Failure, Status};
         let (device, file) = crate::test::unreserved(&[0], 8);
         let function = function(&device);
         let mut host = crate::test::pinned();
         assert_eq!(
             function.launch([Argument::Host(host.slice_mut(..))]).err(),
-            Some(Error::Device(missing.into()))
+            Some(Error::Unsupported(crate::driver::NO_FIRMWARE_DMA.into()))
         );
         let mut launch = function.launch([]).unwrap();
-        let failure = Response::Error {
-            status: Status::Internal as i32,
-            message: String::new(),
-        };
-        crate::test::respond(&file, &[(1, failure)]);
-        device.worker.launches.progress();
+        crate::test::respond::<()>(&file, &[(1, Answer(Err(Failure::new(Status::Internal, ""))))]);
+        device.launches.complete(Contention::Skip);
         let failed = observe(&mut launch);
-        assert!(matches!(failed, Poll::Ready(Err(Error::Device(why))) if why.ends_with(missing)));
+        assert_eq!(
+            failed,
+            Poll::Ready(Err(Error::Unsupported(crate::driver::NO_FIRMWARE_DMA.into())))
+        );
     }
 }

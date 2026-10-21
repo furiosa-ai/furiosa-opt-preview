@@ -1,5 +1,6 @@
-//! Device memory: its kinds, and how much of a kind is free.
+//! Device memory: its kinds, the allocators that place it, and how much of a kind is free.
 
+pub use crate::buffer::Allocations;
 pub use furiosa_opt_abi::memory::Kind;
 
 /// Free bytes per chip of one memory kind; a snapshot that reserves nothing for later allocations.

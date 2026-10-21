@@ -6,6 +6,7 @@ use furiosa_opt_lower::{ContractTimeInput, config_contract_time};
 use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
+use crate::cast::ContractionAccumulator;
 use crate::context::*;
 use crate::engine::contraction::{ContractPacketTensor, ContractTimeTensor};
 use crate::scalar::*;
@@ -28,6 +29,69 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M
         // Carry the deferred operands forward unreduced: the fused contraction at `contract_lane`
         // performs this Time reduction too. This stage only re-types the carrier to `OutTime`.
         ContractTimeTensor::new(self.device, self.inner, Time::to_value())
+    }
+}
+
+impl<'l, const T: Tu, D: ContractionAccumulator, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M, Packet: M, B: Backend>
+    ContractPacketTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
+{
+    /// [`Self::contract_time`] over the live prefix of `Depth`, an axis of `Time` that `OutTime`
+    /// drops: only its first `count` units accumulate, clamped to `1..=Depth::SIZE`.
+    #[primitive(ContractPacketTensor::contract_time_prefix)]
+    pub fn contract_time_prefix<OutTime: M, Depth: M>(
+        self,
+        count: usize,
+    ) -> ContractTimeTensor<'l, T, D, Chip, Cluster, Slice, Lane, OutTime, Packet, B> {
+        verify_contract_time(ContractTimeInput {
+            in_time: Time::to_value(),
+            out_time: OutTime::to_value(),
+        });
+        let depth = Depth::to_value();
+        assert!(
+            Time::to_value().find_axis(&depth).is_ok() && OutTime::to_value().find_axis(&depth).is_err(),
+            "a counted depth {depth} must be an axis of {} that {} drops",
+            Time::to_value(),
+            OutTime::to_value(),
+        );
+        let terms = depth.axes();
+        let symbol = terms[0].symbol;
+        assert!(
+            terms.iter().all(|term| term.symbol == symbol),
+            "a counted depth {depth} must read one axis"
+        );
+        // `Mapping::iter` projects linearly: it recovers a cell's whole coordinate of the axis, not a
+        // coarser digit of it, so `Depth`'s units are sliced from that coordinate here.
+        let whole = [AxisTerm {
+            symbol,
+            size: terms[0].size,
+            stride: 1,
+            modulo: terms[0].size,
+        }];
+        let unit = |coordinate: usize| {
+            let digits = terms.iter().rev().fold((0, 1), |(unit, weight), term| {
+                (
+                    unit + coordinate / term.stride % term.modulo * weight,
+                    weight * term.modulo,
+                )
+            });
+            digits.0
+        };
+        // A product with a zeroed operand adds nothing, so the deferred contraction sums the live
+        // units only.
+        let live = count.clamp(1, Depth::SIZE);
+        let masked = |storage: B::Storage<D>, map: &Mapping| {
+            let coordinates = map.iter(&whole, &Index::new(), true);
+            let values = B::into_vec(storage, map).into_iter().zip(coordinates);
+            let dead = |coordinate: Option<usize>| coordinate.is_some_and(|coordinate| unit(coordinate) >= live);
+            B::from_vec(
+                map,
+                values.map(|(value, coordinate)| if dead(coordinate) { D::zero() } else { value }),
+            )
+        };
+        let mut inner = self.inner;
+        inner.lhs = masked(inner.lhs, &inner.lhs_map);
+        inner.rhs = masked(inner.rhs, &inner.rhs_map);
+        ContractTimeTensor::new(self.device, inner, Time::to_value())
     }
 }
 // ANCHOR_END: contract_time_def

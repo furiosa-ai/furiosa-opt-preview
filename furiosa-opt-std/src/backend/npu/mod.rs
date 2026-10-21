@@ -1,4 +1,5 @@
 mod backend;
+mod profile;
 mod registry;
 mod runtime;
 

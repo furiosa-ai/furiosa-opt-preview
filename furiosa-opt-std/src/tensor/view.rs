@@ -64,7 +64,13 @@ impl<E: M> Window<E> {
     /// The window with `I` fixed at `start`, declared as `E2`; a start on padding panics, and `kind`
     /// says which padding a tile leaves around itself. `E2` is trusted, as
     /// [`TensorViewMut::retile`] describes.
-    pub(crate) fn retile<I: M, E2: M>(self, start: usize, kind: PaddingKind) -> Window<E2> {
+    /// Panics if the window of `len` positions starting at `start` exceeds `I`'s extent.
+    pub(crate) fn retile<I: M, E2: M>(self, start: usize, len: usize, kind: PaddingKind) -> Window<E2> {
+        assert!(
+            start.checked_add(len).is_some_and(|end| end <= I::SIZE),
+            "tile window exceeds index extent: start {start}, length {len}, extent {}",
+            I::SIZE,
+        );
         let mut offset = self.offset;
         offset
             .add_mapping::<I>(start, kind)
@@ -228,7 +234,7 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        self.retile::<I, E2>(start)
+        self.retile::<I, E2>(start, LEN)
     }
 
     /// Creates a mutable tile whose mapping is derived from the source mapping.
@@ -236,16 +242,16 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
         self,
         start: usize,
     ) -> TensorViewMut<'l, D, Tiled<I, E, LEN, { PaddingKind::Bottom }>, B> {
-        self.retile_derived::<I, Tiled<I, E, LEN, { PaddingKind::Bottom }>>(start)
+        self.retile_derived::<I, Tiled<I, E, LEN, { PaddingKind::Bottom }>>(start, LEN)
     }
 
     /// Rewraps a derived tile, panicking if its type-level split is invalid. `assert_valid_derivation`
     /// only catches a broken *derivation* (e.g. an invalid [`Tiled`]); it does not, and cannot, check
     /// that `E2` actually corresponds to `E` -- see [`Self::retile`]'s warning. Only call this with an
     /// `E2` derived from `E` by construction.
-    pub(crate) fn retile_derived<I: M, E2: M>(self, start: usize) -> TensorViewMut<'l, D, E2, B> {
+    pub(crate) fn retile_derived<I: M, E2: M>(self, start: usize, len: usize) -> TensorViewMut<'l, D, E2, B> {
         assert_valid_derivation::<E2>();
-        self.retile::<I, E2>(start)
+        self.retile::<I, E2>(start, len)
     }
 
     /// The rewrap half of [`Self::tile`], for a caller that has already checked the split. A
@@ -258,10 +264,10 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
     /// addresses. Only pass an `E2` derived from the caller's *own* `E` by construction (see
     /// [`Tiled`], or a type checked the way [`Self::tile`] checks `E2` with [`config_tile`]) -- never a
     /// type merely declared to have the right shape.
-    pub(crate) fn retile<I: M, E2: M>(self, start: usize) -> TensorViewMut<'l, D, E2, B> {
+    pub(crate) fn retile<I: M, E2: M>(self, start: usize, len: usize) -> TensorViewMut<'l, D, E2, B> {
         TensorViewMut {
             inner: self.inner,
-            window: self.window.retile::<I, E2>(start, PaddingKind::Bottom),
+            window: self.window.retile::<I, E2>(start, len, PaddingKind::Bottom),
             marker: PhantomData,
         }
     }
@@ -335,7 +341,7 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        self.retile::<I, E2>(start)
+        self.retile::<I, E2>(start, LEN)
     }
 
     /// Creates a tile whose mapping is derived from the source mapping.
@@ -343,25 +349,25 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
         &self,
         start: usize,
     ) -> TensorView<'l, D, Tiled<I, E, LEN, { PaddingKind::Top }>, B> {
-        self.retile_derived::<I, Tiled<I, E, LEN, { PaddingKind::Top }>>(start)
+        self.retile_derived::<I, Tiled<I, E, LEN, { PaddingKind::Top }>>(start, LEN)
     }
 
     /// Rewraps a derived tile, panicking if its type-level split is invalid. `assert_valid_derivation`
     /// only catches a broken *derivation* (e.g. an invalid [`Tiled`]); it does not, and cannot, check
     /// that `E2` actually corresponds to `E` -- see [`Self::retile`]'s warning. Only call this with an
     /// `E2` derived from `E` by construction.
-    pub(crate) fn retile_derived<I: M, E2: M>(&self, start: usize) -> TensorView<'l, D, E2, B> {
+    pub(crate) fn retile_derived<I: M, E2: M>(&self, start: usize, len: usize) -> TensorView<'l, D, E2, B> {
         assert_valid_derivation::<E2>();
-        self.retile::<I, E2>(start)
+        self.retile::<I, E2>(start, len)
     }
 
     /// The rewrap half of [`Self::tile`], for a caller that has already checked the split. See
     /// [`TensorViewMut::retile`] -- same trust, same silent-misaddress risk if `E2` is not truly `E`
     /// with `I` fixed at `start`.
-    pub(crate) fn retile<I: M, E2: M>(&self, start: usize) -> TensorView<'l, D, E2, B> {
+    pub(crate) fn retile<I: M, E2: M>(&self, start: usize, len: usize) -> TensorView<'l, D, E2, B> {
         TensorView {
             inner: self.inner,
-            window: self.window.clone().retile::<I, E2>(start, PaddingKind::Top),
+            window: self.window.clone().retile::<I, E2>(start, len, PaddingKind::Top),
             marker: PhantomData,
         }
     }

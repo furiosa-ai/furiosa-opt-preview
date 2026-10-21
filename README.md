@@ -80,8 +80,7 @@ make test     # cargo test --workspace --release
 
 ## Runtime
 
-See the [`furiosa-opt-rt` runtime guide](furiosa-opt-rt/README.md) for devices, launches and
-memory.
+See the [`furiosa-opt-rt` runtime guide](furiosa-opt-rt/README.md) for the runtime implementation.
 
 ## Documentation
 

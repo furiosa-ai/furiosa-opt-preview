@@ -1,14 +1,16 @@
-//! Host writes to local HBM through BAR4.
+//! Host stores into a chip's DRAM through its BAR4.
 
 use std::fs::File;
 use std::sync::Mutex;
 
+use super::BAR4_DRAM;
 use super::map::Mapping;
 use crate::Result;
-use crate::arch::rngd::BAR4_DRAM;
 
-const PAGE: usize = 4096;
-
+/// A chip's DRAM as the host's CPU reaches it: the kernel driver exposes the chip's DRAM in BAR4
+/// from [`BAR4_DRAM`] on, and a store there lands in DRAM with no DMA command. Small writes take it,
+/// since a store costs less than a DMA round trip. It maps one page-aligned span at a time, the one
+/// the last write needed, and maps anew when a write falls outside.
 pub(crate) struct Window {
     file: File,
     mapping: Mutex<Option<(u64, Mapping)>>,
@@ -45,3 +47,5 @@ impl Window {
         Ok(())
     }
 }
+
+const PAGE: usize = 4096;

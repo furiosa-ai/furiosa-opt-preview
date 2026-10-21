@@ -7,62 +7,27 @@ use std::thread::JoinHandle;
 use std::thread::Thread;
 use std::time::Duration;
 
-use crate::driver::Driver;
-use crate::function::Launches;
-
-/// How often an idle worker looks for progress nobody woke it for.
-const IDLE_POLL: Duration = Duration::from_millis(1);
+use super::{Contention, Work};
 
 /// Each device's thread: it spins on a core while any launch or transfer runs, so completions are
 /// seen at once, and wakes every [`IDLE_POLL`] while idle.
 pub(crate) struct Worker {
-    /// Every function's launch slots, so launches nobody polls still retire and run their epilogues.
-    pub(crate) launches: Arc<Launches>,
-    /// Wakes the thread from its idle wait when work it must retire was published.
-    pub(crate) waker: Waker,
+    /// Wakes the thread from its idle wait when work it must collect was published.
+    waker: Waker,
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
-/// Unparks the worker once it runs; a wake before that finds it starting, not idle.
-#[derive(Default)]
-pub(crate) struct Unpark(OnceLock<Thread>);
-
-impl Wake for Unpark {
-    fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.get().map(Thread::unpark);
-    }
-}
-
 impl Worker {
-    #[cfg(test)]
-    pub(crate) fn new() -> Self {
-        Self {
-            launches: Arc::default(),
-            waker: Waker::noop().clone(),
-            shutdown: Arc::default(),
-            thread: None,
-        }
-    }
-
-    /// Drives `driver`'s work; `unpark` must be the one behind the waker the driver was opened
-    /// with.
-    pub(crate) fn spawn(driver: Arc<Driver>, unpark: Arc<Unpark>) -> Self {
-        let launches = Arc::new(Launches::default());
+    /// Drives `work`; `unpark` must be the one behind the waker its driver was opened with.
+    pub(crate) fn spawn(work: Work, unpark: Arc<Unpark>) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
-        let (active, stopped) = (Arc::clone(&launches), Arc::clone(&shutdown));
+        let stopped = Arc::clone(&shutdown);
         let thread = std::thread::spawn(move || {
             loop {
-                let finished = active.progress();
-                let failed = driver.failure.get().is_some();
-                if driver.transfers.progress() && (finished || failed) {
+                if work.complete(Contention::Skip) {
                     if stopped.load(Ordering::Acquire) {
-                        // Stop task code before releasing its DMA channels or peer mappings.
-                        driver.stop();
+                        work.stop();
                         return;
                     }
                     std::thread::park_timeout(IDLE_POLL);
@@ -72,11 +37,24 @@ impl Worker {
         });
         unpark.0.get_or_init(|| thread.thread().clone());
         Self {
-            launches,
             waker: Waker::from(unpark),
             shutdown,
             thread: Some(thread),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new() -> Self {
+        Self {
+            waker: Waker::noop().clone(),
+            shutdown: Arc::default(),
+            thread: None,
+        }
+    }
+
+    /// Wakes the thread from its idle wait.
+    pub(crate) fn waker(&self) -> &Waker {
+        &self.waker
     }
 }
 
@@ -94,6 +72,23 @@ impl Drop for Worker {
     }
 }
 
+/// Unparks the worker once it runs; a wake before that finds it starting, not idle.
+#[derive(Default)]
+pub(crate) struct Unpark(OnceLock<Thread>);
+
+impl Wake for Unpark {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.get().map(Thread::unpark);
+    }
+}
+
+/// How often an idle worker looks for progress nobody woke it for.
+const IDLE_POLL: Duration = Duration::from_millis(1);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,8 +97,8 @@ mod tests {
     #[test]
     fn shutdown_waits() {
         let (device, _) = crate::test::running(&[0], 8);
-        let links = device.driver.links.lock().unwrap();
-        let worker = Worker::spawn(Arc::clone(&device.driver), Arc::default());
+        let mailboxes = device.driver.mailboxes.lock().unwrap();
+        let worker = Worker::spawn(device.work(), Arc::default());
         let shutdown = Arc::clone(&worker.shutdown);
         let (done, complete) = std::sync::mpsc::sync_channel(1);
         let dropping = std::thread::spawn(move || {
@@ -116,11 +111,11 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(matches!(complete.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
-        drop(links);
+        drop(mailboxes);
         complete
             .recv_timeout(Duration::from_secs(2))
             .expect("drop joined the worker");
         dropping.join().unwrap();
-        assert!(device.driver.links.lock().unwrap().is_empty());
+        assert!(device.driver.mailboxes.lock().unwrap().is_empty());
     }
 }

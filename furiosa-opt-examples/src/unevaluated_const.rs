@@ -1,8 +1,8 @@
-//! Regression fixture for the `Const::Unevaluated` arm of `translate_const`
-//! (npu-visa-translate). The kernel body reads `<m![B]>::SIZE` as a *value*
+//! Regression fixture for unevaluated constants in MIR->vISA translation.
+//! The kernel body reads `<m![B]>::SIZE` as a *value*
 //! and guards it with a `const { assert!(..) }`. Both reach MIR as a
 //! monomorphizable anonymous/associated const, which MIR->vISA translation must
-//! const-eval rather than panic on. See furiosa-ai#18502.
+//! const-eval rather than panic on.
 
 use furiosa_opt_std::prelude::*;
 

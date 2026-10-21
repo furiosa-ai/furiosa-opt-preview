@@ -244,8 +244,7 @@ Breaking changes come first, each with what to write instead.
 - `DmTensorView::dm_cluster_swap` swaps two clusters and lowers to EDF, with
   VISA/LIR/EDF regression coverage.
 - The Transpose Engine accepts doubled input packing for 8-bit and 16-bit elements. A packet can
-  now contribute 16 valid elements per cycle, and vISA lowering emits the corresponding
-  `fetch_in_width_shift`; 4-bit and 32-bit doubled packing remain unsupported.
+  now contribute 16 valid elements per cycle; 4-bit and 32-bit doubled packing remain unsupported.
 - `fetch_chip_lift`, `fetch_cluster_lift`, and `fetch_slice_lift` move axes that a plain `fetch`
   would traverse in `Time` onto a broadcast slot in the `Chip`, `Cluster`, or `Slice` placement.
   Each destination reads a different offset from its local copy, with no data transfer and no change
@@ -347,7 +346,7 @@ Breaking changes come first, each with what to write instead.
 
 - A stash read guarded on the group bit alone does not lower. A cached read needs two things the compiler keeps apart -- which elements the operand applies to, and which group wrote the slice being read -- and a group-shaped guard cannot be told from a zip's read. Constrain another bit as well, or drop the guard.
 - `TagMode::AxisToggle` does not lower. `vector_intra_slice_unzip()` is the supported route to a group split.
-- A DMA cannot place a tile whose padded axis is an inner digit of a split. The reduced case is pinned in the examples as `mre/dma_padded_inner_digit`.
+- A DMA cannot place a tile whose padded axis is an inner digit of a split.
 - An inner-digit tile is supported on an axis the HBM argument names directly. A tile reaching into an axis nested under another is still refused at compile time.
 
 ## [v0.5.1]

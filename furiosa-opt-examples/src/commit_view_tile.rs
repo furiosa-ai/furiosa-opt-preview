@@ -32,8 +32,7 @@ type Slice = m![1 # 256];
 /// begins at element `16`, matching what the commit (write) side and the DMA
 /// path use. This is the regression guard for the fetch-path tile-offset unit:
 /// the fetch offset must be an element index, not a byte offset. A byte-unit
-/// fetch offset (the `index_access_axis_stride_in_bytes` `MultiShape` bug) would
-/// read element `16 / 2 = 8` for bf16 and return the wrong swap.
+/// fetch offset would read element `16 / 2 = 8` for bf16 and return the wrong swap.
 #[device(chip = 1)]
 pub fn swap_halves(device: &mut Device, x: &HbmTensor<bf16, Chip, m![A, X]>) -> HbmTensor<bf16, Chip, m![A, X]> {
     let x: DmTensor<bf16, Chip, Cluster, Slice, m![A, X]> = x.to_dm(&mut device.tdma);

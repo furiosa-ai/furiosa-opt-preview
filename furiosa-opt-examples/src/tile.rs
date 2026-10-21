@@ -101,19 +101,14 @@ pub fn tile_view_in_loop(
 /// produced by the *outer* loop variable -- the loop-body capture shape of the attention-decode
 /// kernels. The outer `for g` slices `input` into a 16-wide `B`-group (`in_group`, tiled by the
 /// outer index `g`); the inner `for h` tiles *that group* by the inner index, so the inner loop
-/// body reads a tensor whose `IndexAccess` `table` traces back through `in_group` to the OUTER
+/// body reads a tensor whose index table traces back through `in_group` to the OUTER
 /// loop's index tensor -- an index allocated in the enclosing scope, absent from the inner body's
 /// own tensors.
 ///
 /// An HBM-tiled loop is not unrolled (contrast the SRAM nest in [`tile_computed_offset`]), so both
-/// `for`s survive as kept VISA `Loop`s. `convert_loop` must therefore (1) thread the outer index
-/// into the inner loop's `captured_inputs` -- else VISA -> LIR hits the loop-body-graph verify wall
-/// (`Loop::build_body_graph -> verify_structural_validity`, "no tensor exists for T{n}") -- and
-/// (2) keep the inner nest's own locals OUT of the outer loop's `local_tensors` -- else the LIR
-/// loop-body completeness check rejects them ("contained in local_tensors but not referenced by any
-/// local instructions"). It is the in-repo regression for both facets of that fix; the matching
-/// `test_tile_view_in_nested_loop` is a lowering-only check (`build_lir`, not `compare_edf!`) because
-/// the host backend's tile-shape validator does not accept this two-level HBM tile.
+/// `for`s survive as kept VISA `Loop`s. Lowering must therefore (1) thread the outer index into
+/// the inner loop and (2) keep the inner nest's own locals out of the outer loop's. It is the
+/// in-repo regression for both facets of that fix.
 #[device(chip = 1)]
 pub fn tile_view_in_nested_loop(
     device: &mut Device,
@@ -148,11 +143,11 @@ pub fn tile_view_in_nested_loop(
 /// Copies `input[B, D]` to `output[B, D]` one `D`-chunk per iteration. Each
 /// `output.view_mut().tile::<m![D / 16], 1, m![B, 1 #{!} 4, D % 16]>(i)` is a
 /// chunked write tile whose strided `D_16` chunk-index axis is absent from the
-/// contiguous output shape, so lowering must materialize it (`split_chunk_index_axis`).
+/// contiguous output shape, so lowering must materialize it.
 /// The write tile is a loop-body-local tensor whose writeback resolves against the
 /// returned `output` *after* the loop closes; dropping loop-body locals from the parent
 /// regresses this to a "no tensor T{n}" panic. Together this is a single runnable value
-/// oracle (`compare_edf!`) for both the loop-tensor re-merge and the chunk-axis fix.
+/// oracle for both the loop-tensor re-merge and the chunk-axis fix.
 #[device(chip = 1)]
 pub fn tile_chunked_output(
     device: &mut Device,
@@ -219,8 +214,8 @@ pub fn tile_with_larger_than_one_2(device: &mut Device, up_weight: &HbmTensor<bf
 /// at `start = 32` lands on `result[32..64]`, not some multiple of `32`. Every `start` here (`0`,
 /// `256`, `512`) is already the exact axis offset of a chunk boundary, so the three windows are
 /// disjoint and cover the whole `L` axis exactly once (unlike `tile_with_larger_than_one_1`, whose
-/// `start` values `0`/`1`/`2` are small overlapping raw offsets that reproduce PROG-539 and leave
-/// most of the output tensor unwritten).
+/// `start` values `0`/`1`/`2` are small overlapping raw offsets that leave most of the output
+/// tensor unwritten).
 #[device(chip = 1)]
 pub fn tile_size_gt1_chunk_swap(
     device: &mut Device,

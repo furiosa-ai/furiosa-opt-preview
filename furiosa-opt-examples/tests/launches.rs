@@ -1,4 +1,4 @@
-//! Build-only root for npu-opt's `registry` test: this harness binary's registry must carry
+//! Build-only root for the device function registry: this harness binary's registry must carry
 //! exactly the launches below. `missing` must be a returning call: an inline `panic!` diverges
 //! and drops the launches out of the monomorphization collector's sight.
 

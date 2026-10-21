@@ -52,8 +52,8 @@ pub enum SwitchConfig {
     /// Routes data across slices using a custom snoop bitmap, computed by the compiler from the input
     /// shape and topology parameters.
     CustomBroadcast {
-        /// Ring group size for the custom routing. Must be a power of two: it feeds the SFR's
-        /// `outer_dim0_size_log = ring_size.trailing_zeros()`, so a non-power-of-two misencodes.
+        /// Ring group size for the custom routing. Must be a power of two: the SFR encodes it as
+        /// `ring_size.trailing_zeros()`, which encodes other values incorrectly.
         ring_size: usize,
     },
     /// Swaps slice1/slice0 and replicates along slice dimension 0 (Transpose + Broadcast1 at once).

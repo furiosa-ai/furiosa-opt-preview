@@ -26,8 +26,7 @@ async fn test_vrf_slice_reshape() -> eyre::Result<()> {
     Ok(())
 }
 
-/// [`test_vrf_slice_reshape`] at the 64-slice topology, the one whose `compare_edf` peer runs in a
-/// default config.
+/// [`test_vrf_slice_reshape`] at the 64-slice topology, the one a default config has.
 #[tokio::test]
 async fn test_vrf_slice_reshape_64() -> eyre::Result<()> {
     let mut device = Device::new(vrf_slice_reshape_64.topology())?;

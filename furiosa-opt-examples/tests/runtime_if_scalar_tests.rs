@@ -2,9 +2,7 @@
 //!
 //! The negative form ([`runtime_if_scalar_immediate`]) is NOT tested here: the VISA simulator runs
 //! the loop with concrete indices, so a runtime `if`-selected immediate simulates fine; the
-//! compile-time-constant requirement is a codegen constraint. Its rejection is pinned by the
-//! `runtime_if_scalar::runtime_if_scalar_immediate` entry in the `npu-visa-test` snapshot gate,
-//! which asserts it fails at the `mir` stage with the expected diagnostic.
+//! compile-time-constant requirement is a codegen constraint.
 
 use furiosa_opt_examples::runtime_if_scalar::{A, B, runtime_if_scalar_index};
 use furiosa_opt_std::prelude::*;

@@ -80,12 +80,12 @@ fn reduce_over_cluster(
     // Step 1: Create T0 (with slice (0, 1)) and T1 (with slice(1,0) + shuffle(1,0))
     // Step 2: Add T0 + T1 to reduce cluster axis
 
-    // Step 1a: Use ParallelCopy (via sub context with stos) to create sliced version
+    // Step 1a: Use a parallel copy (via sub context with stos) to create sliced version
     // This performs asymmetric cluster slice operation
     let sliced0: DmTensor<i8, Chip, Cluster, m![A / 8], m![C / 8 % 128, C % 8, A % 8]> =
         tensor.asymmetric_cluster_slice::<m![C / 1024], _>(&mut device.sub, &[0, 1]);
 
-    // Step 1b: Use DmaCommand to shuffle the sliced data across clusters
+    // Step 1b: Use a DMA command to shuffle the sliced data across clusters
     // This swaps data between Cluster 0 and Cluster 1
     let sliced1: DmTensor<i8, Chip, Cluster, m![A / 8], m![C / 8 % 128, C % 8, A % 8]> =
         tensor.asymmetric_cluster_slice::<m![C / 1024], _>(&mut device.sub, &[1, 0]);

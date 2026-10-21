@@ -1,8 +1,7 @@
 //! VRF-operand verification: what the VRF indexer can address for one VE access.
 //!
 //! One access is `Packet` elements per way (8 in `Way8`, 4 in `Way4`) and comes from ONE indexer
-//! step: a broadcast (one address for every lane) or `Packet` consecutive cells (the ISA's
-//! `ReadIndexerOpMode::{BroadcastRead, ContiguousRead}`). The backend's `make_vrf_sequencer` checks
+//! step: a broadcast (one address for every lane) or `Packet` consecutive cells. The backend checks
 //! it again, as an internal error. The second rule, that the stream match every named axis of the
 //! operand, is the DSL's own policy.
 
@@ -321,8 +320,6 @@ mod tests {
     fn padding_breaks_contiguity() {
         let error = assert_illegal::<m![G, P # 8], m![G / 2], m![G % 2, P]>();
         assert!(matches!(&error, VrfOperandError::PacketNotIndexable { .. }), "{error}");
-        // Pinned here, in `ve_vrf_strided_packet`'s answer key, and in that fixture's `snapshot.toml`
-        // reason. Keep the three in step.
         assert!(
             error.to_string().contains("cannot feed the 8-element packet"),
             "{error}"

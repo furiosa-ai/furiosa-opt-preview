@@ -101,7 +101,7 @@ pub fn stotrf_table_lookup_gemm(
             .to_vrf();
 
         // Contract the streamed per-token e4m3 activation against the decoded 8-row f8 weight TRF
-        // (`mac_width(f8) = 64`, so the contraction OutPacket is `Red % 64`), fold the 8 output
+        // (the f8 MAC width is 64, so the contraction OutPacket is `Red % 64`), fold the 8 output
         // features Interleaved into the `OutPacket`, then dequant in the VE tail and round to bf16.
         device
             .main

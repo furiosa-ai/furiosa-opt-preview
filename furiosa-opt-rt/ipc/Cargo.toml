@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-opt-ipc"
-version = "0.9.0+gea09ccdd"
+version = "0.9.0+g8f73b1d0"
 edition = "2024"
 license = "Apache-2.0"
 description = "IPC protocol for communication between the Furiosa Opt host runtime and firmware."

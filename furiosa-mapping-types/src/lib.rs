@@ -227,8 +227,7 @@ impl Mapping {
     }
 
     /// The cell count this mapping reads. Tolerates a ragged `Stride` / `Modulo` (one whose
-    /// divisor does not divide the inner size), which the matcher emits as a valid OUTPUT
-    /// even though it is not a valid `from_mapping` INPUT.
+    /// divisor does not divide the inner size), which the matcher emits as a valid OUTPUT.
     pub fn size(&self) -> usize {
         match self {
             Self::Symbol { size, .. } => *size,
@@ -825,9 +824,8 @@ pub enum SequencerMode {
     /// Stream writes to memory (each memory cell is written exactly once).
     Write,
     /// A read carve (`MappingExt::carve`) that also tolerates a `Bottom` pad in the stream (a
-    /// `view_mut` hole, read as a `Top` don't-care). TRANSIENT (PROG-480): a stopgap until the sequencer
-    /// can carve the broadcast from the memory leftover (see `read_carved_down_memory_keeps_broadcast_term`),
-    /// at which point this mode can be retired.
+    /// `view_mut` hole, read as a `Top` don't-care). TRANSIENT: a stopgap until the sequencer can carve
+    /// the broadcast from the memory leftover, at which point this mode can be retired.
     Carve,
     /// Locates where a partial stream reads: no coverage required, padding equal on both sides.
     Locate,

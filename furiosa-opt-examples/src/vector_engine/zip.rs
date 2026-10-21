@@ -202,8 +202,7 @@ pub fn ve_group_pair_preprocess_g1(
 
 /// An op *after* the zip, with a bare operand. The zip merges the two groups, so from there on the
 /// tag carries the group bit and nothing else, and a bare operand is unconditional -- it is not
-/// narrowed to the group the zip wrote. This is the only shape that pins that, so it is the one
-/// `compare_edf` reads to check host and device agree on it.
+/// narrowed to the group the zip wrote. This is the only shape that checks this behavior.
 #[device(chip = 1)]
 pub fn ve_group_pair_post_zip(
     device: &mut Device,

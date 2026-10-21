@@ -274,7 +274,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     /// Returns the dense packed byte image in `m![Chip, Element]` axis order, sized
     /// [`Scalar::size_in_bytes_from_length`]. A 4-bit scalar ([`f4e2m1`] / [`i4`]) packs two codes per
     /// byte, so the result is half the element count; byte-aligned scalars pass through unchanged. This
-    /// is the buffer the LIR executor consumes and the `compare_edf!` harness feeds as the LIR input.
+    /// is the buffer the LIR executor consumes.
     pub fn to_buf(&self) -> Vec<u8>
     where
         D: MaterializableScalar,
@@ -473,7 +473,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         HbmTensorView {
             inner,
             owner: self.owner.clone(),
@@ -495,7 +495,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'l, D, Chip, 
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         HbmTensorView {
             inner,
             owner: self.owner.clone(),
@@ -660,7 +660,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         HbmTensorViewMut {
             inner,
             owner: self.owner.clone(),
@@ -682,7 +682,7 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorViewMut<'l, D, Chi
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         HbmTensorViewMut {
             inner,
             owner: self.owner.clone(),
@@ -1079,7 +1079,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorView { inner }
     }
 
@@ -1088,7 +1088,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Tiled<Index, Chip, LEN, { PaddingKind::Top }>, Cluster, Slice, Element, B> {
         DmTensorView {
-            inner: self.inner.retile_derived::<Index, _>(start),
+            inner: self.inner.retile_derived::<Index, _>(start, LEN),
         }
     }
 
@@ -1097,7 +1097,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Cluster, Slice, Tiled<AxisToSlice, Element, 1, { PaddingKind::Top }>, B> {
         DmTensorView {
-            inner: self.inner.retile::<AxisToSlice, _>(start),
+            inner: self.inner.retile::<AxisToSlice, _>(start, 1),
         }
     }
 
@@ -1116,7 +1116,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorView { inner }
     }
 
@@ -1125,7 +1125,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorView<'l, D, Chip, Tiled<Index, Cluster, LEN, { PaddingKind::Top }>, Slice, Element, B> {
         DmTensorView {
-            inner: self.inner.retile_derived::<Index, _>(start),
+            inner: self.inner.retile_derived::<Index, _>(start, LEN),
         }
     }
 
@@ -1144,7 +1144,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorView { inner }
     }
 
@@ -1162,7 +1162,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Top,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorView { inner }
     }
 
@@ -1260,7 +1260,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorViewMut { inner }
     }
 
@@ -1269,7 +1269,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorViewMut<'l, D, Tiled<Index, Chip, LEN, { PaddingKind::Bottom }>, Cluster, Slice, Element, B> {
         DmTensorViewMut {
-            inner: self.inner.retile_derived::<Index, _>(start),
+            inner: self.inner.retile_derived::<Index, _>(start, LEN),
         }
     }
 
@@ -1288,7 +1288,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorViewMut { inner }
     }
 
@@ -1297,7 +1297,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         start: usize,
     ) -> DmTensorViewMut<'l, D, Chip, Tiled<Index, Cluster, LEN, { PaddingKind::Bottom }>, Slice, Element, B> {
         DmTensorViewMut {
-            inner: self.inner.retile_derived::<Index, _>(start),
+            inner: self.inner.retile_derived::<Index, _>(start, LEN),
         }
     }
 
@@ -1316,7 +1316,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorViewMut { inner }
     }
 
@@ -1334,7 +1334,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             hole_fill: PaddingKind::Bottom,
         })
         .unwrap_or_else(|e| panic!("{e}"));
-        let inner = self.inner.retile::<Index, _>(start);
+        let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorViewMut { inner }
     }
 
@@ -1370,23 +1370,23 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     }
 
     /// Fills this view's region with the typed value-domain `value` (`bf16::from_f32(1.0)`, not a
-    /// `0x3f80` bit pattern), lowering to one on-device `Command::ParallelMemSet` (`itos`).
+    /// `0x3f80` bit pattern), lowering to one on-device fill command.
     ///
     /// `value` must be compile-time constant so it const-folds to the fill's element bits: a plain
     /// literal folds directly, a computed value needs a `const` block, e.g.
     /// `memset(const { bf16::from_f32(1.0) }, ..)`. A non-constant `value` is rejected at translation.
     ///
     /// Only a whole-region fill (a bare `view_mut()`) is supported today; a sub-view fill
-    /// (`view_mut().tile(..).memset(..)`) is rejected at translation, pending a ranged `ParallelMemSet`
-    /// (see `memset::lower`'s TODO). Supports every [`Scalar`] this branch translates to vISA: the byte+
+    /// (`view_mut().tile(..).memset(..)`) is rejected at translation, pending a ranged fill. Supports
+    /// every [`Scalar`] this branch translates to vISA: the byte+
     /// RNGD scalars (`i8`, `i16`, `i32`, `f32`, `bf16`, `f8e4m3`) and sub-byte `i4` (fill materialized
     /// from the low `D::BITS`; a sub-byte region must be byte-aligned or it is rejected). `f4e2m1` is a
-    /// follow-up: a valid DSL `Scalar`, but its vISA `mir_ast::Scalar` variant lands with the separate
+    /// follow-up: a valid DSL `Scalar`, but its vISA support lands with the separate
     /// fetch/table-lookup work, so a `memset(f4e2m1_value)` is rejected rather than mis-lowered.
     #[primitive(DmTensorViewMut::memset)]
     pub fn memset(&mut self, value: D, _sub: &mut TuContext<{ Tu::Sub }>) {
         // Reference backends fill this view's live cells (padding stays untouched, matching the device
-        // write-back); the device path emits ParallelMemSet into the viewed region.
+        // write-back); the device path emits the fill command into the viewed region.
         let fill: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Element>>>, B> = Tensor::splat(value);
         self.inner.transpose(fill.view(), true);
     }
@@ -1571,7 +1571,7 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Lane: M, Packet: M, B: B
 
 fn assert_spm_staging<D: Scalar, Cluster: M, Slice: M, Element: M, Pe2: M, Element2: M>() {
     constraints::assert_pe_matches_slice::<Pe2, Slice>();
-    // `npu_config` treats SPM as non-SRAM, so staging uses DRAM access width 1.
+    // The hardware config treats SPM as non-SRAM, so staging uses DRAM access width 1.
     assert_dma_layout::<
         D,
         m![{ Cluster }, { Slice }, { Element }],
@@ -1693,6 +1693,23 @@ mod tests {
         assert!(std::panic::catch_unwind(|| hbm_window::<i32, m![0]>(64, 0)).is_err());
         assert!(std::panic::catch_unwind(|| hbm_window::<i32, m![2]>(63, 0)).is_err());
         assert!(std::panic::catch_unwind(|| hbm_window::<i32, m![2]>(0, 0)).is_err());
+    }
+
+    #[test]
+    fn rejects_tile_window_past_end() {
+        axes![A = 8];
+        type Tile = m![A = 2 # 8];
+        type TileMut = m![A = 2 #{!} 8];
+
+        let mut tensor = DmTensor::<i32, m![1], m![1], m![1 # 64], m![A], Cpu>::from_parts(Tensor::zeroed());
+        let start = A::SIZE - 1;
+
+        assert!(std::panic::catch_unwind(|| tensor.view().tile::<m![A], 2, Tile>(start)).is_err());
+
+        let view = tensor.view_mut();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| view.tile::<m![A], 2, TileMut>(start))).is_err()
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! Runtime `if` producing a *scalar* result: the merged value is a `ScalarExpr::Ternary` (the scalar
-//! analogue of a tensor phi at a branch merge), which lowers to `SymExpr::Ternary`.
+//! Runtime `if` producing a *scalar* result: the merged value is a ternary select (the scalar
+//! analogue of a tensor phi at a branch merge).
 //!
 //! A scalar `if` result is usable exactly where a *runtime* scalar is:
 //!

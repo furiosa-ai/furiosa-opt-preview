@@ -3,8 +3,7 @@
 //! The branch condition is an arbitrary runtime scalar: the example derives a `bool` variable from the
 //! loop index (`let take_then = i == 0;`) and branches on it, exercising the condition path end to end.
 //!
-//! Statement forms and supported value merges compile end to end to EDF. The remaining
-//! loop-carried value merges live in `npu-opt-examples::unsupported::runtime_if`.
+//! Statement forms and supported value merges compile end to end to EDF.
 
 use furiosa_opt_std::prelude::*;
 

@@ -1,8 +1,6 @@
 //! Answer-key tests for `commit_view_tile`: run the `#[device]` body under the
 //! default (simulation) backend and compare against an independent host oracle.
-//! Unlike the `npu-visa-test` `compare_edf` tests (VISA-sim vs LIR/EDF), this
-//! pins whether the VISA/device simulation itself is correct, localizing a
-//! divergence to either the eDSL/example or the LIR lowering.
+//! This pins whether the VISA/device simulation itself is correct.
 
 use furiosa_opt_examples::commit_view_tile::{A, X, swap_halves};
 use furiosa_opt_std::prelude::*;

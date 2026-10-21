@@ -4,11 +4,9 @@
 //! pins the logical->DPE promotion: `i8 -> i9` and `i4 -> i5` widen implicitly
 //! at the contraction boundary, while `f8`/`bf16` pass through. The reduction
 //! (packet) dim is one 32-byte flit per type, so these also exercise the
-//! sub-mac `CollectFlits::Flit1` path for each element size: i8/f8 = 32 elems,
+//! sub-mac single-flit path for each element size: i8/f8 = 32 elems,
 //! bf16 = 16 elems, i4 = 64 elems.
 //!
-//! i8/f8e4m3/f8e5m2/bf16 reach EDF. i4 reaches LIR: its vISA translation is
-//! complete, but LIR->EDF has incomplete RawInt5/i5 backend support (COM-63).
 //! `i16`, `i32` and `f32` are not DPE inputs at all, so no kernel here covers
 //! them: none has a `ContractionCast` impl, and a `contract_outer` on any of
 //! them does not compile.

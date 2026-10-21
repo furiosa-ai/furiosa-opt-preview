@@ -1,10 +1,10 @@
 //! Rejection fixture for the `Call { target: None }` (diverging panic) arm of
-//! MIR->vISA translation (npu-visa-translate). The body contains a *runtime*
+//! MIR->vISA translation. The body contains a *runtime*
 //! `assert!` over a value-dependent condition, which lowers to a diverging
 //! `core::panicking::panic*` call. MIR->vISA must reject this with a clean
 //! diagnostic ("runtime `panic!`/`assert!` is not supported in a `#[device]`
 //! body ...") rather than ICE with `not yet implemented`. Device bodies allow
-//! only compile-time shape guards (`const { assert!(..) }`). See furiosa-ai#18502.
+//! only compile-time shape guards (`const { assert!(..) }`).
 
 use furiosa_opt_std::prelude::*;
 

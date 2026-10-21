@@ -1,10 +1,9 @@
 //! Minimal kernels that exercise a specific (chip, PE) device config end to end, so CI verifies the
-//! `global_config` plumbing is wired for that topology (not just the common 8-PE config).
+//! device config plumbing is wired for that topology (not just the common 8-PE config).
 //!
 //! Each kernel adds 1 on the vector engine over a DM layout sized to its device's chip x cluster x
 //! slice grid, so a mis-wired config produces a mismatched layout the EDF comparison catches. The
-//! value oracle (`output == input + 1`) lives in the `furiosa-opt-examples` `pe_count` tests; the
-//! cross-stage `compare_edf` companions live in `npu-visa-test`.
+//! value oracle (`output == input + 1`) lives in the `furiosa-opt-examples` `pe_count` tests.
 //!
 //! In-slice extent is fixed at `P / 4 % 4` = 4 i32 (16 B, 8-byte aligned) across every config; only
 //! the slice count changes with the topology.

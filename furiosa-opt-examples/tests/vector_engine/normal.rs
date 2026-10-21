@@ -1,10 +1,10 @@
 use crate::common::{assert_f32_bits_eq, assert_f32_vec_eq};
 use furiosa_opt_examples::vector_engine::{
-    A, B, P, W, ve_contract_to_vrf, ve_elementwise_full_pipeline, ve_elementwise_fxp_const, ve_elementwise_logic,
+    A, B, P, R16, W, ve_contract_to_vrf, ve_elementwise_full_pipeline, ve_elementwise_fxp_const, ve_elementwise_logic,
     ve_elementwise_multi_vrf, ve_elementwise_reinterpret_abs_f32, ve_elementwise_reinterpret_chain_f32,
     ve_elementwise_stash_f32, ve_elementwise_stash_i32, ve_elementwise_ternary, ve_elementwise_ternary_stash,
-    ve_elementwise_vrf, ve_stash_after_reinterpret_f32, ve_stash_after_widen_f32, ve_stash_fxp_fxp,
-    ve_vrf_read_many_f32,
+    ve_elementwise_vrf, ve_main_fetch_to_vrf, ve_stash_after_reinterpret_f32, ve_stash_after_widen_f32,
+    ve_stash_fxp_fxp, ve_sub_empty_pass_to_sram, ve_sub_tile_fetch, ve_vrf_read_many_f32,
 };
 use furiosa_opt_std::prelude::*;
 use rand::SeedableRng;
@@ -334,6 +334,73 @@ async fn test_ve_vrf_read_many_f32() {
         .into_vec();
 
     assert_f32_vec_eq(&expected, &actual);
+}
+
+#[tokio::test]
+async fn test_ve_main_fetch_to_vrf() -> eyre::Result<()> {
+    let mut device = Device::new(ve_main_fetch_to_vrf.topology())?;
+
+    let input_values: Vec<i32> = (1..=<m![A, P]>::SIZE).map(|value| value as i32).collect();
+    let seed_values: Vec<i32> = input_values.iter().map(|value| value * 2).collect();
+    let input = HostTensor::<i32, m![A, P]>::from_vec(input_values);
+    let seed = HostTensor::<i32, m![A, P]>::from_vec(seed_values);
+
+    let input_hbm = input.to_hbm(&mut device.pdma).await?;
+    let seed_hbm = seed.to_hbm(&mut device.pdma).await?;
+
+    let out_hbm = launch(ve_main_fetch_to_vrf, (&mut device, &input_hbm, &seed_hbm)).await?;
+
+    let result = out_hbm.to_host::<m![A, P]>(&mut device.pdma).await?;
+
+    let expected = input
+        .into_inner()
+        .zip_with(&seed.into_inner(), |input, seed| input + seed);
+
+    assert_eq!(expected.into_vec(), result.into_vec());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ve_sub_empty_pass_to_sram() -> eyre::Result<()> {
+    let mut device = Device::new(ve_sub_empty_pass_to_sram.topology())?;
+
+    let input = HostTensor::<i32, m![A, P]>::from_vec((1..=<m![A, P]>::SIZE).map(|value| value as i32));
+
+    let input_hbm = input.to_hbm(&mut device.pdma).await?;
+
+    let out_hbm = launch(ve_sub_empty_pass_to_sram, (&mut device, &input_hbm)).await?;
+
+    let result = out_hbm.to_host::<m![A, P]>(&mut device.pdma).await?;
+
+    let expected = input.into_inner();
+
+    assert_eq!(expected.into_vec(), result.into_vec());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ve_sub_tile_fetch() -> eyre::Result<()> {
+    let mut device = Device::new(ve_sub_tile_fetch.topology())?;
+
+    let input = HostTensor::<i32, m![B, R16]>::from_vec((1..=<m![B, R16]>::SIZE).map(|value| value as i32));
+
+    let input_hbm = input.to_hbm(&mut device.pdma).await?;
+
+    let out_hbm = launch(ve_sub_tile_fetch, (&mut device, &input_hbm)).await?;
+
+    let result = out_hbm.to_host::<m![B, R16 = 8]>(&mut device.pdma).await?;
+
+    let expected: Vec<i32> = input
+        .into_vec()
+        .chunks_exact(<m![R16]>::SIZE)
+        .flat_map(|row| row[row.len() / 2..].iter().map(|value| value + 1))
+        .collect();
+
+    assert_eq!(expected, result.into_vec());
+
+    Ok(())
 }
 
 // =============================================================================

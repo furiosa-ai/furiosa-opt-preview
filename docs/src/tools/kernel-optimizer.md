@@ -85,23 +85,6 @@ cargo furiosa-opt compile transpose::transpose_simple \
   --dump-schedule schedule.json
 ```
 
-### Compilation pipeline and dump options
-
-The dump flags below each capture a different point of the kernel compilation pipeline, which runs in three stages:
-
-1. **Stage 1 — MIR → vISA.**
-2. **Stage 2 — vISA → LIR.**
-3. **Stage 3 — LIR → EDF (the kernel binary).**
-
-Each public dump flag targets a stage and emits an artifact for a specific consumer.
-All dump flags are single-kernel options.
-
-- `--dump-visa`: Stage 1 vISA text for compiler/backend inspection.
-- `--dump-ir`: Stage 2 LIR as a bincode binary for compiler tooling.
-- `--dump-dfg`: Stage 1 vISA data-flow graph serialized as compiler IR binary data to the requested file for graph inspection.
-- `--dump-graph`: Stage 2 LIR graph as JSON for the IR graph viewer.
-- `--dump-summary`: Stage 3 LIR-to-EDF compilation summary written to the requested directory.
-- `--dump-schedule`: Stage 3 scheduling after LIR is lowered to `ResourceLir`, emitted as JSON for the [Schedule Viewer](./schedule-viewer.md).
 
 ### `[FILTER]...`
 
@@ -126,30 +109,14 @@ Diagnostic format forwarded to the compiler (e.g.
 Dump the intermediate vISA to a file.
 Should only be used when compiling a single kernel.
 
-### `--dump-ir` _file_
-
-Dump the intermediate LIR (Low-Level IR) as a bincode binary to a file.
-Should only be used when compiling a single kernel.
 
 ### `--dump-schedule` _file_
 
-Lower LIR to `ResourceLir` and dump the resulting schedule as JSON for the [Schedule Viewer](./schedule-viewer.md).
+Dump the schedule as JSON for the [Schedule Viewer](./schedule-viewer.md).
 Should only be used when compiling a single kernel.
 
-### `--dump-dfg` _file_
 
-Dump the Stage 1 vISA data-flow graph to a file.
-Should only be used when compiling a single kernel.
 
-### `--dump-graph` _file_
-
-Dump the Stage 2 LIR graph as JSON for the IR graph viewer.
-Should only be used when compiling a single kernel.
-
-### `--dump-summary` _dir_
-
-Dump the Stage 3 LIR-to-EDF compilation summary to a directory for diagnostic tooling.
-Should only be used when compiling a single kernel.
 
 ## Environment variables
 

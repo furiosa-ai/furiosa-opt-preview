@@ -2,10 +2,9 @@
 //!
 //! How it gets there: the driver rides the build as cargo's `RUSTC_WORKSPACE_WRAPPER`. While
 //! the binary compiles, the driver lowers every `#[device]` instantiation the binary launches
-//! and appends one object file to the binary's own link line (`link.rs` in npu-opt, the wire
-//! format's other end). That object's only content is a `furiosa_kernels` section holding the
-//! serialized entries. The linker keeps the section in the final binary and defines
-//! `__start_`/`__stop_` symbols at its bounds.
+//! and appends one object file to the binary's own link line. That object's only content is a
+//! `furiosa_kernels` section holding the serialized entries. The linker keeps the section in the
+//! final binary and defines `__start_`/`__stop_` symbols at its bounds.
 //!
 //! What is in it: bincode of `Vec<(fn path, Key, image)>`, ordered by (fn path, key):
 //! - fn path: `crate::module::fn`, exactly what the macro derives at the launch site
@@ -48,10 +47,9 @@ pub(crate) fn entries(path: &str) -> impl Iterator<Item = (&'static Key, Bytes)>
 }
 
 // NOTE: the section name, its `__start_`/`__stop_` bound symbols, and the bincode row format
-// are one wire contract with the driver's link pass (`link.rs` in npu-opt). The npu-opt
-// registry test reads a real binary end-to-end and fails on a drift on either side. The name
-// must be a valid C identifier (`__start_` synthesis requires it) and must keep the vendor
-// prefix: section names share one global namespace with every linked object, C libraries
+// are one wire contract with the driver's link pass.
+// The name must be a valid C identifier (`__start_` synthesis requires it) and must keep the
+// vendor prefix: section names share one global namespace with every linked object, C libraries
 // included, and the linker concatenates same-named sections from all of them.
 unsafe extern "C" {
     #[link_name = "__start_furiosa_kernels"]

@@ -1,5 +1,5 @@
-//! Regression fixture for the `Const::Ty` arm of `translate_const`
-//! (npu-visa-translate). A `#[device]` entrypoint calls a helper generic over a
+//! Regression fixture for type-level constants in MIR->vISA translation.
+//! A `#[device]` entrypoint calls a helper generic over a
 //! const loop bound `N`, and the helper's body reads `N` as a *value* in
 //! `for b in 0..N`. That loop bound reaches MIR->vISA as a type-level constant
 //! `Const::Ty(usize, N)` (a `ConstKind::Param`), not as a concrete literal.

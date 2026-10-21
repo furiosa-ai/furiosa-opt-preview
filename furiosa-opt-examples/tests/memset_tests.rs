@@ -1,8 +1,7 @@
 //! Answer-key tests for the `memset` example kernels on the CPU backend.
 //!
 //! These pin the VISA-level *calculation*: each kernel is launched on the CPU and its readback is
-//! checked against a hand-written answer key. (VISA-vs-LIR *parity*, that device translation matches
-//! this calculation, lives in `npu-visa-test`.) Every kernel overwrites a **non-fill** input, so a
+//! checked against a hand-written answer key. Every kernel overwrites a **non-fill** input, so a
 //! readback equal to the fill value proves the fill fired (a passthrough would echo the input). The
 //! input is `m![A, B]`; the 2-cluster relayout reads it back as `m![A / 2, A % 2, B]` (`OutMap`).
 
@@ -37,7 +36,7 @@ macro_rules! whole_region_answer_test {
     };
 }
 
-// `PadValue::Zero` path (a zero fill folds to all-zero element bits).
+// Zero fill (folds to all-zero element bits).
 whole_region_answer_test!(
     test_memset_i32_zero,
     i32,
@@ -45,7 +44,7 @@ whole_region_answer_test!(
     (1..=<m![A, B]>::SIZE as i32).collect(),
     0,
 );
-// Signed `PadValue::Custom` (low byte `0xff`).
+// Signed custom fill (low byte `0xff`).
 whole_region_answer_test!(
     test_memset_i8_neg_one,
     i8,
@@ -53,7 +52,7 @@ whole_region_answer_test!(
     (0..<m![A, B]>::SIZE).map(|i| (1 + (i % 50)) as i8).collect(),
     -1,
 );
-// 2-byte `PadValue::Custom`.
+// 2-byte custom fill.
 whole_region_answer_test!(
     test_memset_i16_300,
     i16,
@@ -61,7 +60,7 @@ whole_region_answer_test!(
     (0..<m![A, B]>::SIZE).map(|i| (i % 200) as i16).collect(),
     300,
 );
-// 4-byte float `PadValue::Custom`.
+// 4-byte float custom fill.
 whole_region_answer_test!(
     test_memset_f32_one_half,
     f32,

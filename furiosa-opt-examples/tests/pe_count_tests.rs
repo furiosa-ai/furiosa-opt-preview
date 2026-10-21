@@ -1,7 +1,6 @@
 //! Value-oracle tests for the per-config `pe_count` examples: each `*_pe_add` adds 1 end to end on
 //! the VISA simulator (which honors the kernel's `#[device(chip, pe)]`), so the arithmetic is
-//! value-checked and not only cross-stage consistency-checked (as in the `npu-visa-test`
-//! `compare_edf` companions).
+//! value-checked.
 
 use furiosa_opt_examples::pe_count::{
     P1, P2, P2C, P4, P4C, P8, eight_pe_add, four_chip_add, four_pe_add, one_pe_add, two_chip_add, two_pe_add,

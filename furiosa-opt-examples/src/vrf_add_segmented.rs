@@ -1,7 +1,6 @@
 //! Segmented VRF addition running on a single PE.
 //!
-//! Same computation as `npu-opt-examples::unsupported::vrf_add` (which does not reach EDF), but with
-//! a smaller `A` and a single-cluster layout, committing the result in tiled segments.
+//! Uses a small `A` and a single-cluster layout, committing the result in tiled segments.
 
 use furiosa_opt_std::prelude::*;
 

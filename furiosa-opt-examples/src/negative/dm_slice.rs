@@ -36,7 +36,7 @@ pub fn unaligned_slice_axis_stride(
         .to_hbm(&mut device.tdma)
 }
 
-/// Uses an inner axis with ParallelCopy, which can only narrow the leading axis.
+/// Uses an inner axis with a parallel copy, which can only narrow the leading axis.
 #[device(chip = 4)]
 pub fn asymmetric_inner_axis(
     device: &mut Device,
@@ -47,7 +47,7 @@ pub fn asymmetric_inner_axis(
         .to_hbm(&mut device.tdma)
 }
 
-/// Leaves must-not-write padding below the axis narrowed by ParallelCopy.
+/// Leaves must-not-write padding below the axis narrowed by a parallel copy.
 #[device(chip = 4)]
 pub fn asymmetric_bottom_hole_tail(
     device: &mut Device,

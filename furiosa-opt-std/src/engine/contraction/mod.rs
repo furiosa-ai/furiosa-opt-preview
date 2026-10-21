@@ -113,7 +113,7 @@ pub struct ContractTimeTensor<
     /// The deferred carrier (see [`LazyContraction`]); [`lane::contract_lane`] finalizes it.
     pub(crate) inner: LazyContraction<D, B>,
     /// Pre-reduce `Time` mapping captured by `contract_time`, used by `contract_lane` to
-    /// derive the cross-stage `inner_size` accumulator-buffer bound.
+    /// derive the cross-stage accumulator-buffer bound (`inner_reduce_extent`).
     pub(crate) pre_reduce_time: Mapping,
     /// Axis typestate the stage transitions carry; `inner` is mapping-free.
     pub(crate) _axes: PhantomData<(Chip, Cluster, Slice, Lane, Time, Packet)>,

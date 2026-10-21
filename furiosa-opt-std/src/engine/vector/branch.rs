@@ -40,7 +40,7 @@ pub enum TagMode<D: VeScalar> {
     // /// Set branch id using valid count generator.
     // ValidCount,
     // /// Load execution IDs from VRF (previously stored by a Comparison pass).
-    // /// Lowers to a branch instruction with logging support, enabling cross-TuExec branch reuse.
+    // /// Lowers to a branch instruction with logging support, enabling cross-execution branch reuse.
     // Vrf,
 }
 

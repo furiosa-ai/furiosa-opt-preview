@@ -25,7 +25,7 @@ pub fn dup_two(
 type DupHbm = HbmTensor<i32, Chip, m![PA, PD]>;
 type DupDm = DmTensor<i32, Chip, Cluster, m![PA], m![PD]>;
 
-/// Single-output copy: exercises the `compare_edf!` byte-image path on a bare (non-tuple) return.
+/// Single-output copy with a bare (non-tuple) return.
 #[device(chip = 1)]
 pub fn dup_one(device: &mut Device, input: &DupHbm) -> DupHbm {
     let dm: DupDm = input.to_dm(&mut device.tdma);
@@ -91,7 +91,7 @@ pub fn spm_roundtrip(
 /// DMA-aligned round-trips only when padded to an aligned packet. Here `PC = 5` (i32 = 20 bytes)
 /// pads to `8` (32 bytes) on both the HBM and DM sides; the tail alignment pins to the Access-class
 /// packet size, so the burst strides the padded 8-cell packet instead of collapsing to the 5 live
-/// cells (20 bytes) and failing the `tail_size % min_align` check. The HBM side must declare the
+/// cells (20 bytes) and failing the tail alignment check. The HBM side must declare the
 /// padding too, because a dense `m![PA, PC]` source (DRAM stride 20) is rejected at the load.
 #[device(chip = 1)]
 pub fn padded_tail_alignment(

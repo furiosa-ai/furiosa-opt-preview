@@ -1,10 +1,10 @@
-//! ALU definitions for Renegade vector engine.
+//! ALU definitions for the RNGD vector engine.
 
 use std::fmt::{self, Display, Formatter};
 
 use furiosa_opt_macro::primitive;
 
-/// Renegade ALU units.
+/// RNGD ALU units.
 ///
 /// Each ALU can only be used once per VE configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -177,8 +177,7 @@ impl<'l, P: CanApplyCommitCast, D: MaterializableScalar, Chip: M, Cluster: M, Sl
     /// The same cast with a ReLU fused in, clamping negative values to zero.
     ///
     /// A separate method rather than an argument because the two are separate
-    /// hardware conversions (`CommitF32ToBf16` and `CommitF32ToBf16Relu`), and
-    /// ReLU has no standalone stage to select at run time.
+    /// hardware conversions, and ReLU has no standalone stage to select at run time.
     ///
     /// Available only in the main context.
     #[primitive(TuTensor::commit_cast_relu)]
@@ -202,8 +201,7 @@ impl<'l, P: CanApplyCommitValidCountPack, D: Scalar, Chip: M, Cluster: M, Slice:
     /// only). The count comes from a per-call argument; the trailing
     /// elements are discarded. The packed stream keeps the input
     /// `Time` / `Packet` shape at this skeleton stage.
-    // TODO: `_valid_count` is currently discarded. The backend
-    // `TuOperationCommitValidCountPack` record does not store it yet.
+    // TODO: `_valid_count` is currently discarded. The backend record does not store it yet.
     #[primitive(TuTensor::commit_valid_count_pack)]
     pub fn commit_valid_count_pack(
         self,

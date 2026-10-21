@@ -681,6 +681,85 @@ pub fn ve_vrf_read_many_f32(
     result.to_hbm(&mut device.tdma)
 }
 
+/// A main-context fetch-only store must reach VRF before its value is consumed.
+#[device(chip = 1)]
+pub fn ve_main_fetch_to_vrf(
+    device: &mut Device,
+    input: &HbmTensor<i32, Chip, m![A, P]>,
+    seed: &HbmTensor<i32, Chip, m![A, P]>,
+) -> HbmTensor<i32, Chip, m![A, P]> {
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2, P]>(&mut device.tdma);
+    let seed_dm = seed.to_dm::<Cluster, m![A / 2], m![A % 2, P]>(&mut device.tdma);
+
+    let stored: VrfTensor<i32, Chip, Cluster, m![A / 2], m![A % 2, P]> = device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![A % 2], m![P]>()
+        .collect::<m![A % 2], m![P]>()
+        .to_vrf(&mut device.sub);
+
+    let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2, P]> = device
+        .main
+        .begin(seed_dm.view())
+        .fetch::<m![A % 2], m![P]>()
+        .collect::<m![A % 2], m![P]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_fxp(FxpBinaryOp::AddFxp, &stored)
+        .vector_final()
+        .commit_trim::<m![P]>()
+        .commit();
+
+    result.to_hbm(&mut device.tdma)
+}
+
+/// An empty sub-context vector pass must preserve its input when committing to SRAM.
+#[device(chip = 1)]
+pub fn ve_sub_empty_pass_to_sram(
+    device: &mut Device,
+    input: &HbmTensor<i32, Chip, m![A, P]>,
+) -> HbmTensor<i32, Chip, m![A, P]> {
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2, P]>(&mut device.tdma);
+
+    let result: DmTensor<i32, Chip, Cluster, m![A / 2], m![A % 2, P]> = device
+        .sub
+        .begin(input_dm.view())
+        .fetch::<m![A % 2], m![P]>()
+        .collect::<m![A % 2], m![P]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_final()
+        .commit_trim::<m![P]>()
+        .commit();
+
+    result.to_hbm(&mut device.tdma)
+}
+
+/// Sub tile reads must keep their custom address out of the Main SFR loader.
+/// Vector arithmetic also needs Main SFRs, even though Sub fetches the data.
+#[device(chip = 1)]
+pub fn ve_sub_tile_fetch(
+    device: &mut Device,
+    input: &HbmTensor<i32, Chip, m![B, R16]>,
+) -> HbmTensor<i32, Chip, m![B, R16 = 8]> {
+    let input_dm = input.to_dm::<Cluster, m![B], m![R16]>(&mut device.tdma);
+    let view = input_dm.view().tile::<m![R16], 8, m![R16 = 8 # 16]>(8);
+
+    let result: DmTensor<i32, Chip, Cluster, m![B], m![R16 = 8]> = device
+        .sub
+        .begin(view)
+        .fetch::<m![1], m![R16 = 8]>()
+        .collect::<m![1], m![R16 = 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_fxp(FxpBinaryOp::AddFxp, 1)
+        .vector_final()
+        .commit_trim::<m![R16 = 8]>()
+        .commit();
+
+    result.to_hbm(&mut device.tdma)
+}
+
 // =============================================================================
 // Group pair operations (ve_group_pair_*)
 // =============================================================================

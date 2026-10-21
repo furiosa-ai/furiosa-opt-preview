@@ -1,5 +1,4 @@
-//! Switch Engine examples: each `#[device]` fn lowers a `SwitchConfig::CustomBroadcast`
-//! and is checked bit-exact (VISA vs LIR) in `npu-visa-test`.
+//! Switch Engine examples: each `#[device]` fn lowers a `SwitchConfig::CustomBroadcast`.
 //!
 //! Axis scoping: `Chip`/`Cluster` and the `(B, V)` time/packet axes below are shared by
 //! every example. Every other axis is declared in its own `axes!` block directly above
@@ -144,9 +143,7 @@ pub fn custom_broadcast_multi(
 // Unlike the broadcasts above (a padding slot becomes a tile, nothing moves slice to time, so
 // every output snoops a single input lane), here a live slice axis `Q` moves to output time and
 // a fresh tile `Yt` fills its slot. Each output slice then reads, over the `Q` time steps, the
-// whole `Q`-block of input lanes: a multi-bit snoop bitmap. The compare_lir test checks the
-// resulting data permutation, while the bitmap bits are pinned by the sequencer-vs-enumeration
-// cross-check in `custom_snoop_bitmap` (the LIR executor computes from shapes, not the bitmap).
+// whole `Q`-block of input lanes: a multi-bit snoop bitmap.
 axes![P = 64, Q = 4, Yt = 4];
 
 #[device(chip = 1)]
@@ -171,9 +168,7 @@ pub fn custom_broadcast_moved_axis(
 
 // ── custom_broadcast_transpose (relocation) ─────────────────────────────────────────
 // A pure slice permutation (`[Pt, Qt]` to `[Qt, Pt]`, nothing broadcast or moved to time): each
-// output snoops a single input lane, but at a relocated position. The compare_lir test checks the
-// permuted data, while the relocated base index in the bitmap is pinned by the internal
-// sequencer-vs-enumeration cross-check.
+// output snoops a single input lane, but at a relocated position.
 axes![Pt = 32, Qt = 8];
 
 #[device(chip = 1)]

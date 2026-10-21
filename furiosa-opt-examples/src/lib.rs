@@ -13,6 +13,7 @@
 pub mod bias_partition_broadcast;
 pub mod binary_add;
 pub mod chip_reduce;
+pub mod closure;
 pub mod cluster_chip_shuffle_slice;
 pub mod cluster_reduce;
 pub mod commit_view_tile;

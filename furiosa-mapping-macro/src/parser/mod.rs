@@ -95,7 +95,7 @@ impl Extent {
 pub enum PaddingKind {
     /// Accessible padding holding arbitrary values.
     Top,
-    /// Inaccessible padding. Emitted from the `m![A #{!} N]` syntax.
+    /// Readable, non-writable padding. Emitted from the `m![A #{!} N]` syntax.
     Bottom,
     /// Accessible padding masked to a known zero. Emitted from `m![A #{0} N]`.
     Zero,

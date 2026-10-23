@@ -27,8 +27,8 @@ pub enum UnreadableCause {
          regrouped, or absent from it entirely (which reads as a broadcast)"
     )]
     Unmatched,
-    /// The operand carries a `Bottom` pad, so it is not a fully written register.
-    #[error("the operand carries a write hole (`Bottom` padding), which a VE op may not read")]
+    /// The VE DSL currently rejects operands with `Bottom`, despite physical reads being allowed.
+    #[error("the VE DSL rejects operands carrying write holes (`Bottom` padding)")]
     WriteHole,
 }
 
@@ -383,8 +383,8 @@ mod tests {
         assert!(matches!(&error, VrfOperandError::PacketNotIndexable { .. }), "{error}");
     }
 
-    /// A `Bottom` pad marks a write hole, so no read of the operand is defined. Fails before any
-    /// indexer question.
+    /// The VE DSL rejects a write-hole operand before any indexer question, though `Bottom` itself is
+    /// readable.
     #[test]
     fn write_hole_operand_rejects() {
         let error = config_vrf_operand(VrfOperandInput {

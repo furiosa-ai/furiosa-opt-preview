@@ -236,7 +236,7 @@ where
 /// `KIND` selects the padding flavour at the type level. Defaults to
 /// [`PaddingKind::Top`] (arbitrary values); use [`PaddingKind::Zero`] for
 /// slots known to hold zero (e.g. produced by the Fetch Adapter's masking
-/// stage), or [`PaddingKind::Bottom`] for inaccessible regions.
+/// stage), or [`PaddingKind::Bottom`] for non-writable regions.
 #[primitive(mapping::Padding)]
 #[derive(Debug, Clone)]
 pub struct Padding<L, F, const KIND: PaddingKind = { PaddingKind::Top }> {

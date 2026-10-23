@@ -110,7 +110,7 @@ pub fn validate_index_chip(index: &Mapping, data: &Mapping) -> Result<(), IndexC
 /// One live position padded across the hardware's, or the same cell broadcast to all of them.
 /// Either way the placement names nothing of its own, so an index it holds is one list.
 pub fn holds_one_copy(placement: &Mapping) -> bool {
-    // `Top` leaves the other positions untouched; `Bottom` would mark them unreadable.
+    // `Top` leaves the other positions untouched; `Bottom` would forbid writing them.
     let one = Mapping::identity()
         .padding(placement.size(), PaddingKind::Top)
         .normalize();
@@ -119,7 +119,7 @@ pub fn holds_one_copy(placement: &Mapping) -> bool {
 
 /// Checks that an SPM indirect index resides entirely on PE 0.
 pub fn validate_spm_indirect_index(pe: &Mapping) -> Result<(), SpmIndirectIndexError> {
-    // `Top` leaves other PEs untouched; `Bottom` would mark them unreadable.
+    // `Top` leaves other PEs untouched; `Bottom` would forbid writing them.
     let pe_zero = Mapping::identity().padding(pe.size(), PaddingKind::Top).normalize();
     if pe.clone().normalize() == pe_zero {
         return Ok(());

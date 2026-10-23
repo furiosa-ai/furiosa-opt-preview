@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Changed
+
+- `PaddingKind::Bottom` (`#{!}`) padding is readable, holding arbitrary values; only writes are forbidden.
+
 ## [v0.9.0]
 
 ### Changed

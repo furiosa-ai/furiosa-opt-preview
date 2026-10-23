@@ -35,8 +35,8 @@ async fn kernel_launches_repeatedly() {
 struct FirstChip(HbmBuffer);
 
 impl DeviceSend for FirstChip {
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_>, Access)>, Error> {
-        Ok(std::iter::once((self.0.slice(0, ..)?, access)))
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_>) -> Result<(), Error> {
+        bind(self.0.slice(0, ..)?, access)
     }
 }
 

@@ -44,7 +44,7 @@ impl Function {
         bytes: &[u8],
         sram_end: usize,
         capacity: usize,
-        bind: impl for<'a> Fn(&mut dyn Iterator<Item = Argument<'a>>, &mut Arguments) -> Result<F> + Send + Sync + 'static,
+        bind: impl for<'a> Fn(&mut Supplied<'_, 'a>, &mut Arguments) -> Result<F> + Send + Sync + 'static,
     ) -> Result<Self> {
         let mut staging = device.alloc(Kind::Dram, bytes.len())?;
         device
@@ -109,20 +109,54 @@ impl Function {
     }
 
     /// Publishes before returning; dropping the observer does not cancel execution.
-    pub fn launch<'a>(&self, args: impl IntoIterator<Item = Argument<'a>>) -> Result<Launch> {
+    pub fn launch<'a>(&self, args: impl Supply<'a>) -> Result<Launch> {
         self.launch_holding(args, &[])
     }
 
     /// Also holds memory reached through operand contents until hardware completion.
     /// Each region must belong to this device and cover every chip; dropping the observer releases nothing.
-    pub fn launch_holding<'a>(
-        &self,
-        args: impl IntoIterator<Item = Argument<'a>>,
-        held: &[(BufferSlice<'a>, Access)],
-    ) -> Result<Launch> {
-        (self.launch)(&mut args.into_iter(), held, self.ordered)
+    pub fn launch_holding<'a>(&self, args: impl Supply<'a>, held: &[(BufferSlice<'a>, Access)]) -> Result<Launch> {
+        let mut args = Some(args);
+        let mut supplied = |bind: &mut dyn FnMut(Argument<'a>) -> Result<()>| {
+            args.take().expect("a launch binds its arguments once").supply(bind)
+        };
+        (self.launch)(&mut supplied, held, self.ordered)
     }
 }
+
+/// What a launch takes its arguments from, in operand order: any iterator of them, or [`Each`],
+/// whose caller hands them out one at a time and so holds no list of them.
+pub trait Supply<'a> {
+    /// Hands every argument to `bind` in order, stopping at the first it refuses.
+    fn supply(self, bind: &mut dyn FnMut(Argument<'a>) -> Result<()>) -> Result<()>;
+}
+
+impl<'a, I: IntoIterator<Item = Argument<'a>>> Supply<'a> for I {
+    fn supply(self, bind: &mut dyn FnMut(Argument<'a>) -> Result<()>) -> Result<()> {
+        self.into_iter().try_for_each(bind)
+    }
+}
+
+/// Arguments `F` hands to its callback one at a time, in operand order.
+pub struct Each<F>(F);
+
+impl<F> Each<F> {
+    pub fn new<'a>(supply: F) -> Self
+    where
+        F: FnOnce(&mut dyn FnMut(Argument<'a>) -> Result<()>) -> Result<()>,
+    {
+        Self(supply)
+    }
+}
+
+impl<'a, F: FnOnce(&mut dyn FnMut(Argument<'a>) -> Result<()>) -> Result<()>> Supply<'a> for Each<F> {
+    fn supply(self, bind: &mut dyn FnMut(Argument<'a>) -> Result<()>) -> Result<()> {
+        (self.0)(bind)
+    }
+}
+
+/// One launch's arguments for a binder: called once, it hands each to its callback in operand order.
+pub type Supplied<'s, 'a> = dyn FnMut(&mut dyn FnMut(Argument<'a>) -> Result<()>) -> Result<()> + 's;
 
 /// One submitted launch of a [`Function`], resolving to the outcome of its hardware and epilogue.
 /// Dropping it cancels nothing.
@@ -254,9 +288,8 @@ impl Launched {
     }
 }
 
-type Callable = dyn for<'a> Fn(&mut dyn Iterator<Item = Argument<'a>>, &[(BufferSlice<'a>, Access)], bool) -> Result<Launch>
-    + Send
-    + Sync;
+type Callable =
+    dyn for<'a> Fn(&mut Supplied<'_, 'a>, &[(BufferSlice<'a>, Access)], bool) -> Result<Launch> + Send + Sync;
 
 trait Completion: Send + Sync {
     /// Collects the launches the hardware finished and runs their epilogues; true when none of
@@ -605,8 +638,7 @@ mod tests {
         for count in [1, furiosa_opt_ipc::MAX_LAUNCH_ARGS + 1] {
             let device = Arc::new(crate::test::with(&[0], 1, Vec::new(), 1 << 16));
             let function = crate::test::create(&device, count, |args, bound| {
-                args.enumerate()
-                    .try_for_each(|(index, argument)| bound.bind(index, argument))?;
+                crate::test::in_order(args, bound)?;
                 Ok(std::future::ready(Ok(())))
             });
             let input = device.alloc(Kind::Dram, 1).unwrap();
@@ -638,8 +670,7 @@ mod tests {
                 crate::arch::rngd::sram::WINDOW.start as usize,
                 8,
                 |args, bound| {
-                    args.enumerate()
-                        .try_for_each(|(index, argument)| bound.bind(index, argument))?;
+                    crate::test::in_order(args, bound)?;
                     Ok(std::future::ready(Ok(())))
                 },
             )
@@ -1373,9 +1404,7 @@ mod tests {
     fn binds_one_operand_per_storage() {
         let device = Arc::new(crate::test::device(&[0, 1], 8));
         let function = create(&device, 1, |args, bound| {
-            for argument in args {
-                bound.bind(0, argument)?;
-            }
+            args(&mut |argument| bound.bind(0, argument))?;
             Ok(std::future::ready(Ok(())))
         });
         let buffer = device.alloc(Kind::Dram, 512).unwrap();
@@ -1437,11 +1466,14 @@ mod tests {
 
     fn controlled(device: &Arc<Device>, ready: [Arc<AtomicBool>; 2], completed: Arc<AtomicUsize>) -> Function {
         create(device, 0, move |args, _| {
-            let index = match args.next() {
-                Some(Argument::Value(index)) => index as usize,
-                None => 0,
+            let mut index = 0;
+            args(&mut |argument| match argument {
+                Argument::Value(value) => {
+                    index = value as usize;
+                    Ok(())
+                }
                 _ => panic!("call index"),
-            };
+            })?;
             Ok(Work::new(&ready[index], &completed))
         })
     }
@@ -1460,8 +1492,7 @@ mod tests {
             let function = {
                 let (ready, completed, weak) = (Arc::clone(&ready), Arc::clone(&completed), weak.clone());
                 create(&device, 1, move |args, bound| {
-                    args.enumerate()
-                        .try_for_each(|(index, argument)| bound.bind(index, argument))?;
+                    crate::test::in_order(args, bound)?;
                     let (work, device) = (Work::new(&ready, &completed), weak.upgrade());
                     Ok(async move {
                         assert!(!failed, "hardware failure must skip the epilogue");
@@ -1510,8 +1541,7 @@ mod tests {
     fn isolates_epilogue_failure() {
         let device = Arc::new(crate::test::device(&[0], 1));
         let bad = create(&device, 0, |args, bound| {
-            args.enumerate()
-                .try_for_each(|(index, argument)| bound.bind(index, argument))?;
+            crate::test::in_order(args, bound)?;
             Ok(std::future::ready(Err(Error::Invalid("decode".into()))))
         });
         let good = function(&device);

@@ -2,7 +2,6 @@
 
 #![expect(incomplete_features)]
 #![feature(adt_const_params)]
-#![feature(array_try_from_fn)]
 #![feature(float_erf)]
 #![feature(inherent_associated_types)]
 #![feature(impl_trait_in_assoc_type)]
@@ -137,7 +136,7 @@ pub mod prelude {
     pub use super::engine::vector::{alu::*, branch::*, layer::*, op::*, operand::*, scalar::*, stage, tensor::*};
     pub use super::engine::*;
     pub use super::runtime::{
-        Access, Chips, CurrentBackend, Device, DeviceError, DeviceFn, DeviceSend, HbmBuffer, HbmBufferSlice,
+        Access, Bind, Chips, CurrentBackend, Device, DeviceError, DeviceFn, DeviceSend, HbmBuffer, HbmBufferSlice,
         HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Kernel, Loadable, Placement, ToPlacements,
         Topology, launch,
     };

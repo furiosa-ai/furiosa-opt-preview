@@ -16,16 +16,20 @@ pub use furiosa_opt_rt::Access;
 /// derived structs of them. `&T` binds read access; `&mut T` and an owned value bind the access
 /// they are given, so a launch passes [`Access::Write`] and only `&` lowers it.
 pub trait DeviceSend<B: Runtime = CurrentBackend> {
-    /// This value's device memory in declaration order, each slice on every chip of its buffer,
-    /// with `access` where `Self` permits writing and read access elsewhere. Fails on a
-    /// `DmTensor` that holds no resident SRAM.
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error>;
+    /// Hands `bind` this value's device memory in declaration order, each slice on every chip of
+    /// its buffer, with `access` where `Self` permits writing and read access elsewhere. Fails on
+    /// a `DmTensor` that holds no resident SRAM, and stops at the first slice `bind` refuses.
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error>;
 
     /// Prepares indirect memory that binding needs from `device`.
     fn prepare(&self, _device: &B::Device) -> Result<(), Error> {
         Ok(())
     }
 }
+
+/// What a value's device memory goes to, one slice at a time: a callback, so a nested value names
+/// no iterator type of its own and binding holds no list of its slices.
+pub type Bind<'a, 'b, B = CurrentBackend> = dyn FnMut(HbmBufferSlice<'a, B>, Access) -> Result<(), Error> + 'b;
 
 /// A device function's return value: `()`, an [`HbmTensor`], or a tuple of them.
 pub trait DeviceOutput<B: Runtime = CurrentBackend>: DeviceSend<B> + sealed::Sealed {
@@ -76,82 +80,84 @@ impl_device_output_tuple!(
     T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, T22, T23
 );
 
-/// The memory a launch takes, `args`' then `output`'s, with the access each permits; a device binds
-/// every chip of it, so an argument that names only some chips of its buffer is [`Error::Invalid`].
+/// Hands `bind` the memory a launch takes, `args`' then `output`'s, with the access each permits;
+/// a device binds every chip of it, so an argument that names only some chips of its buffer is
+/// [`Error::Invalid`].
 pub(crate) fn launch_memory<'a, B: Backend>(
     args: &'a impl DeviceSend<B>,
     output: &'a impl DeviceOutput<B>,
-) -> Result<impl Iterator<Item = (HbmBufferSlice<'a, B>, Access)>, Error> {
-    let memory = || Ok::<_, Error>(args.arguments(Access::Write)?.chain(output.arguments(Access::Write)?));
-    if memory()?.any(|(slice, _)| slice.region.chips != Region::whole(slice.buffer).chips) {
-        return Err(Error::Invalid("a launch argument spans every chip of its buffer"));
-    }
-    memory()
+    bind: &mut Bind<'a, '_, B>,
+) -> Result<(), Error> {
+    let mut whole = |slice: HbmBufferSlice<'a, B>, access| {
+        if slice.region.chips != Region::whole(slice.buffer).chips {
+            return Err(Error::Invalid("a launch argument spans every chip of its buffer"));
+        }
+        bind(slice, access)
+    };
+    args.arguments(Access::Write, &mut whole)?;
+    output.arguments(Access::Write, &mut whole)
 }
 
 impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend<B> for HbmTensor<D, Chip, Element, B> {
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(std::iter::once((self.memory(), access)))
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        bind(self.memory(), access)
     }
 }
 
 impl<D: RuntimeScalar, B: Backend> DeviceSend<B> for HbmScalar<D, B> {
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(std::iter::once((self.memory(), access)))
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        bind(self.memory(), access)
     }
 }
 
 impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DeviceSend<B>
     for DmTensor<D, Chip, Cluster, Slice, Element, B>
 {
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(std::iter::once((
-            HbmBufferSlice::whole(self.owner().ok_or(Error::Unplaced)?),
-            access,
-        )))
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        bind(HbmBufferSlice::whole(self.owner().ok_or(Error::Unplaced)?), access)
     }
 }
 
 /// A shared view only reads, whatever access it is given.
 impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend<B> for HbmTensorView<'_, D, Chip, Element, B, AllChips> {
-    fn arguments(&self, _: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(std::iter::once((self.memory(), Access::Read)))
+    fn arguments<'a>(&'a self, _: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        bind(self.memory(), Access::Read)
     }
 }
 
 impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend<B> for HbmTensorViewMut<'_, D, Chip, Element, B, AllChips> {
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(std::iter::once((self.memory(), access)))
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        bind(self.memory(), access)
     }
 }
 
 impl<B: Backend> DeviceSend<B> for () {
-    fn arguments(&self, _: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(std::iter::empty())
+    fn arguments<'a>(&'a self, _: Access, _: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        Ok(())
     }
 }
 
 impl<T, B: Backend> DeviceSend<B> for std::marker::PhantomData<T> {
-    fn arguments(&self, _: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(std::iter::empty())
+    fn arguments<'a>(&'a self, _: Access, _: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        Ok(())
     }
 }
 
 impl<B: Backend> DeviceSend<B> for Device<B> {
-    fn arguments(&self, _: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(std::iter::empty())
+    fn arguments<'a>(&'a self, _: Access, _: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        Ok(())
     }
 }
 
 impl<const T: Tu, B: Backend> DeviceSend<B> for TuContext<T> {
-    fn arguments(&self, _: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(std::iter::empty())
+    fn arguments<'a>(&'a self, _: Access, _: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        Ok(())
     }
 }
 
 impl<const DMA: Dma, B: Backend> DeviceSend<B> for DmaContext<DMA, B> {
-    fn arguments(&self, _: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(std::iter::empty())
+    fn arguments<'a>(&'a self, _: Access, _: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        Ok(())
     }
 }
 
@@ -161,8 +167,8 @@ impl<B: Backend, T: ?Sized + DeviceSend<B>> DeviceSend<B> for &T {
         T::prepare(self, device)
     }
 
-    fn arguments(&self, _: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        T::arguments(self, Access::Read)
+    fn arguments<'a>(&'a self, _: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        T::arguments(self, Access::Read, bind)
     }
 }
 
@@ -171,8 +177,8 @@ impl<B: Backend, T: ?Sized + DeviceSend<B>> DeviceSend<B> for &mut T {
         T::prepare(self, device)
     }
 
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        T::arguments(self, access)
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        T::arguments(self, access, bind)
     }
 }
 
@@ -181,12 +187,8 @@ impl<B: Backend, T: DeviceSend<B>, const N: usize> DeviceSend<B> for [T; N] {
         self.iter().try_for_each(|value| value.prepare(device))
     }
 
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
-        Ok(
-            std::array::try_from_fn::<_, N, _>(|index| self[index].arguments(access))?
-                .into_iter()
-                .flatten(),
-        )
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
+        self.iter().try_for_each(|value| value.arguments(access, bind))
     }
 }
 
@@ -201,10 +203,11 @@ macro_rules! impl_device_send_tuple {
                 Ok(())
             }
 
-            fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
+            fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
                 let ($head, $($value,)*) = self;
-                $head.arguments(access)
-                    $(.and_then(|args| $value.arguments(access).map(|next| args.chain(next))))*
+                $head.arguments(access, bind)?;
+                $($value.arguments(access, bind)?;)*
+                Ok(())
             }
         }
         impl_device_send_tuple!($($ty:$value),*);
@@ -225,8 +228,8 @@ mod tests {
     struct Value(HbmBuffer);
 
     impl DeviceSend for Value {
-        fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_>, Access)>, Error> {
-            Ok(std::iter::once((self.0.slice(.., ..)?, access)))
+        fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_>) -> Result<(), Error> {
+            bind(self.0.slice(.., ..)?, access)
         }
     }
 
@@ -239,11 +242,13 @@ mod tests {
         let (shared, mut exclusive, owned, mut last) = (value(), value(), value(), value());
         let mut nested = &mut exclusive;
         let arguments = (&shared, &mut nested, owned, &&mut last);
-        let writes: Vec<_> = arguments
-            .arguments(Access::Write)
-            .unwrap()
-            .map(|(_, access)| access == Access::Write)
-            .collect();
+        let mut writes = Vec::new();
+        arguments
+            .arguments(Access::Write, &mut |_, access| {
+                writes.push(access == Access::Write);
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(writes, [false, true, true, false]);
     }
 }

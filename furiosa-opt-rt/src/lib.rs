@@ -14,7 +14,7 @@ pub mod registry;
 
 pub use buffer::{Access, Buffer, BufferSlice, BufferSliceMut, Lease};
 pub use device::{Clock, ClockReading, Device};
-pub use function::{Argument, Arguments, Epilogue, Function, Launch};
+pub use function::{Argument, Arguments, Each, Epilogue, Function, Launch, Supplied, Supply};
 pub use pinned::{HostBufferSlice, HostBufferSliceMut, Pinned};
 pub use placement::{Placement, ToPlacements, Topology};
 
@@ -82,7 +82,7 @@ mod test {
     use crate::buffer::Allocations;
     use crate::driver::dma::{DmaQueue, Transport, fake::Fake};
     use crate::pinned::Registration;
-    use crate::{Argument, Arguments, Device, Function, Pinned};
+    use crate::{Arguments, Device, Function, Pinned};
 
     thread_local! {
         static ALLOCATIONS: Cell<Option<usize>> = const { Cell::new(None) };
@@ -113,10 +113,7 @@ mod test {
     pub(crate) fn create<F: Future<Output = crate::Result<()>> + Send + 'static>(
         device: &Arc<Device>,
         capacity: usize,
-        bind: impl for<'a> Fn(&mut dyn Iterator<Item = Argument<'a>>, &mut Arguments) -> crate::Result<F>
-        + Send
-        + Sync
-        + 'static,
+        bind: impl for<'a> Fn(&mut crate::Supplied<'_, 'a>, &mut Arguments) -> crate::Result<F> + Send + Sync + 'static,
     ) -> Function {
         // SAFETY: stub executables do not access memory; these callbacks only exercise runtime ownership.
         let load = unsafe {
@@ -137,9 +134,18 @@ mod test {
     /// [`create`] with eight operands, bound in argument order, and no epilogue.
     pub(crate) fn function(device: &Arc<Device>) -> Function {
         create(device, 8, |args, bound| {
-            args.enumerate()
-                .try_for_each(|(index, argument)| bound.bind(index, argument))?;
+            in_order(args, bound)?;
             Ok(std::future::ready(Ok(())))
+        })
+    }
+
+    /// Binds a launch's arguments to operands 0, 1, ... in the order they come.
+    pub(crate) fn in_order(args: &mut crate::Supplied<'_, '_>, bound: &mut Arguments) -> crate::Result<()> {
+        let mut index = 0;
+        args(&mut |argument| {
+            bound.bind(index, argument)?;
+            index += 1;
+            Ok(())
         })
     }
 

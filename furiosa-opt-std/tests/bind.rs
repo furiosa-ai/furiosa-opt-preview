@@ -20,11 +20,8 @@ fn without_allocations<T>(run: impl FnOnce() -> T) -> T {
 struct Value(Option<HbmBuffer>);
 
 impl DeviceSend for Value {
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_>, Access)>, Error> {
-        Ok(std::iter::once((
-            self.0.as_ref().ok_or(Error::Unplaced)?.slice(.., ..)?,
-            access,
-        )))
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_>) -> Result<(), Error> {
+        bind(self.0.as_ref().ok_or(Error::Unplaced)?.slice(.., ..)?, access)
     }
 }
 
@@ -55,13 +52,21 @@ fn binding_preserves_order_without_allocating() {
         marker: PhantomData,
     };
     let taken = std::mem::replace(&mut state.entries.0[500], Value(None));
-    assert!(matches!(state.arguments(Access::Read), Err(Error::Unplaced)));
+    assert!(matches!(
+        state.arguments(Access::Read, &mut |_, _| Ok(())),
+        Err(Error::Unplaced)
+    ));
     state.entries.0[500] = taken;
     let bound = without_allocations(|| {
-        let arguments = state.arguments(Access::Write).unwrap().enumerate();
-        arguments
-            .filter(|(index, (memory, _))| memory.size() == index + 1)
-            .count()
+        let (mut index, mut matching) = (0, 0);
+        state
+            .arguments(Access::Write, &mut |memory, _| {
+                index += 1;
+                matching += usize::from(memory.size() == index);
+                Ok(())
+            })
+            .unwrap();
+        matching
     });
     assert_eq!(bound, 1026);
 }

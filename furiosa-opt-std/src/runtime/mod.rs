@@ -7,7 +7,7 @@ mod launch;
 mod transfer;
 
 pub(crate) use bind::launch_memory;
-pub use bind::{Access, DeviceOutput, DeviceSend};
+pub use bind::{Access, Bind, DeviceOutput, DeviceSend};
 pub(crate) use buffer::Region;
 pub use buffer::{
     Chips, HbmBuffer, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Memory,

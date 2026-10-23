@@ -1,7 +1,7 @@
 use super::{HbmBuffer, HbmBufferSlice, HbmBufferSliceMut, HostBufferSlice};
 use crate::Error;
 use crate::backend::{Allocation, Backend};
-use crate::runtime::{Access, DeviceSend};
+use crate::runtime::{Access, Bind, DeviceSend};
 
 impl<B: Backend> DeviceSend<B> for HbmBuffer<B> {
     fn prepare(&self, device: &B::Device) -> Result<(), Error> {
@@ -32,16 +32,16 @@ impl<B: Backend> DeviceSend<B> for HbmBuffer<B> {
         Ok(())
     }
 
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
         let table = self.1.get().ok_or(Error::Invalid(
             "a buffer's address table must be prepared before binding",
         ))?;
-        Ok(std::iter::once((
+        bind(
             HbmBufferSlice {
                 behind: std::slice::from_ref(&self.0),
                 ..HbmBufferSlice::whole(table)
             },
             access,
-        )))
+        )
     }
 }

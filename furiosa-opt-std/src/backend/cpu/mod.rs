@@ -122,16 +122,14 @@ impl Runtime for Cpu {
             args.prepare(device.pdma.device())?;
             output.prepare(device.pdma.device())?;
             let allocations = &device.pdma.device().allocations;
-            let uses = launch_memory(&args, output)?
-                .flat_map(|(slice, access)| {
-                    std::iter::once((slice.buffer, slice.region, access)).chain(
-                        slice
-                            .behind
-                            .iter()
-                            .map(move |buffer| (buffer, HbmBufferSlice::<Self>::whole(buffer).region, access)),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let mut uses = Vec::new();
+            launch_memory(&args, output, &mut |slice, access| {
+                uses.push((slice.buffer, slice.region, access));
+                for buffer in slice.behind {
+                    uses.push((buffer, HbmBufferSlice::<Self>::whole(buffer).region, access));
+                }
+                Ok(())
+            })?;
             for (memory, _, _) in &uses {
                 memory.check_device(allocations)?;
             }
@@ -140,7 +138,16 @@ impl Runtime for Cpu {
                     .filter_map(|(memory, region, access)| Some((memory.placed(region)?, *access))),
             )?;
             let returned = body(device, args);
-            for ((to, _), (from, _)) in output.arguments(Access::Write)?.zip(returned.arguments(Access::Read)?) {
+            let (mut targets, mut sources) = (Vec::new(), Vec::new());
+            output.arguments(Access::Write, &mut |slice, _| {
+                targets.push(slice);
+                Ok(())
+            })?;
+            returned.arguments(Access::Read, &mut |slice, _| {
+                sources.push(slice);
+                Ok(())
+            })?;
+            for (to, from) in targets.into_iter().zip(sources) {
                 to.buffer.store(&to.region, &from.buffer.load(&from.region));
             }
             Ok(None)

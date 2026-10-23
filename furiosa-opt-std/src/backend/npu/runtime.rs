@@ -94,26 +94,43 @@ impl Runtime for Npu {
             let function = registry::function(device.pdma.device(), kernel)?;
             args.prepare(device.pdma.device())?;
             output.prepare(device.pdma.device())?;
-            // Each tensor's memory binds as a view of its bytes on every chip.
-            let arguments = launch_memory(&args, output)?.map(|(memory, access)| {
-                let view = memory
-                    .buffer
-                    .slice(memory.region.bytes)
-                    .expect("a slice lies inside its buffer");
-                match access {
-                    Access::Read => rt::Argument::Read(view),
-                    Access::Write => rt::Argument::Write(view),
+            // Memory reached through an operand's contents; most launches have none, so this holds nothing.
+            let mut held = Vec::new();
+            launch_memory(&args, output, &mut |slice, access| {
+                for buffer in slice.behind {
+                    held.push((buffer.slice(..)?, access));
                 }
-            });
-            let held = launch_memory(&args, output)?
-                .flat_map(|(slice, access)| {
-                    slice
-                        .behind
-                        .iter()
-                        .map(move |buffer| buffer.slice(..).map(|view| (view, access)))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Some(function.launch_holding(arguments, &held)?))
+                Ok(())
+            })?;
+            // A refusal of ours leaves the runtime's binding as a placeholder and is reported as ours.
+            let mut refused = None;
+            // Each tensor's memory binds as a view of its bytes on every chip, one at a time.
+            let launched = function.launch_holding(
+                rt::Each::new(|bind| {
+                    launch_memory(&args, output, &mut |memory, access| {
+                        let view = memory
+                            .buffer
+                            .slice(memory.region.bytes)
+                            .expect("a slice lies inside its buffer");
+                        Ok(bind(match access {
+                            Access::Read => rt::Argument::Read(view),
+                            Access::Write => rt::Argument::Write(view),
+                        })?)
+                    })
+                    .map_err(|error| match error {
+                        Error::Device(error) => error,
+                        error => {
+                            refused = Some(error);
+                            rt::Error::Invalid(String::new())
+                        }
+                    })
+                }),
+                &held,
+            );
+            match refused {
+                Some(error) => Err(error),
+                None => Ok(Some(launched?)),
+            }
         })())
     }
 }

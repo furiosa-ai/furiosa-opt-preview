@@ -103,7 +103,7 @@ struct Binder {
 }
 
 impl Binder {
-    fn bind(&self, args: &mut dyn Iterator<Item = Argument<'_>>, arguments: &mut Arguments) -> Result<Report> {
+    fn bind(&self, args: &mut crate::Supplied<'_, '_>, arguments: &mut Arguments) -> Result<Report> {
         // Stacks are read operands so concurrent calls share them; lir_to_rlir drains every DRAM
         // reuse sync target before a later launch can reuse their bytes.
         let stacks = (operand::STACKS..).zip(&self.stacks);
@@ -125,12 +125,12 @@ struct Signature {
 }
 
 impl Signature {
-    fn bind(&self, supplied: &mut dyn Iterator<Item = Argument<'_>>, arguments: &mut Arguments) -> Result<()> {
+    fn bind(&self, supplied: &mut crate::Supplied<'_, '_>, arguments: &mut Arguments) -> Result<()> {
         let mut bindings = self
             .inputs
             .iter()
             .chain(self.outputs.iter().filter(|slot| !self.inputs.contains(slot)));
-        for argument in supplied {
+        supplied(&mut |argument| {
             let &index = bindings
                 .next()
                 .ok_or_else(|| Error::Invalid("the supplied args exceed the image signature".into()))?;
@@ -169,7 +169,8 @@ impl Signature {
                 Argument::Read(view)
             };
             arguments.bind(operand::SLOTS + index as usize, argument)?;
-        }
+            Ok(())
+        })?;
         if bindings.next().is_some() {
             return Err(Error::Invalid(
                 "the supplied args are fewer than the image signature".into(),

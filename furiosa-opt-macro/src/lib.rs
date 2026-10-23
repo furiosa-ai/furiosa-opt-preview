@@ -186,20 +186,13 @@ pub fn device_send(input: TokenStream) -> TokenStream {
             }
 
             #[allow(unused_variables)]
-            fn arguments(
-                &self,
+            fn arguments<'__a>(
+                &'__a self,
                 access: ::furiosa_opt_std::runtime::Access,
-            ) -> ::core::result::Result<
-                impl ::core::iter::Iterator<
-                    Item = (
-                        ::furiosa_opt_std::runtime::HbmBufferSlice<'_>,
-                        ::furiosa_opt_std::runtime::Access
-                    ),
-                >,
-                ::furiosa_opt_std::Error,
-            > {
-                ::core::result::Result::Ok(::core::iter::empty()
-                    #(.chain(::furiosa_opt_std::runtime::DeviceSend::arguments(&self.#accessors, access)?))*)
+                bind: &mut ::furiosa_opt_std::runtime::Bind<'__a, '_>,
+            ) -> ::core::result::Result<(), ::furiosa_opt_std::Error> {
+                #(::furiosa_opt_std::runtime::DeviceSend::arguments(&self.#accessors, access, bind)?;)*
+                ::core::result::Result::Ok(())
             }
         }
     }

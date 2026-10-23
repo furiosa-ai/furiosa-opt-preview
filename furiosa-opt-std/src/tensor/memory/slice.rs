@@ -8,7 +8,7 @@ use super::HbmTensor;
 use crate::Error;
 use crate::backend::{Allocation, Backend};
 use crate::context::{Dma, DmaContext};
-use crate::runtime::{Access, DeviceSend, HbmBufferSlice, HbmBufferSliceMut, HostBufferSlice};
+use crate::runtime::{Access, Bind, DeviceSend, HbmBufferSlice, HbmBufferSliceMut, HostBufferSlice};
 use crate::scalar::{MaterializableScalar, Scalar};
 use furiosa_opt_macro::primitive;
 
@@ -161,7 +161,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend<B> for Slice<HbmTens
         Ok(())
     }
 
-    fn arguments(&self, access: Access) -> Result<impl Iterator<Item = (HbmBufferSlice<'_, B>, Access)>, Error> {
+    fn arguments<'a>(&'a self, access: Access, bind: &mut Bind<'a, '_, B>) -> Result<(), Error> {
         let table = self
             .table
             .get()
@@ -169,13 +169,13 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> DeviceSend<B> for Slice<HbmTens
             .ok_or(Error::Invalid(
                 "a slice's address table must be prepared before binding",
             ))?;
-        Ok(std::iter::once((
+        bind(
             HbmBufferSlice {
                 behind: &table.behind,
                 ..HbmBufferSlice::whole(&table.buffer)
             },
             access,
-        )))
+        )
     }
 }
 
@@ -460,14 +460,24 @@ mod tests {
         use crate::prelude::*;
 
         let values = Slice::<HbmTensor<i32, m![1], m![1], Cpu>>::from(Vec::new());
-        assert!(matches!(values.arguments(Access::Write), Err(Error::Invalid(_))));
+        assert!(matches!(
+            values.arguments(Access::Write, &mut |_, _| Ok(())),
+            Err(Error::Invalid(_))
+        ));
         let device = Device::<Cpu>::new(Topology { chips: 1, pes: 1 }).unwrap();
         values.prepare(device.pdma.device()).unwrap();
-        let first = values.arguments(Access::Write).unwrap().next().unwrap().0.buffer.addr();
+        let table = || {
+            let mut addr = None;
+            values
+                .arguments(Access::Write, &mut |slice, _| {
+                    addr.get_or_insert(slice.buffer.addr());
+                    Ok(())
+                })
+                .unwrap();
+            addr.unwrap()
+        };
+        let first = table();
         values.prepare(device.pdma.device()).unwrap();
-        assert_eq!(
-            values.arguments(Access::Write).unwrap().next().unwrap().0.buffer.addr(),
-            first
-        );
+        assert_eq!(table(), first);
     }
 }

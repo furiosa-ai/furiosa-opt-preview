@@ -22,6 +22,9 @@ How entries are written:
 - An `#[unroll]` loop over an empty constant range expands to nothing, as the same loop without
   `#[unroll]` does; it was rejected before.
 - Large kernels compile in less time, and the compiled images are byte-identical.
+- A kernel's PCIe DMA copy that waits for a free DMA channel starts as soon as one frees, while
+  the kernel keeps running; it started only when the kernel next waited for a copy, usually at its
+  first reader.
 - A multi-chip or multi-cluster kernel waits less around a transfer. A transfer's publication
   (data sync, returning syncs, cluster sync) moves from right after the transfer toward the first
   use of its result, also when a loop carries the result to the next trip; a remote write's
@@ -83,6 +86,18 @@ How entries are written:
   launch. Instantiations whose axes differ in type but not in size are separate kernels: load each.
 - `chip_tile` on an HBM view returns `HbmTensorView<.., SomeChips>` (or the `Mut` form): device DMA
   takes it, and a launch refuses it at compile time, since a launch binds every chip of an argument.
+- `to_hbm_view` and `hbm_chip_shuffle` with `&mut device.pdma` send the parts of the transfer that
+  cross chips by PCIe DMA; the engine was ignored and every part went by tensor DMA.
+- A PCIe DMA copy publishes at the first use of its result, as a tensor DMA does, so independent
+  work issues while the copy runs; the in-order command processor waited out the copy right after
+  issuing it.
+- A cross-chip tensor DMA issues while a PCIe DMA copy of other data runs; it waited for the copy to
+  finish.
+- A PCIe DMA transfer that also copies within a chip, such as a gather that includes each chip's
+  own part, copies that part by tensor DMA before the PCIe copy; written after it, the part waited
+  for the whole copy.
+- A kernel whose PCIe DMA copy is first read after a runtime guard or loop compiles; it stopped with
+  an internal compiler error (`called Option::unwrap() on a None value`).
 
 ### Added
 

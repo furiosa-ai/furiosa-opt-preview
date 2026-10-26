@@ -1,19 +1,111 @@
-use std::ops::Range;
-use std::sync::Arc;
+//! Owned device regions and borrowed read/write views.
 
-use crate::device::ChipRank;
+use std::ops::{Bound, RangeBounds};
+use std::sync::{Arc, Mutex};
 
+pub(crate) mod access;
 mod allocator;
-use crate::image::Memory;
-pub use allocator::AllocError;
-pub(crate) use allocator::{Allocations, Reservation};
+pub use access::Lease;
+pub(crate) use access::{Active, Admission, Owner, Region, Waiters};
+pub use allocator::Allocator;
+pub(crate) use allocator::{Ranges, Reservation};
 
-/// A range of one device allocation. Clones and slices share the allocation, which is released
-/// when the last of them drops.
+use crate::memory::Kind;
+use crate::{Error, Result, Topology};
+
+/// Owns one byte range at the same offset on every chip. Splitting transfers disjoint ownership
+/// without copying data.
 pub struct Buffer {
     offset: usize,
     len: usize,
     allocation: Arc<Allocation>,
+}
+
+impl Buffer {
+    /// Borrows `bytes` of the range on every chip; [`Error::Invalid`] outside the buffer.
+    pub fn slice(&self, bytes: impl RangeBounds<usize>) -> Result<BufferSlice<'_>> {
+        let (offset, len) = bounds(bytes, self.len)?;
+        Ok(BufferSlice {
+            buffer: self,
+            offset,
+            len,
+            chips: ((1u16 << self.topology().chips) - 1) as u8,
+        })
+    }
+
+    /// Exclusively borrows `bytes` of the range on every chip; [`Error::Invalid`] outside the buffer.
+    pub fn slice_mut(&mut self, bytes: impl RangeBounds<usize>) -> Result<BufferSliceMut<'_>> {
+        self.slice(bytes).map(BufferSliceMut)
+    }
+
+    /// Divides the buffer into the owners of the bytes before and from `offset`.
+    pub fn split_at(mut self, offset: usize) -> Result<(Self, Self)> {
+        bounds(offset.., self.len)?;
+        let tail = Self {
+            offset: self.offset + offset,
+            len: self.len - offset,
+            allocation: Arc::clone(&self.allocation),
+        };
+        self.len = offset;
+        Ok((self, tail))
+    }
+
+    /// Another owner of `bytes` of this buffer's range on every chip, sharing its allocation. A
+    /// launch or transfer that conflicts with another through either owner is
+    /// [`crate::Error::Busy`].
+    pub fn alias(&self, bytes: impl RangeBounds<usize>) -> Result<Self> {
+        Ok(self.slice(bytes)?.retain())
+    }
+
+    /// Whether `allocations` placed this buffer; a device refuses any other as
+    /// [`Error::ForeignBuffer`].
+    pub fn belongs_to(&self, allocator: &Arc<Allocator>) -> bool {
+        Arc::ptr_eq(&self.allocation.allocator, allocator)
+    }
+
+    /// The memory kind the buffer was allocated from.
+    pub fn kind(&self) -> Kind {
+        self.allocation.kind
+    }
+
+    /// The chips the buffer spans, one range on each.
+    pub fn topology(&self) -> Topology {
+        self.allocation.allocator.topology()
+    }
+
+    /// Bytes the buffer owns on each chip.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Where the buffer starts on each chip: an offset into the chip's DRAM, or the address device
+    /// code reads SRAM at.
+    pub fn addr(&self) -> usize {
+        let base = match self.kind() {
+            Kind::Dram | Kind::DramShared => 0,
+            Kind::Sram => self.allocation.allocator.sram_base(),
+        };
+        base + self.allocation.at + self.offset
+    }
+
+    /// The number of the allocation the buffer is part of among its device's: bytes at an address
+    /// a dropped allocation used belong to a later number.
+    pub(crate) fn generation(&self) -> u64 {
+        self.allocation.generation
+    }
+
+    /// The operand word device code addresses the buffer by, on a chip whose DRAM its clusters
+    /// see at `window`.
+    pub(crate) fn operand(&self, window: u64) -> u64 {
+        match self.kind() {
+            Kind::Dram | Kind::DramShared => window + self.addr() as u64,
+            Kind::Sram => self.addr() as u64,
+        }
+    }
 }
 
 impl std::fmt::Debug for Buffer {
@@ -26,105 +118,150 @@ impl std::fmt::Debug for Buffer {
     }
 }
 
-impl Buffer {
-    pub fn memory(&self) -> Memory {
-        self.allocation.memory
+/// A shared device borrow of the same bytes on each selected chip.
+#[derive(Clone, Copy, Debug)]
+pub struct BufferSlice<'a> {
+    buffer: &'a Buffer,
+    offset: usize,
+    len: usize,
+    chips: u8,
+}
+
+impl<'a> BufferSlice<'a> {
+    /// The `bytes` of this view on the same chips; [`Error::Invalid`] outside the view.
+    pub fn slice(mut self, bytes: impl RangeBounds<usize>) -> Result<Self> {
+        let (offset, len) = bounds(bytes, self.len)?;
+        self.offset += offset;
+        self.len = len;
+        Ok(self)
     }
 
-    /// The bytes `range` of this buffer on every device, as a buffer of its own sharing the
-    /// allocation. Panics past the end, as slicing does.
-    pub fn slice(&self, range: Range<usize>) -> Self {
-        assert!(
-            range.start <= range.end && range.end <= self.len,
-            "buffer range {range:?} is outside 0..{}",
-            self.len
-        );
-        Self {
-            offset: self.offset + range.start,
-            len: range.end - range.start,
-            allocation: Arc::clone(&self.allocation),
-        }
+    /// The view on chip `chip` alone; [`Error::Invalid`] unless the view selects it.
+    pub fn on(mut self, chip: usize) -> Result<Self> {
+        self.chips = u32::try_from(chip)
+            .ok()
+            .and_then(|chip| 1u8.checked_shl(chip))
+            .filter(|bit| self.chips & bit != 0)
+            .ok_or_else(|| Error::Invalid(format!("chip {chip} is not among the view's chips")))?;
+        Ok(self)
     }
 
-    /// This buffer as it is on the chip ranked `rank` in its device: one buffer's worth of bytes,
-    /// for a transfer.
-    pub fn on(&self, rank: ChipRank) -> View {
-        View {
-            buffer: self.clone(),
-            chip: Some(rank),
-        }
+    /// The view on each selected chip alone, in rank order.
+    pub fn chips(self) -> impl Iterator<Item = Self> {
+        (0..usize::from(self.buffer.topology().chips)).filter_map(move |chip| self.on(chip).ok())
     }
 
-    /// This buffer as it is on every chip, in chip order, for a transfer: the host side holds
-    /// one buffer's worth per chip.
-    pub fn on_all(&self) -> View {
-        View {
-            buffer: self.clone(),
-            chip: None,
-        }
-    }
-
-    pub(crate) fn belongs_to(&self, allocations: &Arc<Allocations>) -> bool {
-        Arc::ptr_eq(&self.allocation.allocations, allocations)
-    }
-
-    pub fn addr(&self) -> usize {
-        match self.memory() {
-            Memory::Dram => self.allocation.at + self.offset,
-            Memory::Sram => furiosa_opt_abi::dm::virtual_addr(self.allocation.at as u64) as usize + self.offset,
-        }
-    }
-
-    pub(crate) fn bind(&self, window: u64) -> u64 {
-        match self.memory() {
-            Memory::Dram => window + self.addr() as u64,
-            Memory::Sram => self.addr() as u64,
-        }
-    }
-
-    pub fn size(&self) -> usize {
+    /// Bytes the view covers on each selected chip.
+    pub fn len(&self) -> usize {
         self.len
     }
 
-    pub(crate) fn same_base(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.allocation, &other.allocation) && self.offset == other.offset
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
-    pub(crate) fn overlaps(&self, len: usize, other: &Self, other_len: usize) -> bool {
-        Arc::ptr_eq(&self.allocation, &other.allocation)
-            && len != 0
-            && other_len != 0
-            && self.offset < other.offset + other_len
-            && other.offset < self.offset + len
+    /// Where the view starts on each chip, as [`Buffer::addr`] counts.
+    pub fn addr(&self) -> usize {
+        self.buffer.addr() + self.offset
     }
-}
 
-impl Clone for Buffer {
-    fn clone(&self) -> Self {
-        Self {
-            offset: self.offset,
+    /// The memory kind of the buffer the view borrows.
+    pub fn kind(&self) -> Kind {
+        self.buffer.kind()
+    }
+
+    /// The buffer the view borrows.
+    pub(crate) fn buffer(&self) -> &'a Buffer {
+        self.buffer
+    }
+
+    /// The chips the view selects, one bit per rank.
+    pub(crate) fn chip_mask(&self) -> u8 {
+        self.chips
+    }
+
+    /// The view on the chips of `chips`, one bit per rank, which the buffer must span.
+    pub(crate) fn selecting(mut self, chips: u8) -> Self {
+        self.chips = chips;
+        self
+    }
+
+    /// Compares allocation, starting offset, and selected chips; extents may differ.
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.buffer.allocation, &other.buffer.allocation)
+            && self.addr() == other.addr()
+            && self.chips == other.chips
+    }
+
+    pub(crate) fn retain(&self) -> Buffer {
+        Buffer {
+            offset: self.buffer.offset + self.offset,
             len: self.len,
-            allocation: Arc::clone(&self.allocation),
+            allocation: Arc::clone(&self.buffer.allocation),
         }
     }
 }
 
-/// One side of a transfer: a buffer's bytes on one chip, or on every chip in chip order.
-#[derive(Clone, Debug)]
-pub struct View {
-    pub(crate) buffer: Buffer,
-    pub(crate) chip: Option<ChipRank>,
+/// An exclusive device borrow of the same bytes on each selected chip.
+#[derive(Debug)]
+pub struct BufferSliceMut<'a>(pub(crate) BufferSlice<'a>);
+
+impl<'a> BufferSliceMut<'a> {
+    /// The `bytes` of this view on the same chips; [`Error::Invalid`] outside the view.
+    pub fn slice(self, bytes: impl RangeBounds<usize>) -> Result<Self> {
+        self.0.slice(bytes).map(Self)
+    }
+
+    /// The view on chip `chip` alone; [`Error::Invalid`] unless the view selects it.
+    pub fn on(self, chip: usize) -> Result<Self> {
+        self.0.on(chip).map(Self)
+    }
+
+    /// The view on each selected chip alone, in rank order.
+    pub fn chips(self) -> impl Iterator<Item = Self> {
+        self.0.chips().map(Self)
+    }
+}
+
+/// Whether device work may write memory or only read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// The operation only reads the memory.
+    Read,
+    /// The operation may write the memory.
+    Write,
+}
+
+fn bounds(bytes: impl RangeBounds<usize>, size: usize) -> Result<(usize, usize)> {
+    let start = match bytes.start_bound() {
+        Bound::Unbounded => Some(0),
+        Bound::Included(&value) => Some(value),
+        Bound::Excluded(&value) => value.checked_add(1),
+    };
+    let end = match bytes.end_bound() {
+        Bound::Unbounded => Some(size),
+        Bound::Excluded(&value) => Some(value),
+        Bound::Included(&value) => value.checked_add(1),
+    };
+    match (start, end) {
+        (Some(start), Some(end)) if start <= end && end <= size => Ok((start, end - start)),
+        _ => Err(Error::Invalid("buffer range is outside its owner".into())),
+    }
 }
 
 struct Allocation {
     at: usize,
-    memory: Memory,
-    allocations: Arc<Allocations>,
+    /// This allocation's number among its device's, which tells it from another at the same
+    /// address.
+    generation: u64,
+    kind: Kind,
+    allocator: Arc<Allocator>,
+    active: Mutex<access::Active>,
 }
 
 impl Drop for Allocation {
     fn drop(&mut self) {
-        self.allocations.release(self.memory, self.at);
+        self.allocator.release(self.kind, self.at);
     }
 }
 
@@ -132,61 +269,26 @@ impl Drop for Allocation {
 mod tests {
     use super::*;
 
+    /// Slices, splits and chip selections stay inside their buffer.
     #[test]
-    fn slice_outlives_parent() {
-        let allocations = Arc::new(Allocations::new(0..512));
-        let buffer = allocations.alloc(Memory::Dram, 256).expect("buffer");
-        let tail = buffer.slice(128..256);
-
-        drop(buffer);
-        let next = allocations.alloc(Memory::Dram, 256).expect("next buffer");
-
-        assert_eq!((tail.addr(), tail.size()), (128, 128));
-        assert_ne!(next.addr(), tail.addr() - 128);
-    }
-
-    #[test]
-    fn slice_rejects_ranges_past_the_buffer() {
-        let allocations = Arc::new(Allocations::new(0..512));
-        let buffer = allocations.alloc(Memory::Dram, 256).expect("buffer");
-
-        assert!(std::panic::catch_unwind(|| buffer.slice(0..257)).is_err());
-    }
-
-    #[test]
-    fn identifies_allocator_provenance() {
-        let allocations = Arc::new(Allocations::new(0..256));
-        let foreign = Arc::new(Allocations::new(0..256));
-        let buffer = allocations.alloc(Memory::Dram, 1).expect("buffer");
-
-        assert!(buffer.belongs_to(&allocations));
-        assert!(!buffer.belongs_to(&foreign));
-    }
-
-    #[test]
-    fn resident_releases_allocation() {
-        let allocations = Arc::new(Allocations::new(0..256));
-        let resident = allocations.alloc(Memory::Sram, 1).unwrap();
-        let address = resident.addr();
-        assert_eq!(resident.memory(), Memory::Sram);
-        assert!(resident.belongs_to(&allocations));
-        drop(resident);
-        assert_eq!(allocations.alloc(Memory::Sram, 1).unwrap().addr(), address);
-    }
-
-    #[test]
-    fn resolves_each_memory() {
-        let allocations = Arc::new(Allocations::new(256..512));
-        let dram = allocations.alloc(Memory::Dram, 128).unwrap().slice(16..32);
-        let sram = allocations.alloc(Memory::Sram, 128).unwrap().slice(16..32);
-        for window in [0, 4096] {
-            assert_eq!(dram.bind(window), window + 272);
-            assert_eq!(sram.bind(window), sram.addr() as u64);
-        }
-        drop(sram);
-        let top = allocations.alloc(Memory::Sram, 256).unwrap();
-        let end = top.slice(256..256);
-        assert_eq!(end.addr(), top.addr() + 256);
-        assert_eq!(end.size(), 0);
+    fn slices_stay_inside_their_buffer() {
+        let outside = Some(Error::Invalid("buffer range is outside its owner".into()));
+        let allocator = crate::test::allocator(0..1024, 1024);
+        let buffer = allocator.alloc(Kind::Dram, 256).unwrap();
+        assert_eq!(buffer.slice(0..257).err(), outside);
+        assert_eq!(buffer.slice((Bound::Included(1), Bound::Excluded(0))).err(), outside);
+        assert_eq!(buffer.slice(..=usize::MAX).err(), outside);
+        let start = buffer.addr();
+        let left = buffer.slice(..128).unwrap();
+        assert_eq!((left.addr(), left.len()), (start, 128));
+        assert_eq!(left.slice(127..129).err(), outside);
+        assert_eq!(left.slice(128..).unwrap().len(), 0);
+        assert_eq!(
+            buffer.slice(..).unwrap().on(1).err(),
+            Some(Error::Invalid("chip 1 is not among the view's chips".into()))
+        );
+        let (head, tail) = buffer.split_at(128).unwrap();
+        assert_eq!((tail.addr(), tail.len()), (head.addr() + 128, 128));
+        assert_eq!(tail.split_at(129).err(), outside);
     }
 }

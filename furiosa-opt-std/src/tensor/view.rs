@@ -4,7 +4,7 @@ use furiosa_mapping::*;
 use furiosa_opt_lower::{PadInput, TileInput, TileMappingInput, config_pad, config_tile, tile_mapping};
 
 use super::Tensor;
-use crate::backend::Backend;
+use crate::backend::{Backend, internal};
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 
@@ -37,73 +37,163 @@ fn assert_valid_derivation<E2: M>() {
     E2::to_value();
 }
 
-/// Mutable view into a tensor. Borrows the concrete storage of some base tensor; the element
-/// mapping `Mapping` is the view's *current* logical layout (changed by [`Self::tile`]), tracked
-/// at the view's `_marker` (the borrowed `B::Storage<D>` is mapping-agnostic after the storage-layer
-/// mapping erasure, so retiling is a plain rewrap of the same borrow, no cast).
-pub struct TensorViewMut<'l, D: Scalar, Mapping: M, B: Backend = CurrentBackend> {
-    inner: &'l mut B::Storage<D>,
+/// Which cells of a base tensor a view covers, without the base's cells: an offset into the base,
+/// with the view's own mapping `E` at the type level. A [`View`] pairs it with the cells; an HBM
+/// view applies it to the bytes it loads from device memory with [`Self::over`].
+#[derive(Debug, Clone)]
+pub(crate) struct Window<E: M> {
     offset: Index,
-    // The base tensor's live-axis mapping, set at construction and left untouched by `tile` (which
-    // only narrows the `Mapping` type param). A tile records its axis in `offset` as a live `Symbol`
-    // but represents it in `Mapping` as padding; `base_map` keeps the axis live so a partial-view
-    // relayout can resolve the offset's physical wire base against the real layout (see
-    // [`crate::backend::Backend::transpose`]).
-    base_map: furiosa_mapping::Mapping,
-    _marker: PhantomData<(Mapping, B)>,
+    // The base tensor's live-axis mapping, set at construction and left untouched by `retile` (which
+    // only narrows `E`). A tile records its axis in `offset` as a live `Symbol` but represents it in
+    // `E` as padding; `base_map` keeps the axis live so a partial-view relayout can resolve the
+    // offset's physical wire base against the real layout (see [`Backend::transpose`]).
+    base_map: Mapping,
+    _marker: PhantomData<E>,
 }
 
-impl<'l, D: Scalar, Mapping: M, B: Backend> std::fmt::Debug for TensorViewMut<'l, D, Mapping, B>
-where
-    B::Storage<D>: std::fmt::Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TensorViewMut")
-            .field("inner", &self.inner)
-            .field("offset", &self.offset)
-            .finish()
-    }
-}
-
-/// Immutable view into a tensor.
-pub struct TensorView<'l, D: Scalar, Mapping: M, B: Backend = CurrentBackend> {
-    inner: &'l B::Storage<D>,
-    offset: Index,
-    /// The base tensor's live-axis mapping (see [`TensorViewMut::base_map`]).
-    base_map: furiosa_mapping::Mapping,
-    _marker: PhantomData<(Mapping, B)>,
-}
-
-impl<'l, D: Scalar, Mapping: M, B: Backend> std::fmt::Debug for TensorView<'l, D, Mapping, B>
-where
-    B::Storage<D>: std::fmt::Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TensorView")
-            .field("inner", &self.inner)
-            .field("offset", &self.offset)
-            .finish()
-    }
-}
-
-impl<'l, D: Scalar, Mapping: M, B: Backend> Clone for TensorView<'l, D, Mapping, B> {
-    fn clone(&self) -> Self {
+impl<E: M> Window<E> {
+    /// Every cell of a base tensor laid out as `E`.
+    pub(crate) fn new() -> Self {
         Self {
-            inner: self.inner,
-            offset: self.offset.clone(),
-            base_map: self.base_map.clone(),
+            offset: Index::new(),
+            base_map: E::to_value(),
             _marker: PhantomData,
+        }
+    }
+
+    /// The window with `I` fixed at `start`, declared as `E2`; a start on padding panics, and `kind`
+    /// says which padding a tile leaves around itself. `E2` is trusted, as
+    /// [`TensorViewMut::retile`] describes.
+    /// Panics if the window of `len` positions starting at `start` exceeds `I`'s extent.
+    pub(crate) fn retile<I: M, E2: M>(self, start: usize, len: usize, kind: PaddingKind) -> Window<E2> {
+        assert!(
+            start.checked_add(len).is_some_and(|end| end <= I::SIZE),
+            "tile window exceeds index extent: start {start}, length {len}, extent {}",
+            I::SIZE,
+        );
+        let mut offset = self.offset;
+        offset
+            .add_mapping::<I>(start, kind)
+            .unwrap_or_else(|kind| panic!("tile start maps to {kind:?} padding"));
+        Window {
+            offset,
+            base_map: self.base_map,
+            _marker: PhantomData,
+        }
+    }
+
+    /// The same cells declared as `E2`, which the caller states moves no cell.
+    pub(crate) fn redeclare<E2: M>(self) -> Window<E2> {
+        Window {
+            offset: self.offset,
+            base_map: self.base_map,
+            _marker: PhantomData,
+        }
+    }
+
+    /// A whole view adopts the new axes; a partial view retains its owner's coordinates.
+    pub(crate) fn reshape<E2: M>(self) -> Window<E2> {
+        let base_map = if self.offset.0.is_empty() && self.base_map == E::to_value() {
+            E2::to_value()
+        } else {
+            self.base_map
+        };
+        Window {
+            offset: self.offset,
+            base_map,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Element position where this window starts in the base tensor's wire layout, 0 for an untiled
+    /// view. Walks the base mapping, so it is computed on demand rather than carried.
+    pub(crate) fn window_base(&self) -> usize {
+        crate::storage::window_base(&self.base_map, &self.offset)
+    }
+
+    /// Element count of the base tensor.
+    pub(crate) fn base_len(&self) -> usize {
+        self.base_map.size()
+    }
+
+    /// This window's cells of `base`, the storage of the tensor the window was taken from.
+    pub(crate) fn over<'b, D: Scalar, B: Backend>(&self, base: &'b B::Storage<D>) -> TensorView<'b, D, E, B> {
+        TensorView {
+            inner: base,
+            window: self.clone(),
+            marker: PhantomData,
+        }
+    }
+
+    /// [`Self::over`], to write.
+    pub(crate) fn over_mut<'b, D: Scalar, B: Backend>(
+        &self,
+        base: &'b mut B::Storage<D>,
+    ) -> TensorViewMut<'b, D, E, B> {
+        TensorViewMut {
+            inner: base,
+            window: self.clone(),
+            marker: PhantomData,
         }
     }
 }
 
-impl<'l, D: Scalar, Mapping: M, B: Backend> From<TensorViewMut<'l, D, Mapping, B>> for TensorView<'l, D, Mapping, B> {
-    fn from(view: TensorViewMut<'l, D, Mapping, B>) -> Self {
+/// The cells of a base tensor a view covers: `inner` is where the base tensor's cells are, and
+/// `window` which of them the view covers, in the view's current logical layout `E` (changed by
+/// tiling). `S` is the only thing the kinds of view differ in:
+/// - [`TensorView`] / [`TensorViewMut`]: the base tensor's host storage, which the view reads and
+///   writes directly.
+/// - an HBM view's device memory, whose cells a device function reads only through the backend.
+pub struct View<'l, D: Scalar, E: M, B: Backend, S> {
+    pub(crate) inner: S,
+    pub(crate) window: Window<E>,
+    pub(crate) marker: PhantomData<fn() -> (&'l (), D, B)>,
+}
+
+/// Mutable view into a tensor's host storage. Borrows the concrete storage of some base tensor
+/// (mapping-agnostic after the storage-layer mapping erasure, so retiling is a plain rewrap of the
+/// same borrow, no cast).
+pub type TensorViewMut<'l, D, E, B = CurrentBackend> = View<'l, D, E, B, &'l mut <B as internal::Backend>::Storage<D>>;
+
+impl<'l, D: Scalar, E: M, B: Backend, S: std::fmt::Debug> std::fmt::Debug for View<'l, D, E, B, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("View")
+            .field("inner", &self.inner)
+            .field("offset", &self.window.offset)
+            .finish()
+    }
+}
+
+/// Immutable view into a tensor's host storage; see [`TensorViewMut`].
+pub type TensorView<'l, D, E, B = CurrentBackend> = View<'l, D, E, B, &'l <B as internal::Backend>::Storage<D>>;
+
+impl<'l, D: Scalar, E: M, B: Backend, S> View<'l, D, E, B, S> {
+    /// Every cell of the base tensor `inner` holds.
+    pub(crate) fn whole(inner: S) -> Self {
+        Self {
+            inner,
+            window: Window::new(),
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<'l, D: Scalar, E: M, B: Backend, S: Clone> Clone for View<'l, D, E, B, S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            window: self.window.clone(),
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<'l, D: Scalar, E: M, B: Backend> From<TensorViewMut<'l, D, E, B>> for TensorView<'l, D, E, B> {
+    fn from(view: TensorViewMut<'l, D, E, B>) -> Self {
         Self {
             inner: view.inner,
-            offset: view.offset,
-            base_map: view.base_map,
-            _marker: PhantomData,
+            window: view.window,
+            marker: PhantomData,
         }
     }
 }
@@ -112,9 +202,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
     pub(crate) fn reborrow(&mut self) -> TensorViewMut<'_, D, E, B> {
         TensorViewMut {
             inner: &mut *self.inner,
-            offset: self.offset.clone(),
-            base_map: self.base_map.clone(),
-            _marker: PhantomData,
+            window: self.window.clone(),
+            marker: PhantomData,
         }
     }
 
@@ -122,9 +211,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
     pub(crate) fn new(inner: &'l mut B::Storage<D>) -> Self {
         Self {
             inner,
-            offset: Index::new(),
-            base_map: E::to_value(),
-            _marker: PhantomData,
+            window: Window::new(),
+            marker: PhantomData,
         }
     }
 
@@ -163,38 +251,25 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
     /// The rewrap half of [`Self::tile`], for a caller that has already checked the split. A
     /// `DmTensorView` checks the one axis class its tile retargets, which its combined `E` cannot state.
     ///
-    /// `E2` is trusted, not verified: only `I`'s position is checked against `E` (via `offset`), and
-    /// `E2` itself is recorded solely at `_marker`, with no comparison to `E` or `base_map`. Passing an
-    /// `E2` that is not actually `E` with `I` fixed at `start` (byte-for-byte, including every other
-    /// axis's stride) compiles and does not panic; it silently reads or writes the wrong addresses.
-    /// Only pass an `E2` derived from the caller's *own* `E` by construction (see [`Tiled`], or a type
-    /// checked the way [`Self::tile`] checks `E2` with [`config_tile`]) -- never a type merely declared
-    /// to have the right shape.
-    /// Panics if the window of `len` positions starting at `start` exceeds `I`'s extent.
+    /// `E2` is trusted, not verified: only `I`'s position is checked against `E` (via the offset), and
+    /// `E2` itself is recorded solely at the type level, with no comparison to `E` or the base mapping.
+    /// Passing an `E2` that is not actually `E` with `I` fixed at `start` (byte-for-byte, including
+    /// every other axis's stride) compiles and does not panic; it silently reads or writes the wrong
+    /// addresses. Only pass an `E2` derived from the caller's *own* `E` by construction (see
+    /// [`Tiled`], or a type checked the way [`Self::tile`] checks `E2` with [`config_tile`]) -- never a
+    /// type merely declared to have the right shape.
     pub(crate) fn retile<I: M, E2: M>(self, start: usize, len: usize) -> TensorViewMut<'l, D, E2, B> {
-        assert!(
-            start.checked_add(len).is_some_and(|end| end <= I::SIZE),
-            "tile window exceeds index extent: start {start}, length {len}, extent {}",
-            I::SIZE,
-        );
-        let mut offset = self.offset;
-        offset
-            .add_mapping::<I>(start, PaddingKind::Bottom)
-            .unwrap_or_else(|kind| panic!("tile start maps to {kind:?} padding"));
-        // Retiling is a plain rewrap (see `base_map`'s doc): same-type inner borrow, new mapping `E2`
-        // recorded only at `_marker`, `base_map` left as the base tensor's live-axis mapping.
         TensorViewMut {
             inner: self.inner,
-            offset,
-            base_map: self.base_map,
-            _marker: PhantomData,
+            window: self.window.retile::<I, E2>(start, len, PaddingKind::Bottom),
+            marker: PhantomData,
         }
     }
 
     /// Reshapes the view to a different mapping `E2` over the same borrow, consuming `self`. A reshape
     /// is a MOVE: a rewrap of the same mapping-agnostic storage borrow (no data copied, no second
-    /// handle), only the type-level mapping at `_marker` changes. Unlike [`Self::tile`] it neither
-    /// shifts `offset` nor validates a division; `offset` and `base_map` ride through unchanged.
+    /// handle), only the type-level mapping changes. Unlike [`Self::tile`] it neither shifts the
+    /// offset nor validates a division; the window rides through unchanged.
     /// Sound on every backend, whose storage is mapping-agnostic (bare buffer / codegen relabel).
     ///
     /// # Safety
@@ -202,9 +277,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
     /// `E::SIZE == E2::SIZE` is asserted below; the genuine precondition is that `E` and `E2` lay the
     /// elements out in the SAME physical (wire) order, so the relabel moves no data. Axis regrouping
     /// (merge/split) preserves wire order and is valid; a permutation is not (use [`Self::transpose`]).
-    /// `base_map` is left at the base tensor's live-axis mapping, so on a tiled (non-empty `offset`)
-    /// view the relabel must preserve which axes are live for a later partial-view relayout to
-    /// resolve.
+    /// The base mapping stays the base tensor's live-axis mapping, so on a tiled view the relabel must
+    /// preserve which axes are live for a later partial-view relayout to resolve.
     ///
     /// Kept a *runtime* `assert_eq!`, not a `const` block: every
     /// `{Dm,Hbm}TensorView(Mut)::reshape` delegates its `Element`-inclusive combined mapping here (see
@@ -214,43 +288,26 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
         assert_eq!(E::SIZE, E2::SIZE);
         TensorViewMut {
             inner: self.inner,
-            offset: self.offset,
-            base_map: self.base_map,
-            _marker: PhantomData,
+            window: self.window.reshape(),
+            marker: PhantomData,
         }
-    }
-
-    /// See [`TensorView::window_base`].
-    pub(crate) fn window_base(&self) -> usize {
-        crate::storage::window_base(&self.base_map, &self.offset)
-    }
-
-    /// See [`TensorView::base_len`].
-    pub(crate) fn base_len(&self) -> usize {
-        self.base_map.size()
     }
 
     /// Reads the mutable view without consuming it.
     pub(crate) fn read(&self) -> Tensor<D, E, B> {
-        TensorView {
-            inner: &*self.inner,
-            offset: self.offset.clone(),
-            base_map: self.base_map.clone(),
-            _marker: PhantomData,
-        }
-        .read()
+        self.window.over::<D, B>(&*self.inner).read()
     }
 
     /// Transposes from a tensor. Delegates to [`Backend::transpose`], passing both storages and their
-    /// live-axis maps (`base_map`) so a partial-view relayout can resolve each offset's wire base.
+    /// live-axis maps so a partial-view relayout can resolve each offset's wire base.
     pub fn transpose<'lsrc, Src: M>(&mut self, src: TensorView<'lsrc, D, Src, B>, allow_broadcast: bool) {
         B::transpose::<D, Src, E>(
             self.inner,
             src.inner,
-            &src.offset,
-            &self.offset,
-            &src.base_map,
-            &self.base_map,
+            &src.window.offset,
+            &self.window.offset,
+            &src.window.base_map,
+            &self.window.base_map,
             allow_broadcast,
         );
     }
@@ -291,54 +348,36 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
     /// The rewrap half of [`Self::tile`], for a caller that has already checked the split. See
     /// [`TensorViewMut::retile`] -- same trust, same silent-misaddress risk if `E2` is not truly `E`
     /// with `I` fixed at `start`.
-    /// Panics if the window of `len` positions starting at `start` exceeds `I`'s extent.
     pub(crate) fn retile<I: M, E2: M>(&self, start: usize, len: usize) -> TensorView<'l, D, E2, B> {
-        assert!(
-            start.checked_add(len).is_some_and(|end| end <= I::SIZE),
-            "tile window exceeds index extent: start {start}, length {len}, extent {}",
-            I::SIZE,
-        );
-        let mut offset = self.offset.clone();
-        offset
-            .add_mapping::<I>(start, PaddingKind::Top)
-            .unwrap_or_else(|kind| panic!("tile start maps to {kind:?} padding"));
-        // Retiling is a plain rewrap (see `base_map`'s doc): same-type inner borrow, new mapping `E2`
-        // recorded only at `_marker`, `base_map` left as the base tensor's live-axis mapping.
         TensorView {
             inner: self.inner,
-            offset,
-            base_map: self.base_map.clone(),
-            _marker: PhantomData,
+            window: self.window.clone().retile::<I, E2>(start, len, PaddingKind::Top),
+            marker: PhantomData,
         }
     }
 
     /// Creates a view at one position of each independent axis.
-    pub(crate) fn retile_axes<E2: M>(
-        &self,
-        axes: &[furiosa_mapping::Mapping],
-        starts: &[usize],
-    ) -> TensorView<'l, D, E2, B> {
+    pub(crate) fn retile_axes<E2: M>(&self, axes: &[Mapping], starts: &[usize]) -> TensorView<'l, D, E2, B> {
         assert_eq!(axes.len(), starts.len());
-        let mut offset = self.offset.clone();
+        let mut window = self.window.clone().redeclare::<E2>();
         for (axis, &start) in axes.iter().zip(starts) {
             match axis.index(start) {
-                Cell::Index(index) => offset.add(index),
+                Cell::Index(index) => window.offset.add(index),
                 Cell::Padding(kind) => panic!("tile start maps to {kind:?} padding"),
                 Cell::OutOfBounds => panic!("tile start maps out of bounds"),
             }
         }
         TensorView {
             inner: self.inner,
-            offset,
-            base_map: self.base_map.clone(),
-            _marker: PhantomData,
+            window,
+            marker: PhantomData,
         }
     }
 
     /// Reshapes the view to a different mapping `E2` over the same borrow, consuming `self`. A reshape
     /// is a MOVE: a rewrap of the same mapping-agnostic storage borrow (no data copied, no second
-    /// handle), only the type-level mapping at `_marker` changes. Unlike [`Self::tile`] it neither
-    /// shifts `offset` nor validates a division; `offset` and `base_map` ride through unchanged.
+    /// handle), only the type-level mapping changes. Unlike [`Self::tile`] it neither shifts the
+    /// offset nor validates a division; the window rides through unchanged.
     /// Sound on every backend, whose storage is mapping-agnostic (bare buffer / codegen relabel).
     ///
     /// # Safety
@@ -346,9 +385,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
     /// `E::SIZE == E2::SIZE` is asserted below; the genuine precondition is that `E` and `E2` lay the
     /// elements out in the SAME physical (wire) order, so the relabel moves no data. Axis regrouping
     /// (merge/split) preserves wire order and is valid; a permutation is not (use `transpose`).
-    /// `base_map` is left at the base tensor's live-axis mapping, so on a tiled (non-empty `offset`)
-    /// view the relabel must preserve which axes are live for a later partial-view relayout to
-    /// resolve.
+    /// The base mapping stays the base tensor's live-axis mapping, so on a tiled view the relabel must
+    /// preserve which axes are live for a later partial-view relayout to resolve.
     ///
     /// Kept a *runtime* `assert_eq!`, not a `const` block: every
     /// `{Dm,Hbm}TensorView(Mut)::reshape` delegates its `Element`-inclusive combined mapping here (see
@@ -358,9 +396,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
         assert_eq!(E::SIZE, E2::SIZE);
         TensorView {
             inner: self.inner,
-            offset: self.offset,
-            base_map: self.base_map,
-            _marker: PhantomData,
+            window: self.window.reshape(),
+            marker: PhantomData,
         }
     }
 
@@ -402,23 +439,9 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
     pub(crate) fn redeclare<E2: M>(self) -> TensorView<'l, D, E2, B> {
         TensorView {
             inner: self.inner,
-            offset: self.offset,
-            base_map: self.base_map,
-            _marker: PhantomData,
+            window: self.window.redeclare(),
+            marker: PhantomData,
         }
-    }
-}
-
-impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
-    /// Element position where this view's window starts in the base tensor's wire layout, 0 for an
-    /// untiled view. Walks the base mapping, so it is computed on demand rather than carried.
-    pub(crate) fn window_base(&self) -> usize {
-        crate::storage::window_base(&self.base_map, &self.offset)
-    }
-
-    /// Element count of the base tensor this view borrows.
-    pub(crate) fn base_len(&self) -> usize {
-        self.base_map.size()
     }
 
     /// Reads the tensor view into a new tensor. Delegates to [`Backend::transpose`], so the read is a
@@ -427,16 +450,13 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
         result.view_mut().transpose(self, false);
         result
     }
-}
 
-impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
     /// Creates a new tensor view.
     pub(crate) fn new(inner: &'l B::Storage<D>) -> Self {
         Self {
             inner,
-            offset: Index::new(),
-            base_map: E::to_value(),
-            _marker: PhantomData,
+            window: Window::new(),
+            marker: PhantomData,
         }
     }
 }

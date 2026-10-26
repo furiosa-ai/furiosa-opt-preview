@@ -86,7 +86,7 @@
 //! }
 //! #
 //! # fn main() -> Result<(), Error> {
-//! # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
+//! # let mut device: Device = Device::new(Topology { chips: 1, pes: 8 })?;
 //! # let input: BeginTensor<'_, _, i32, m![1], m![1 # 2], m![1 # 128], m![1], m![B]> =
 //! #     BeginTensor::new(&mut device.sub, Tensor::zero());
 //! # let _ = relabel(store(input));

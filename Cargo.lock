@@ -189,15 +189,6 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "bincode"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
@@ -272,7 +263,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cargo-furiosa-opt"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 
 [[package]]
 name = "cast"
@@ -336,7 +327,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
 dependencies = [
  "clap_builder",
- "clap_derive",
 ]
 
 [[package]]
@@ -345,22 +335,8 @@ version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "714a53001bf66416adb0e2ef5ac857140e7dc3a0c48fb28b2f10762fc4b5069f"
 dependencies = [
- "anstream",
  "anstyle",
  "clap_lex",
- "strsim",
-]
-
-[[package]]
-name = "clap_derive"
-version = "4.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ce8604710f6733aa641a2b3731eaa1e8b3d9973d5e3565da11800813f997a9"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -612,7 +588,7 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "furiosa-mapping"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
  "abi_stable",
  "eyre",
@@ -623,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-mapping-macro"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
  "lalrpop",
  "lalrpop-util",
@@ -634,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-mapping-types"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
  "abi_stable",
  "furiosa-mapping-macro",
@@ -648,15 +624,16 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-abi"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
- "bincode 2.0.1",
+ "bincode",
  "thiserror",
+ "zerocopy",
 ]
 
 [[package]]
 name = "furiosa-opt-common-ir"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
  "furiosa-opt-macro",
  "serde",
@@ -666,14 +643,17 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-examples"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
  "criterion",
  "env_logger",
  "eyre",
+ "furiosa-opt-ipc",
  "furiosa-opt-std",
+ "futures-executor",
  "rand",
  "safetensors",
+ "stats_alloc",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -681,9 +661,9 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-ipc"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
- "bincode 2.0.1",
+ "bincode",
  "bytemuck",
  "furiosa-opt-abi",
  "thiserror",
@@ -691,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-lower"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
  "abi_stable",
  "furiosa-mapping",
@@ -701,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-lower-types"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
  "abi_stable",
  "furiosa-mapping-types",
@@ -711,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-macro"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -720,44 +700,47 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-rt"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
+ "arrayvec",
  "bytemuck",
- "clap",
  "dma-heap",
- "env_logger",
  "furiosa-opt-abi",
  "furiosa-opt-ipc",
  "io-uring",
  "log",
  "memmap2",
  "nix",
+ "smallvec",
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "furiosa-opt-std"
-version = "0.9.0+gd158c6d3"
+version = "0.9.0+g37e4164b"
 dependencies = [
  "abi_stable",
  "arrayvec",
- "bincode 1.3.3",
  "cfg-if",
  "furiosa-mapping",
+ "furiosa-opt-abi",
  "furiosa-opt-common-ir",
  "furiosa-opt-lower",
  "furiosa-opt-macro",
  "furiosa-opt-rt",
+ "futures-executor",
  "half",
- "log",
  "ndarray",
  "num-traits",
  "rand",
  "rayon",
  "safetensors",
  "smart-default",
+ "stats_alloc",
  "thiserror",
  "tokio",
  "tracing",
@@ -768,6 +751,17 @@ name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+
+[[package]]
+name = "futures-executor"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "futures-util",
+]
 
 [[package]]
 name = "futures-task"
@@ -845,12 +839,6 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
-
-[[package]]
-name = "heck"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "indenter"
@@ -1629,6 +1617,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "stats_alloc"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
+
+[[package]]
 name = "string_cache"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1639,12 +1633,6 @@ dependencies = [
  "phf_shared",
  "precomputed-hash",
 ]
-
-[[package]]
-name = "strsim"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "syn"

@@ -1,46 +1,63 @@
 # furiosa-opt-rt
 
-Runs device functions on a device from the host. A `Device` opens the chips, a
-`Function` is a device function loaded on it from its image, a `Launch` runs it on buffers. Why it is built the way it is: [DESIGN.md](DESIGN.md).
-What each type does: `cargo doc -p furiosa-opt-rt --open`.
+Runs compiled `#[device]` functions on Furiosa NPUs.
+`furiosa-opt-std` calls it for you; use it directly to drive images from your own host code.
 
-```
-furiosa-opt-rt/
-├── src/        host library and the `furiosa-opt-rt` CLI
-├── abi/        what compiler, host, bootloader and firmware agree on (no_std)
-├── ipc/        the host ↔ firmware wire (no_std)
-├── bootloader/ source of the bootloader accepted by secure boot
-└── prebuilt/   the signed bootloader and vendor-built firmware images embedded by the crate
-```
+```rust,no_run
+use furiosa_opt_rt::{Argument, Device, Pinned, Result, Topology, memory::Kind, registry};
+use std::sync::Arc;
 
-## Build
-
-The public checkout and packaged crate embed both images from `prebuilt/`; building the host
-runtime needs no device cross-compiler.
-
-```bash
-cargo build -p furiosa-opt-rt --release
+async fn run(entry: &registry::Entry) -> Result<()> {
+    let device = Arc::new(Device::new(Topology { chips: 1, pes: 8 })?);
+    let mut buffer = device.alloc(Kind::Dram, 4096)?;
+    let mut host = Pinned::zeroed(4096)?;
+    device.write([(host.slice(..), buffer.slice_mut(..)?)]).await?;
+    // SAFETY: the entry holds the compiler's image of its function.
+    let function = unsafe { registry::load(entry, &device, None) }.await?;
+    function.launch([Argument::from(buffer.slice_mut(..)?)])?.await?;
+    device.read([(buffer.slice(..)?, host.slice_mut(..))]).await
+}
 ```
 
-## Run
+## Guarantees
 
-```bash
-target/release/furiosa-opt-rt function.bin --input a.bin --output c.bin
-```
+- **Submitted work runs to completion.** Dropping or forgetting the future of a launch or a transfer
+  cancels nothing; its memory stays held until the device answers.
+- **Conflicting work waits or is refused, never races.** A launch that needs bytes other work holds
+  fails with `Error::Busy`; a transfer waits for the work admitted before it on its bytes. A launch
+  is admitted when it is called, a transfer when it is first polled. Launches on one device run in
+  submission order.
+- **A device failure is sticky.** Once submitted work fails on the device, the device refuses all
+  later work with that error, and every allocation the failed work could have written is
+  `Error::Poisoned`. A failure answer does not say whether device code ran, so even a refused
+  launch counts. Work refused before it is submitted, such as `Error::Busy`, leaves the device as
+  it was.
+- **Launching allocates nothing on the host.** A model step is hundreds of launches of a few
+  microseconds each, so the runtime's cost per launch is the latency floor.
 
-The device opens with the topology the function was compiled for, on any exposed chips unless
-`--among 0,1` narrows them. Each `--input` and `--output` file holds one argument's bytes for every
-chip, in chip order; an output file is overwritten with what the function left.
+## Layers
 
-`RUST_LOG=furiosa_opt_firmware=debug` has each cluster report where every launch's time went; the
-lines appear in `/sys/kernel/debug/rngd/mgmt<device>/pe_log/pe<n>_log`.
+Each layer talks only to its neighbours, and a name means the same thing on the host and in the
+firmware.
 
-## Test
+| Layer | Contract | Host | Firmware |
+|---|---|---|---|
+| Program | `#[device]` fn, `launch(f, args)` | `furiosa-opt-std` | |
+| Image | compiler image, registry entry | `furiosa-opt-abi` | |
+| Runtime | `Device`, `Buffer`, `Pinned`, `Function` | this crate | |
+| Application | calls and their answers | `Device` | `Server` |
+| Mailbox | matches each answer to its call | `Mailbox` | `Mailbox` |
+| Message | `Request`, `Answer`, tagged options | `furiosa-opt-ipc` | `furiosa-opt-ipc` |
+| Frame | header and words; its revision | `furiosa-opt-ipc` | `furiosa-opt-ipc` |
+| Link | rings and doorbells | `Link` | `Link` |
+| Device ABI | executable, bootloader, ring layout | `furiosa-opt-abi` | `furiosa-opt-abi` |
 
-```bash
-cargo test -p furiosa-opt-rt --lib                  # host runtime
-(cd ipc && cargo test); (cd abi && cargo test)      # contracts
-```
+The firmware ships as a prebuilt image this crate embeds; a signed bootloader verifies and starts
+it on each PE cluster.
 
-On hardware, `furiosa-opt-examples` exercises the whole path: `cargo furiosa-opt test -p
-furiosa-opt-examples --test pe_count_tests`.
+## Kernel driver
+
+Transfers of pinned memory mapped to a device, and DMA issued by device code, need a kernel driver
+that reserves PDMA channels for the firmware. On a driver without that support the device still
+opens: every host transfer takes the driver's own channels, and a launch that needs firmware DMA
+fails with `Error::Unsupported`.

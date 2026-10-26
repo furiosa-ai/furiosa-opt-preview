@@ -18,7 +18,7 @@ where
     table: &'l HbmTensor<D, Chip, TableAxes, B>,
     /// The checked payload and indexed-axis stride.
     payload: GatherPayload,
-    index: Stage::IndexTensor,
+    index: Stage::IndexTensor<'l>,
     prefix: Stage::Prefix,
     _marker: PhantomData<IndexedAxis>,
 }
@@ -26,8 +26,8 @@ where
 /// Values available at each gather stage.
 #[doc(hidden)]
 pub trait GatherStage<B: Backend>: sealed::Sealed {
-    /// The index tensor this stage reads, or `()` before one is supplied.
-    type IndexTensor;
+    /// The index tensor this stage reads for `'l`, or `()` before one is supplied.
+    type IndexTensor<'l>;
     /// The runtime prefix that shortens it, or `()` when every position runs.
     type Prefix;
 }
@@ -76,24 +76,24 @@ impl<Chip: M, IdxCluster: M, IdxPe: M, IdxElement: M, Domain: M> sealed::Sealed
 impl<Stage> sealed::Sealed for Prefixed<Stage> {}
 
 impl<B: Backend> GatherStage<B> for Begin {
-    type IndexTensor = ();
+    type IndexTensor<'l> = ();
     type Prefix = ();
 }
 
 impl<Chip: M, Domain: M, B: Backend> GatherStage<B> for IndexedByteOffsets<Chip, Domain> {
-    type IndexTensor = GatherIndexTensor<Pair<Chip, Domain>, B>;
+    type IndexTensor<'l> = GatherIndexTensor<HbmTensorView<'l, i32, Chip, Domain, B>>;
     type Prefix = ();
 }
 
 impl<Chip: M, IdxCluster: M, IdxPe: M, IdxElement: M, Domain: M, B: Backend> GatherStage<B>
     for IndexedPositions<Chip, IdxCluster, IdxPe, IdxElement, Domain>
 {
-    type IndexTensor = GatherIndexTensor<Pair<Chip, Pair<IdxCluster, Pair<IdxPe, IdxElement>>>, B>;
+    type IndexTensor<'l> = GatherIndexTensor<Tensor<i32, Pair<Chip, Pair<IdxCluster, Pair<IdxPe, IdxElement>>>, B>>;
     type Prefix = ();
 }
 
 impl<Stage: GatherStage<B>, B: Backend> GatherStage<B> for Prefixed<Stage> {
-    type IndexTensor = Stage::IndexTensor;
+    type IndexTensor<'l> = Stage::IndexTensor<'l>;
     type Prefix = RuntimePrefix;
 }
 
@@ -105,10 +105,36 @@ impl<Chip: M, IdxCluster: M, IdxPe: M, IdxElement: M, Domain: M, B: Backend> Ind
 
 /// A gather index with its entry domain and value unit.
 #[derive(Debug)]
-pub struct GatherIndexTensor<IdxAxes: M, B: Backend> {
-    tensor: Tensor<i32, IdxAxes, B>,
+pub struct GatherIndexTensor<Source> {
+    tensor: Source,
     domain: Mapping,
     unit: IndexUnit,
+}
+
+/// An index tensor that is read when the DMA using it executes.
+#[doc(hidden)]
+pub trait IndexSource<B: Backend> {
+    /// The mapping of the index values.
+    type Axes: M;
+
+    /// Reads the index, from HBM when it lives there.
+    fn read(&self, dma: &DmaContext<{ Dma::Tensor }, B>) -> Tensor<i32, Self::Axes, B>;
+}
+
+impl<Axes: M, B: Backend> IndexSource<B> for Tensor<i32, Axes, B> {
+    type Axes = Axes;
+
+    fn read(&self, _: &DmaContext<{ Dma::Tensor }, B>) -> Tensor<i32, Axes, B> {
+        self.clone()
+    }
+}
+
+impl<Chip: M, Element: M, B: Backend> IndexSource<B> for HbmTensorView<'_, i32, Chip, Element, B> {
+    type Axes = Pair<Chip, Element>;
+
+    fn read(&self, dma: &DmaContext<{ Dma::Tensor }, B>) -> Tensor<i32, Pair<Chip, Element>, B> {
+        HbmTensorView::read(self, dma, |view| view.read())
+    }
 }
 
 /// The runtime length requested for a sparse gather.
@@ -165,7 +191,7 @@ impl<'l, D: Scalar, Chip: M, TableAxes: M, IndexedAxis: M, IdxChip: M, B: Backen
             table: self.table,
             payload: self.payload,
             index: GatherIndexTensor {
-                tensor: index.inner.clone(),
+                tensor: index.view(),
                 domain,
                 unit,
             },
@@ -262,13 +288,14 @@ impl<
     }
 }
 
-impl<'l, D: Scalar, Chip: M, TableAxes: M, IndexedAxis: M, IdxAxes: M, Stage, B: Backend>
+impl<'l, D: Scalar, Chip: M, TableAxes: M, IndexedAxis: M, Source: IndexSource<B>, Stage, B: Backend>
     GatherPlan<'l, D, Chip, TableAxes, IndexedAxis, Stage, B>
 where
-    Stage: IndexedStage<B, Prefix = (), IndexTensor = GatherIndexTensor<IdxAxes, B>>,
+    Stage: IndexedStage<B, Prefix = (), IndexTensor<'l> = GatherIndexTensor<Source>>,
 {
     fn materialize<Cluster: M, Slice: M, Element: M>(
         self,
+        dma: &DmaContext<{ Dma::Tensor }, B>,
         prefix: Option<usize>,
     ) -> DmTensor<D, Chip, Cluster, Slice, Element, B>
     where
@@ -276,9 +303,9 @@ where
     {
         validate_placement::<Cluster, Slice, Element>(&self.payload, &self.index.domain);
         let mut output = DmTensor::from_parts(Tensor::zeroed());
-        self.table.inner.gather::<IndexedAxis, _, _>(
+        self.table.read(dma).gather::<IndexedAxis, _, _>(
             &mut output.inner,
-            &self.index.tensor,
+            &self.index.tensor.read(dma),
             &self.index.domain,
             &Chip::to_value(),
             prefix,
@@ -297,12 +324,12 @@ impl<'l, D: Scalar, Chip: M, TableAxes: M, IndexedAxis: M, IdxChip: M, Domain: M
     #[primitive(GatherPlan::to_dm)]
     pub fn to_dm<Cluster: M, Slice: M, Element: M>(
         self,
-        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+        dma: &mut DmaContext<{ Dma::Tensor }, B>,
     ) -> DmTensor<D, Chip, Cluster, Slice, Element, B>
     where
         D: MaterializableScalar,
     {
-        self.materialize(None)
+        self.materialize(dma, None)
     }
 
     /// Limits each chip's gathered entries to `valid_length`, in `Domain` order; zero or less writes none.
@@ -340,25 +367,25 @@ impl<
     #[primitive(GatherPlan::to_dm)]
     pub fn to_dm<Cluster: M, Slice: M, Element: M>(
         self,
-        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+        dma: &mut DmaContext<{ Dma::Tensor }, B>,
     ) -> DmTensor<D, Chip, Cluster, Slice, Element, B>
     where
         D: MaterializableScalar,
     {
-        self.materialize(None)
+        self.materialize(dma, None)
     }
 }
 
-impl<'l, D: Scalar, Chip: M, TableAxes: M, IndexedAxis: M, IdxAxes: M, Stage, B: Backend>
+impl<'l, D: Scalar, Chip: M, TableAxes: M, IndexedAxis: M, Source: IndexSource<B>, Stage, B: Backend>
     GatherPlan<'l, D, Chip, TableAxes, IndexedAxis, Prefixed<Stage>, B>
 where
-    Stage: IndexedStage<B, Prefix = (), IndexTensor = GatherIndexTensor<IdxAxes, B>>,
+    Stage: IndexedStage<B, Prefix = (), IndexTensor<'l> = GatherIndexTensor<Source>>,
 {
     /// Materializes the gather in the requested data-memory shape.
     #[primitive(GatherPlan::to_dm)]
     pub fn to_dm<Cluster: M, Slice: M, Element: M>(
         self,
-        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+        dma: &mut DmaContext<{ Dma::Tensor }, B>,
     ) -> DmTensor<D, Chip, Cluster, Slice, Element, B>
     where
         D: MaterializableScalar,
@@ -372,7 +399,7 @@ where
             prefix: (),
             _marker: PhantomData,
         };
-        plan.materialize(Some(requested))
+        plan.materialize(dma, Some(requested))
     }
 }
 

@@ -20,7 +20,9 @@ async fn bool_hbm_scalar_controls_a_branch() -> eyre::Result<()> {
     let mut device = Device::new(bool_scalar_guard.topology())?;
     let mut enabled = HbmScalar::from_host(false, &mut device.pdma).await?;
     for value in [false, true] {
-        enabled.write(value, &mut device.pdma).await?;
+        HbmScalar::from_host(value, &mut device.pdma)
+            .output(&mut enabled)
+            .await?;
         let output = launch(bool_scalar_guard, (&mut device, &enabled)).await?;
         let output = output.to_host::<m![ScalarOutput]>(&mut device.pdma).await?.into_vec();
         assert_eq!(output, vec![i32::from(value); ScalarOutput::SIZE]);
@@ -39,7 +41,9 @@ async fn bounded_dynamic_loop_handles_empty_partial_and_full_ranges() -> eyre::R
 
     let mut active_experts_hbm = HbmScalar::<usize>::from_host(0, &mut device.pdma).await?;
     for active_experts in [0, 1, 2, Group::SIZE, Group::SIZE + 1, usize::MAX] {
-        active_experts_hbm.write(active_experts, &mut device.pdma).await?;
+        HbmScalar::from_host(active_experts, &mut device.pdma)
+            .output(&mut active_experts_hbm)
+            .await?;
         let output = launch(bounded_dynamic_expert_loop, (&mut device, &input, &active_experts_hbm)).await?;
         let output = output
             .to_host::<m![Slice, Group, Width]>(&mut device.pdma)
@@ -74,7 +78,9 @@ async fn unrolled_loop_keeps_the_runtime_guard() -> eyre::Result<()> {
     let mut active = HbmScalar::<usize>::from_host(0, &mut device.pdma).await?;
 
     for active_experts in [0, 1, 2, Group::SIZE, Group::SIZE + 1] {
-        active.write(active_experts, &mut device.pdma).await?;
+        HbmScalar::from_host(active_experts, &mut device.pdma)
+            .output(&mut active)
+            .await?;
         let output = launch(unrolled_bounded_dynamic_expert_loop, (&mut device, &input, &active))
             .await?
             .to_host::<m![Slice, Group, Width]>(&mut device.pdma)

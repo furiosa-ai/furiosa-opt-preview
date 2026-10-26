@@ -1,19 +1,19 @@
-use furiosa_mapping::*;
-use std::collections::HashMap;
 use std::sync::Arc;
+
+use furiosa_mapping::*;
 
 use crate::Error;
 use crate::scalar::{MaterializableScalar, Scalar};
 use crate::storage::BufStorage;
-use crate::tensor::memory::{DmAllocError, DmTensor, HbmScalar, HbmTensor, HostTensor};
+use crate::tensor::Tensor;
+use crate::tensor::memory::{DmAllocError, DmTensor};
 
-use super::{Function, HostBuf};
-use crate::backend::Backend;
+use super::registry;
 use crate::backend::indirect::IndexUnit;
+use crate::backend::internal;
 use crate::cast::{ContractionAccumulator, ContractionCast};
-use crate::context::{Dma, DmaContext};
-use crate::runtime::Topology;
-use furiosa_opt_rt::Image;
+use crate::runtime::{HostBuffer, HostBufferSlice, HostBufferSliceMut};
+use furiosa_opt_rt as rt;
 
 /// NPU backend.
 ///
@@ -22,11 +22,10 @@ use furiosa_opt_rt::Image;
 #[derive(Debug, Clone, Copy)]
 pub struct Npu;
 
-/// An opened device with the device functions loaded on it so far. A `#[device]` fn loads once per
-/// device and launches through the same handle afterwards.
+/// An opened device with one slot per registry entry, so a `#[device]` fn loads once per device.
 pub struct Device {
-    device: Arc<furiosa_opt_rt::Device>,
-    functions: tokio::sync::Mutex<HashMap<(&'static str, Vec<usize>), Arc<furiosa_opt_rt::Function>>>,
+    pub(super) device: Arc<rt::Device>,
+    pub(super) registry: registry::Registry,
 }
 
 impl std::fmt::Debug for Device {
@@ -35,60 +34,17 @@ impl std::fmt::Debug for Device {
     }
 }
 
-impl Device {
-    pub(crate) fn inner(&self) -> &Arc<furiosa_opt_rt::Device> {
-        &self.device
-    }
-
-    /// The device function for registry entry `path`/`key`, loaded from `bytes` on first use.
-    pub(crate) async fn function(
-        &self,
-        path: &'static str,
-        key: &[usize],
-        bytes: &[u8],
-    ) -> Result<Arc<furiosa_opt_rt::Function>, Error> {
-        let mut functions = self.functions.lock().await;
-        if let Some(function) = functions.get(&(path, key.to_vec())) {
-            return Ok(Arc::clone(function));
-        }
-        let image = Image::parse(bytes).map_err(furiosa_opt_rt::FunctionError::Image)?;
-        let function = Arc::new(furiosa_opt_rt::Function::load(&self.device, &image).await?);
-        functions.insert((path, key.to_vec()), Arc::clone(&function));
-        Ok(function)
+impl<D: Scalar> From<BufStorage<D, HostBuffer>> for HostBuffer {
+    fn from(storage: BufStorage<D, HostBuffer>) -> Self {
+        storage.into_inner()
     }
 }
 
-impl Backend for Npu {
-    type Device = Arc<Device>;
-    type Storage<D: Scalar> = BufStorage<D, HostBuf>;
+impl internal::Backend for Npu {
+    type Storage<D: Scalar> = BufStorage<D, HostBuffer>;
 
-    /// Opens a device of `chips` chips among those `FURIOSA_VISIBLE_CHIPS` names, or any when
-    /// it is unset. The runtime itself reads no environment; this is where the process's policy
-    /// meets it.
-    fn open(Topology { chips, pes }: Topology) -> Result<Self::Device, Error> {
-        let visible = match std::env::var("FURIOSA_VISIBLE_CHIPS") {
-            Ok(spec) if !spec.trim().is_empty() => Some(
-                spec.split(',')
-                    .map(|id| {
-                        id.trim().parse::<u8>().map_err(|_| {
-                            Error::Chips(format!("FURIOSA_VISIBLE_CHIPS: `{id}` is not a chip index (0-255)"))
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-            Ok(_) | Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                return Err(Error::Chips("FURIOSA_VISIBLE_CHIPS is not valid Unicode".into()));
-            }
-        };
-        let mut builder = furiosa_opt_rt::Device::builder((chips, pes));
-        if let Some(visible) = visible {
-            builder = builder.among(visible);
-        }
-        Ok(Arc::new(Device {
-            device: Arc::new(builder.open()?),
-            functions: tokio::sync::Mutex::new(HashMap::new()),
-        }))
+    fn scratch(_: usize, _: usize) -> rt::Buffer {
+        panic!("the NPU host reaches device memory only by DMA, not a device function's body")
     }
 
     fn from_vec<D: Scalar>(_mapping: &Mapping, data: impl IntoIterator<Item = D>) -> Self::Storage<D> {
@@ -99,25 +55,20 @@ impl Backend for Npu {
         BufStorage::from_buf(buf)
     }
 
-    /// An unplaced handle; the compiled function places its own buffers, so this never names one.
-    fn alloc_hbm<D: Scalar, Chip: M, Element: M>() -> HbmTensor<D, Chip, Element, Self> {
-        HbmTensor::unbacked()
-    }
-
     fn alloc_dm<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M>(
         group: &Self::Device,
     ) -> Result<DmTensor<D, Chip, Cluster, Slice, Element, Self>, DmAllocError> {
         // One slice's bytes: a resident sits at the same address in every slice of every device.
         let size = D::size_in_bytes_from_length(Element::SIZE);
-        let devices = group.inner().chips();
+        let devices = usize::from(group.device.topology().chips);
         if Chip::SIZE != devices {
             return Err(DmAllocError::Topology {
                 tensor_chips: Chip::SIZE,
                 device_chips: devices,
             });
         }
-        let buffer = group.inner().alloc(furiosa_opt_rt::image::Memory::Sram, size)?;
-        let mut tensor = DmTensor::from_parts(crate::tensor::Tensor::zeroed());
+        let buffer = group.device.alloc(rt::memory::Kind::Sram, size)?;
+        let mut tensor = DmTensor::from_parts(Tensor::zeroed());
         tensor.own(buffer);
         Ok(tensor)
     }
@@ -232,52 +183,15 @@ impl Backend for Npu {
         storage.transmute(src_map, dst_map)
     }
 
-    async fn to_hbm<D: MaterializableScalar, Element: M, Chip: M, Element2: M>(
-        host: &HostTensor<D, Element, Self>,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-    ) -> Result<HbmTensor<D, Chip, Element2, Self>, Error> {
-        Function::write(dma, host).await
+    fn bytes<D: Scalar>(storage: &Self::Storage<D>) -> HostBufferSlice<'_> {
+        storage.inner().into()
     }
 
-    async fn from_hbm<D: MaterializableScalar, Chip: M, Element: M, Element2: M>(
-        hbm: &HbmTensor<D, Chip, Element, Self>,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-    ) -> Result<HostTensor<D, Element2, Self>, Error> {
-        Function::read(dma, hbm).await
-    }
-
-    async fn to_hbm_into<D: MaterializableScalar, Element: M, Chip: M, Element2: M>(
-        host: &HostTensor<D, Element, Self>,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        hbm: &mut HbmTensor<D, Chip, Element2, Self>,
-    ) -> Result<(), Error> {
-        Function::write_into(dma, host, hbm).await
-    }
-
-    async fn to_hbm_scalar<D: crate::scalar::RuntimeScalar>(
-        value: D,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-    ) -> Result<HbmScalar<D, Self>, Error> {
-        Function::write_scalar(dma, value).await
-    }
-
-    async fn to_hbm_scalar_into<D: crate::scalar::RuntimeScalar>(
-        value: D,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        hbm: &mut HbmScalar<D, Self>,
-    ) -> Result<(), Error> {
-        Function::write_scalar_into(dma, value, hbm).await
-    }
-
-    async fn from_hbm_into<D: MaterializableScalar, Chip: M, Element: M, Element2: M>(
-        hbm: &HbmTensor<D, Chip, Element, Self>,
-        dma: &DmaContext<{ Dma::Pcie }, Self>,
-        host: &mut HostTensor<D, Element2, Self>,
-    ) -> Result<(), Error> {
-        Function::read_into(dma, hbm, host).await
+    fn bytes_mut<D: Scalar>(storage: &mut Self::Storage<D>) -> HostBufferSliceMut<'_> {
+        storage.inner_mut().into()
     }
 
     fn pin<D: MaterializableScalar>(storage: Self::Storage<D>) -> Result<Self::Storage<D>, Error> {
-        storage.into_inner().pinned().map(BufStorage::from_inner)
+        Ok(BufStorage::from_inner(storage.into_inner().pin()?))
     }
 }

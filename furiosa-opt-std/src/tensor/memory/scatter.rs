@@ -1,6 +1,6 @@
 //! Builds deferred HBM scatters by declaring the indexed axis, payload, and index domain.
 
-use super::gather::Begin;
+use super::gather::{Begin, IndexSource};
 use super::*;
 use crate::backend::indirect::IndexUnit;
 use furiosa_opt_lower::{
@@ -24,37 +24,62 @@ pub struct ScatterPlan<
 > where
     Stage: ScatterStage<B>,
 {
-    destination: HbmTensorViewMut<'d, D, Chip, DstElement, B>,
+    /// Written by device DMA alone, so it need not span every chip.
+    destination: HbmTensorViewMut<'d, D, Chip, DstElement, B, SomeChips>,
     /// The destination payload and indexed-axis stride.
     payload: ScatterPayload,
-    index: Stage::IndexTensor,
+    index: Stage::IndexTensor<'d>,
     _marker: PhantomData<(IndexedAxis, Payload)>,
 }
 
 /// Values available at each scatter stage.
 #[doc(hidden)]
 pub trait ScatterStage<B: Backend> {
-    /// The index tensor this stage reads, or `()` before one is supplied.
-    type IndexTensor;
+    /// The index tensor this stage reads for `'l`, or `()` before one is supplied.
+    type IndexTensor<'l>;
 }
 
-/// A supplied index whose `Domain` determines how updates are grouped.
+/// A stage with an index, ready to run over `Domain`.
+#[doc(hidden)]
+pub trait IndexedScatter<B: Backend>: ScatterStage<B> {
+    /// The index domain, which determines how updates are grouped.
+    type Domain: M;
+}
+
+/// SPM positions over `Domain`, the named cluster axes followed by the index list.
 #[doc(hidden)]
 #[derive(Debug)]
-pub struct WithIndex<IdxAxes, Domain>(PhantomData<(IdxAxes, Domain)>);
+pub struct WithPositions<IdxAxes, Domain>(PhantomData<(IdxAxes, Domain)>);
+
+/// Byte offsets held in HBM; the index's own mapping is the domain.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct WithByteOffsets<IdxChip, Domain>(PhantomData<(IdxChip, Domain)>);
 
 impl<B: Backend> ScatterStage<B> for Begin {
-    type IndexTensor = ();
+    type IndexTensor<'l> = ();
 }
 
-impl<IdxAxes: M, Domain: M, B: Backend> ScatterStage<B> for WithIndex<IdxAxes, Domain> {
-    type IndexTensor = ScatterIndexTensor<IdxAxes, B>;
+impl<IdxAxes: M, Domain: M, B: Backend> ScatterStage<B> for WithPositions<IdxAxes, Domain> {
+    type IndexTensor<'l> = ScatterIndexTensor<Tensor<i32, IdxAxes, B>>;
+}
+
+impl<IdxChip: M, Domain: M, B: Backend> ScatterStage<B> for WithByteOffsets<IdxChip, Domain> {
+    type IndexTensor<'l> = ScatterIndexTensor<HbmTensorView<'l, i32, IdxChip, Domain, B>>;
+}
+
+impl<IdxAxes: M, Domain: M, B: Backend> IndexedScatter<B> for WithPositions<IdxAxes, Domain> {
+    type Domain = Domain;
+}
+
+impl<IdxChip: M, Domain: M, B: Backend> IndexedScatter<B> for WithByteOffsets<IdxChip, Domain> {
+    type Domain = Domain;
 }
 
 /// The index tensor carried by a scatter plan, with the unit its values count in.
 #[derive(Debug)]
-pub struct ScatterIndexTensor<IdxAxes: M, B: Backend> {
-    tensor: Tensor<i32, IdxAxes, B>,
+pub struct ScatterIndexTensor<Source> {
+    tensor: Source,
     unit: IndexUnit,
     /// The index domain, checked against the declaration.
     domain: Mapping,
@@ -71,7 +96,7 @@ fn declared_domain<Domain: M>(index: IndexMapping<'_>) -> Mapping {
     domain
 }
 
-impl<'d, D: Scalar, Chip: M, DstElement: M, B: Backend> HbmTensorViewMut<'d, D, Chip, DstElement, B> {
+impl<'d, D: Scalar, Chip: M, DstElement: M, B: Backend, Chips> HbmTensorViewMut<'d, D, Chip, DstElement, B, Chips> {
     /// Starts a scatter through `IndexedAxis`, writing `Payload` per index entry.
     /// `Payload` describes one update entry, including padding.
     #[primitive(HbmTensorViewMut::scatter)]
@@ -82,7 +107,10 @@ impl<'d, D: Scalar, Chip: M, DstElement: M, B: Backend> HbmTensorViewMut<'d, D, 
             .unwrap_or_else(|error| panic!("{error}"));
         validate_scatter_payload(&Payload::to_value(), &payload).unwrap_or_else(|error| panic!("{error}"));
         ScatterPlan {
-            destination: self,
+            destination: HbmTensorViewMut {
+                inner: self.inner,
+                chips: PhantomData,
+            },
             payload,
             index: (),
             _marker: PhantomData,
@@ -90,8 +118,11 @@ impl<'d, D: Scalar, Chip: M, DstElement: M, B: Backend> HbmTensorViewMut<'d, D, 
     }
 }
 
-impl<'d, D: Scalar, Chip: M, DstElement: M, IndexedAxis: M, Payload: M, IdxAxes: M, Domain: M, B: Backend>
-    ScatterPlan<'d, D, Chip, DstElement, IndexedAxis, Payload, WithIndex<IdxAxes, Domain>, B>
+impl<'d, D: Scalar, Chip: M, DstElement: M, IndexedAxis: M, Payload: M, Domain: M, Source, Stage, B: Backend>
+    ScatterPlan<'d, D, Chip, DstElement, IndexedAxis, Payload, Stage, B>
+where
+    Stage: IndexedScatter<B, Domain = Domain, IndexTensor<'d> = ScatterIndexTensor<Source>>,
+    Source: IndexSource<B>,
 {
     /// Runs the scatter, consuming the DM tensor it takes the values from.
     #[primitive(ScatterPlan::from_dm)]
@@ -108,8 +139,8 @@ impl<'d, D: Scalar, Chip: M, DstElement: M, IndexedAxis: M, Payload: M, IdxAxes:
     /// Runs the scatter from a DM view, checking that it supplies `Payload` once per domain entry.
     #[primitive(ScatterPlan::from_dm_view)]
     pub fn from_dm_view<'u, Cluster: M, Slice: M, Element: M>(
-        mut self,
-        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+        self,
+        dma: &mut DmaContext<{ Dma::Tensor }, B>,
         updates: DmTensorView<'u, D, Chip, Cluster, Slice, Element, B>,
     ) where
         D: MaterializableScalar,
@@ -128,14 +159,12 @@ impl<'d, D: Scalar, Chip: M, DstElement: M, IndexedAxis: M, Payload: M, IdxAxes:
         .unwrap_or_else(|error| panic!("{error}"));
 
         let updates = updates.inner.read();
-        let mut output = self.destination.inner.read();
-        updates.scatter::<Domain, IndexedAxis, _, _>(
-            &mut output,
-            &self.index.tensor,
-            &Chip::to_value(),
-            self.index.unit,
-        );
-        self.destination.inner.transpose(output.view(), false);
+        let index = self.index.tensor.read(dma);
+        self.destination.write(dma, |mut destination| {
+            let mut output = destination.read();
+            updates.scatter::<Domain, IndexedAxis, _, _>(&mut output, &index, &Chip::to_value(), self.index.unit);
+            destination.transpose(output.view(), false);
+        });
     }
 }
 
@@ -169,7 +198,7 @@ pub trait ScatterPositions<
         DstElement,
         IndexedAxis,
         Payload,
-        WithIndex<Pair<IdxChip, Pair<IdxCluster, Pair<IdxPe, IdxElement>>>, Domain>,
+        WithPositions<Pair<IdxChip, Pair<IdxCluster, Pair<IdxPe, IdxElement>>>, Domain>,
         B,
     >;
 }
@@ -201,7 +230,7 @@ impl<
         DstElement,
         IndexedAxis,
         Payload,
-        WithIndex<Pair<IdxChip, Pair<IdxCluster, Pair<IdxPe, IdxElement>>>, Domain>,
+        WithPositions<Pair<IdxChip, Pair<IdxCluster, Pair<IdxPe, IdxElement>>>, Domain>,
         B,
     > {
         validate_index_chip(&IdxChip::to_value(), &Chip::to_value()).unwrap_or_else(|error| panic!("{error}"));
@@ -229,7 +258,7 @@ impl<
 #[doc(hidden)]
 pub trait ScatterByteOffsets<
     'd,
-    'i,
+    'i: 'd,
     D: Scalar,
     Chip: M,
     DstElement: M,
@@ -245,10 +274,10 @@ pub trait ScatterByteOffsets<
     fn by_byte_offsets<Domain: M>(
         self,
         offsets: HbmTensorView<'i, i32, IdxChip, Domain, B>,
-    ) -> ScatterPlan<'d, D, Chip, DstElement, IndexedAxis, Payload, WithIndex<Pair<IdxChip, Domain>, Domain>, B>;
+    ) -> ScatterPlan<'d, D, Chip, DstElement, IndexedAxis, Payload, WithByteOffsets<IdxChip, Domain>, B>;
 }
 
-impl<'d, 'i, D: Scalar, Chip: M, DstElement: M, IndexedAxis: M, Payload: M, IdxChip: M, B: Backend>
+impl<'d, 'i: 'd, D: Scalar, Chip: M, DstElement: M, IndexedAxis: M, Payload: M, IdxChip: M, B: Backend>
     ScatterByteOffsets<'d, 'i, D, Chip, DstElement, IndexedAxis, Payload, IdxChip, B>
     for ScatterPlan<'d, D, Chip, DstElement, IndexedAxis, Payload, Begin, B>
 {
@@ -256,7 +285,7 @@ impl<'d, 'i, D: Scalar, Chip: M, DstElement: M, IndexedAxis: M, Payload: M, IdxC
     fn by_byte_offsets<Domain: M>(
         self,
         offsets: HbmTensorView<'i, i32, IdxChip, Domain, B>,
-    ) -> ScatterPlan<'d, D, Chip, DstElement, IndexedAxis, Payload, WithIndex<Pair<IdxChip, Domain>, Domain>, B> {
+    ) -> ScatterPlan<'d, D, Chip, DstElement, IndexedAxis, Payload, WithByteOffsets<IdxChip, Domain>, B> {
         validate_index_chip(&IdxChip::to_value(), &Chip::to_value()).unwrap_or_else(|error| panic!("{error}"));
         let unit = IndexUnit::Bytes(indexed_axis_stride::<D>(&self.payload));
         let domain = declared_domain::<Domain>(IndexMapping::ByteOffsets(&Domain::to_value()));
@@ -264,7 +293,7 @@ impl<'d, 'i, D: Scalar, Chip: M, DstElement: M, IndexedAxis: M, Payload: M, IdxC
             destination: self.destination,
             payload: self.payload,
             index: ScatterIndexTensor {
-                tensor: offsets.inner.read(),
+                tensor: offsets,
                 unit,
                 domain,
             },

@@ -20,7 +20,7 @@ pub(crate) mod view;
 
 /// Tensor with scalar type `D`, axes determined by `Mapping`, and backend determined by `B`.
 ///
-/// A thin newtype over the backend's concrete tensor type ([`Backend::Storage`]). `B` defaults to
+/// A thin newtype over the backend's concrete tensor type (`Backend::Storage`). `B` defaults to
 /// [`CurrentBackend`], a cfg-aliased type that picks
 /// Cpu / Npu. User code writes `Tensor<D, M>` and gets the
 /// backend-appropriate storage automatically. Explicit `Tensor<D, M, SomeBackend>` overrides for
@@ -110,7 +110,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     }
 
     /// Returns the tensor's dense physical device byte image (packed on `D::BITS`), consuming the
-    /// tensor. Delegates to the backend's [`Backend::into_buf`]; Cpu / Npu move the packed
+    /// tensor. Delegates to the backend's `Backend::into_buf`; Cpu / Npu move the packed
     /// `BufStorage` bytes out directly.
     pub fn into_buf(self) -> Vec<u8>
     where
@@ -120,7 +120,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     }
 
     /// Maps the tensor element-wise to a new scalar; same layout. The bare-scalar closure is lifted
-    /// by the backend's own [`Backend::map`] strategy (Cpu/Npu a bare buffer walk,
+    /// by the backend's own `Backend::map` strategy (Cpu/Npu a bare buffer walk,
     /// no-op), no offset-uniform primitive imposed across storages.
     pub fn map<D2: Scalar, F>(&self, f: F) -> Tensor<D2, Mapping, B>
     where
@@ -129,7 +129,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
         Tensor::from_inner(B::map(&self.inner, f))
     }
 
-    /// Zips two same-layout tensors element-wise. Delegates to the backend's [`Backend::zip_with`];
+    /// Zips two same-layout tensors element-wise. Delegates to the backend's `Backend::zip_with`;
     /// the result is defined only where both inputs are.
     pub fn zip_with<D2: MaterializableScalar, D3: Scalar, F>(
         &self,
@@ -197,7 +197,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     /// Performs contraction between two tensors: a generalized matmul that multiplies `lhs` and `rhs`
     /// over the shared `Union` index space and reduces the axes absent from the output `Mapping`.
     ///
-    /// Delegates to [`Backend::contraction`], one fused pass with no `Union`-shaped intermediate. The
+    /// Delegates to `Backend::contraction`, one fused pass with no `Union`-shaped intermediate. The
     /// host reference for one engine contraction: it accumulates in [`ContractionCast::Output`], the
     /// width the device path uses, so a kernel's output compares against it directly.
     pub fn contraction<Union: M, Lhs: M, Rhs: M>(lhs: &Tensor<D, Lhs, B>, rhs: &Tensor<D, Rhs, B>) -> Self
@@ -261,7 +261,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     /// Deliberately NOT size-checked: `transmute` is used to relabel a padded read down to its
     /// compact slot (the vector engine does `…tile(k).read().transmute()`, shrinking the mapping),
     /// so `Mapping::SIZE != Mapping2::SIZE` is a legitimate, intended case. Delegates to
-    /// [`Backend::transmute`], which COMPACTS the physical `BufStorage` buffer (drops the padding
+    /// `Backend::transmute`, which COMPACTS the physical `BufStorage` buffer (drops the padding
     /// the relabel removes).
     pub fn transmute<Mapping2: M>(self) -> Tensor<D, Mapping2, B>
     where
@@ -275,7 +275,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     }
 
     /// Reshapes the tensor to a different mapping by reinterpreting its buffer under `Mapping2`
-    /// (delegates to [`Backend::reshape`]). Relabels axes over an unchanged buffer; the element count
+    /// (delegates to `Backend::reshape`). Relabels axes over an unchanged buffer; the element count
     /// is checked (`Mapping::SIZE == Mapping2::SIZE`, asserted below).
     ///
     /// Kept a *runtime* `assert_eq!`, not a `const` block: every
@@ -298,7 +298,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     }
 
     /// Performs transpose. The mapping division is validated inside
-    /// [`Backend::transpose`] (via `transpose_broadcast`), so this generic body works
+    /// `Backend::transpose` (via `transpose_broadcast`), so this generic body works
     /// for every backend.
     pub fn transpose<Dst: M>(&self, allow_broadcast: bool) -> Tensor<D, Dst, B> {
         let mut dst = Tensor::zeroed();
@@ -307,7 +307,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     }
 
     /// Scatter elements from self into dst at positions given by index tensor. Delegates to
-    /// [`Backend::scatter`].
+    /// `Backend::scatter`.
     pub fn scatter<Domain: M, IndexedAxis: M, Dst: M, Idx: M>(
         &self,
         dst: &mut Tensor<D, Dst, B>,

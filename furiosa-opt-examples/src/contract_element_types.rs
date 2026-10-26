@@ -13,7 +13,7 @@
 
 use furiosa_opt_std::prelude::*;
 
-axes![A = 8, K8 = 32, K16 = 16, K4 = 64, R = 8];
+axes![A = 8, K8 = 32, K16 = 16, K4 = 64, K4Wide = 128, R = 8];
 
 type Chip = m![1];
 type Cluster = m![1 # 2];
@@ -151,6 +151,42 @@ pub fn i4_contract(
         .fetch_cast::<i4>()
         .collect::<m![A], m![K4]>()
         .contract_outer::<m![A], m![K4], _, _, _>(&trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![A]>()
+        .contract_lane::<m![A], m![R]>(LaneMode::Interleaved)
+        .commit_trim::<m![R]>()
+        .commit();
+
+    result.to_hbm(&mut device.tdma)
+}
+
+/// `i4` contraction over a 128-element reduction, one full i4 mac width.
+/// The collect still leaves one 64-element flit; `contract_outer` folds the
+/// outer half of the reduction in, so the feed buffer collects two flits.
+#[device(chip = 1)]
+pub fn i4_contract_wide(
+    device: &mut Device,
+    input: &HbmTensor<i4, Chip, m![A, K4Wide]>,
+    input_trf: &HbmTensor<i4, Chip, m![R, K4Wide]>,
+) -> HbmTensor<i32, Chip, m![A, R]> {
+    let input_dm = input.to_dm::<Cluster, Slice, m![A, K4Wide]>(&mut device.tdma);
+    let trf_dm = input_trf.to_dm::<Cluster, Slice, m![R, K4Wide]>(&mut device.tdma);
+
+    let trf: TrfTensor<i4, Chip, Cluster, Slice, Lane, m![K4Wide]> = device
+        .sub
+        .begin(trf_dm.view())
+        .fetch::<m![R, K4Wide / 64], m![K4Wide % 64]>()
+        .fetch_cast::<i4>()
+        .collect::<m![R, K4Wide / 64], m![K4Wide % 64]>()
+        .to_trf();
+
+    let result: DmTensor<i32, Chip, Cluster, Slice, m![A, R]> = device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![A, K4Wide / 64], m![K4Wide % 64]>()
+        .fetch_cast::<i4>()
+        .collect::<m![A, K4Wide / 64], m![K4Wide % 64]>()
+        .contract_outer::<m![A], m![K4Wide], _, _, _>(&trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![A]>()
         .contract_lane::<m![A], m![R]>(LaneMode::Interleaved)

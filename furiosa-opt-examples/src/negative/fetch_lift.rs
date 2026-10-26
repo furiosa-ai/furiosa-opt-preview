@@ -44,7 +44,7 @@
 //! }
 //! #
 //! # fn main() -> Result<(), Error> {
-//! # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
+//! # let mut device: Device = Device::new(Topology { chips: 1, pes: 8 })?;
 //! # let input: BeginTensor<'_, _, bf16, m![1], m![1 # 2], m![A], m![1], m![H, V]> =
 //! #     BeginTensor::new(&mut device.main, Tensor::zero());
 //! # let _dm = resized(input);
@@ -74,7 +74,7 @@
 //! }
 //! #
 //! # fn main() -> Result<(), Error> {
-//! # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
+//! # let mut device: Device = Device::new(Topology { chips: 1, pes: 8 })?;
 //! # let input: BeginTensor<'_, _, bf16, m![1], m![1 # 2], m![A, 2], m![1], m![H, V]> =
 //! #     BeginTensor::new(&mut device.main, Tensor::zero());
 //! # let _dm = resized_slice(input);
@@ -101,7 +101,7 @@
 //! }
 //! #
 //! # fn main() -> Result<(), Error> {
-//! # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
+//! # let mut device: Device = Device::new(Topology { chips: 1, pes: 8 })?;
 //! # let input: BeginTensor<'_, _, bf16, m![1], m![2], m![A], m![1], m![Six, V]> =
 //! #     BeginTensor::new(&mut device.main, Tensor::zero());
 //! # nondivisible(input);
@@ -131,7 +131,7 @@
 //! }
 //! #
 //! # fn main() -> Result<(), Error> {
-//! # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
+//! # let mut device: Device = Device::new(Topology { chips: 1, pes: 8 })?;
 //! # let input: BeginTensor<'_, _, bf16, m![1], m![2], m![A, 2], m![1], m![H, G, Q, V]> =
 //! #     BeginTensor::new(&mut device.main, Tensor::zero());
 //! # let _dm = overshoots(input);

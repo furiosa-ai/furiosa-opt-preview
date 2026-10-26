@@ -11,7 +11,7 @@ These register files must be populated before their consumer engine runs.
 A `TrfTensor` is a tensor stored in the TRF:
 
 ```rust,ignore
-{{#include ../../../furiosa-opt-std/src/tensor/memory.rs:trf_tensor_def}}
+{{#include ../../../furiosa-opt-std/src/tensor/memory/mod.rs:trf_tensor_def}}
 ```
 
 `Chip` / `Cluster` / `Slice` pass through from the source.
@@ -211,7 +211,7 @@ The VRF is written either from the [Collect Engine](./collect-engine.md) or dire
 A `VrfTensor` is a tensor stored in the VRF:
 
 ```rust,ignore
-{{#include ../../../furiosa-opt-std/src/tensor/memory.rs:vrf_tensor_def}}
+{{#include ../../../furiosa-opt-std/src/tensor/memory/mod.rs:vrf_tensor_def}}
 ```
 
 `Chip` / `Cluster` / `Slice` pass through from the source.

@@ -4,7 +4,7 @@
 //! [`trf_sequencer::verify_trf_sequencer`]) and stashes the two un-broadcast operands (widened to the
 //! contraction output type) plus their layouts in a [`super::LazyContraction`], WITHOUT materializing the
 //! `[.., Lane, ..]`-shaped outer product. The Packet/Time reducers thread it through unchanged, and
-//! [`super::lane`] finalizes it with one fused [`crate::backend::Backend::contraction`].
+//! [`super::lane`] finalizes it with one fused `Backend::contraction`.
 //!
 //! The widen happens *entering* Outer: `contract_outer` takes storage-typed operands `D` and stashes
 //! them cast to the widened accumulator [`ContractionCast::Output`]. That widened type is the carrier's

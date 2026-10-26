@@ -21,7 +21,7 @@ The kernel writer calls `.to_dm()`, `.to_hbm()`, or related methods on the sourc
 - `Device::pdma`: PCIe DMA context for host ↔ HBM transfers (see [PCIe DMA](#pcie-dma)).
 
 ```rust,ignore
-{{#include ../../../furiosa-opt-std/src/tensor/memory.rs:dma_impl}}
+{{#include ../../../furiosa-opt-std/src/tensor/memory/mod.rs:dma_impl}}
 ```
 
 The compiler derives the read and write sequencer configurations from the source and destination tensor types.

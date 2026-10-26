@@ -27,7 +27,7 @@ use furiosa_opt_macro::primitive;
 use super::VeTensorShape;
 
 use super::VectorFinalTensor;
-use crate::backend::Backend;
+use crate::backend::internal::Backend as _;
 use crate::context::*;
 use crate::engine::vector::alu::RngdAlu;
 use crate::engine::vector::branch::{

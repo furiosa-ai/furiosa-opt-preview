@@ -153,6 +153,9 @@ pub trait RuntimeScalar: Copy + Send + Sync + runtime_scalar_sealed::Sealed {
 
     /// Converts this value to its HBM representation.
     fn into_storage(self) -> Self::Storage;
+
+    /// The value an HBM representation holds.
+    fn from_storage(storage: Self::Storage) -> Self;
 }
 
 macro_rules! impl_runtime_scalar_identity {
@@ -163,6 +166,10 @@ macro_rules! impl_runtime_scalar_identity {
 
                 fn into_storage(self) -> Self::Storage {
                     self
+                }
+
+                fn from_storage(storage: Self) -> Self {
+                    storage
                 }
             }
         )*
@@ -182,6 +189,10 @@ impl RuntimeScalar for bool {
     fn into_storage(self) -> Self::Storage {
         self.into()
     }
+
+    fn from_storage(storage: u8) -> Self {
+        storage != 0
+    }
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -190,6 +201,10 @@ impl RuntimeScalar for usize {
 
     fn into_storage(self) -> Self::Storage {
         self as u64
+    }
+
+    fn from_storage(storage: u64) -> Self {
+        storage as usize
     }
 }
 

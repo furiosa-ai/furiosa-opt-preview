@@ -22,6 +22,7 @@ async fn tuple_param_passes() -> eyre::Result<()> {
     Ok(())
 }
 
+/// `.output(&mut out)` writes each call's returns into `out`.
 #[tokio::test]
 async fn tuple_param_reuses_output() -> eyre::Result<()> {
     let mut device = Device::new(tuple_passthrough.topology())?;

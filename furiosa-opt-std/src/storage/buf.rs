@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 
 use furiosa_mapping::*;
 use rayon::prelude::*;
@@ -10,9 +11,9 @@ use crate::scalar::*;
 use crate::storage::par_iters::MappingPositions;
 use crate::storage::{BUF_POOL, InPool, PAR_MIN_JOB, min_cells_per_job};
 
-pub trait Buf: From<Vec<u8>> + Into<Vec<u8>> + AsRef<[u8]> + AsMut<[u8]> + Clone + std::fmt::Debug {}
+pub trait Buf: From<Vec<u8>> + Into<Vec<u8>> + Deref<Target = [u8]> + DerefMut + Clone + std::fmt::Debug {}
 
-impl<T> Buf for T where T: From<Vec<u8>> + Into<Vec<u8>> + AsRef<[u8]> + AsMut<[u8]> + Clone + std::fmt::Debug {}
+impl<T> Buf for T where T: From<Vec<u8>> + Into<Vec<u8>> + Deref<Target = [u8]> + DerefMut + Clone + std::fmt::Debug {}
 
 /// Cpu / Npu tensor: the dense device image as one packed `Vec<u8>`. Element `i` sits at position
 /// `i` (padding included, zero-initialized); a byte-multiple `D` takes its own byte run, a sub-byte `D`

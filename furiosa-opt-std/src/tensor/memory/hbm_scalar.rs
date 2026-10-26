@@ -1,18 +1,22 @@
+use std::future::Future;
+use std::marker::PhantomData;
+
 use furiosa_opt_macro::primitive;
-use furiosa_opt_rt::Buffer;
 
 use crate::Error;
-use crate::backend::Backend;
+use crate::backend::{Backend, Cpu};
 use crate::context::{Dma, DmaContext};
-use crate::runtime::CurrentBackend;
+use crate::runtime::{
+    CurrentBackend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, Issued, Prepared, Submitted, Work,
+};
 use crate::scalar::{RuntimeScalar, Scalar};
 
 /// One scalar value replicated in the local HBM of every chip in the launch group.
 #[primitive(HbmScalar)]
 pub struct HbmScalar<D: RuntimeScalar, B: Backend = CurrentBackend> {
-    value: D,
-    buffer: Option<Buffer>,
-    _backend: std::marker::PhantomData<B>,
+    /// The memory the value lives in, the same bytes on every chip.
+    buffer: B::Buffer,
+    value: PhantomData<D>,
 }
 
 impl<D: RuntimeScalar, B: Backend> std::fmt::Debug for HbmScalar<D, B> {
@@ -22,50 +26,86 @@ impl<D: RuntimeScalar, B: Backend> std::fmt::Debug for HbmScalar<D, B> {
 }
 
 impl<D: RuntimeScalar, B: Backend> HbmScalar<D, B> {
-    /// Uploads one host value as an HBM scalar.
-    pub async fn from_host(value: D, dma: &mut DmaContext<{ Dma::Pcie }, B>) -> Result<Self, Error> {
-        B::to_hbm_scalar(value, dma).await
-    }
-
-    /// Updates this scalar through its existing HBM allocation.
-    pub async fn write(&mut self, value: D, dma: &mut DmaContext<{ Dma::Pcie }, B>) -> Result<(), Error> {
-        B::to_hbm_scalar_into(value, dma, self).await
-    }
-
-    /// Returns the scalar's packed HBM image.
-    pub fn to_buf(&self) -> Vec<u8> {
-        Self::encode(self.value)
+    /// Prepares a copy of one host value to HBM: `.await` copies it into a fresh scalar,
+    /// `.output(&mut scalar)` into an existing one.
+    pub fn from_host(value: D, dma: &mut DmaContext<{ Dma::Pcie }, B>) -> Prepared<FromHost<'_, D, B>> {
+        Prepared::new(FromHost { value, dma })
     }
 
     /// Loads the value into an SPM scalar every chip and cluster can read.
     #[primitive(HbmScalar::to_spm)]
-    pub fn to_spm(&self, _dma: &mut DmaContext<{ Dma::Tensor }, B>) -> D {
-        self.value
+    pub fn to_spm(&self, dma: &mut DmaContext<{ Dma::Tensor }, B>) -> D {
+        let bytes: HostBuffer = dma.load::<D::Storage>(self.memory()).into();
+        D::from_storage(D::Storage::load(&bytes, 0))
+    }
+}
+
+/// The host backend's device memory is host memory, so its scalars read synchronously.
+impl<D: RuntimeScalar> HbmScalar<D, Cpu> {
+    /// The scalar's packed HBM image on one chip.
+    pub fn to_buf(&self) -> Vec<u8> {
+        let memory = self.memory();
+        let bytes = memory.buffer.load(&memory.region);
+        Self::encode(D::from_storage(D::Storage::load(&bytes, 0)))
     }
 }
 
 impl<D: RuntimeScalar, B: Backend> HbmScalar<D, B> {
-    pub(crate) fn from_value(value: D) -> Self {
-        Self {
-            value,
-            buffer: None,
-            _backend: std::marker::PhantomData,
-        }
+    /// A scalar in a new, uninitialized allocation on `device`.
+    pub(crate) fn alloc_in(device: &B::Device) -> Result<Self, Error> {
+        Ok(Self {
+            buffer: B::alloc(device, crate::runtime::Kind::Dram, D::Storage::buf_bytes(1))?,
+            value: PhantomData,
+        })
     }
 
-    pub(crate) fn place(&mut self, buffer: Buffer) {
-        self.buffer = Some(buffer);
+    /// The memory the value lives in.
+    pub(crate) fn memory(&self) -> HbmBufferSlice<'_, B> {
+        HbmBufferSlice::whole(&self.buffer)
     }
 
-    pub(crate) fn buffer(&self) -> Option<&Buffer> {
-        self.buffer.as_ref()
-    }
-
-    pub(crate) fn set_value(&mut self, value: D) {
-        self.value = value;
+    pub(crate) fn memory_mut(&mut self) -> HbmBufferSliceMut<'_, B> {
+        HbmBufferSliceMut::whole(&mut self.buffer)
     }
 
     pub(crate) fn encode(value: D) -> Vec<u8> {
         D::Storage::to_buf(&[value.into_storage()])
+    }
+}
+
+/// A host value's copy to HBM, as a [`Prepared`] holds it; see [`HbmScalar::from_host`].
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct FromHost<'t, D: RuntimeScalar, B: Backend> {
+    value: D,
+    dma: &'t mut DmaContext<{ Dma::Pcie }, B>,
+}
+
+impl<D: RuntimeScalar, B: Backend> FromHost<'_, D, B> {
+    async fn write(self, scalar: &mut HbmScalar<D, B>) -> Result<(), Error> {
+        let memory = scalar.memory_mut();
+        let bytes = HbmScalar::<D, B>::encode(self.value).repeat(memory.region.chips.count_ones() as usize);
+        self.dma.to_hbm([(&bytes, memory)]).await
+    }
+}
+
+impl<'t, D: RuntimeScalar, B: Backend> Work for FromHost<'t, D, B> {
+    type Output = HbmScalar<D, B>;
+    type Future = Issued<impl Future<Output = Result<HbmScalar<D, B>, Error>>>;
+
+    fn submit(self) -> Submitted<Self::Future> {
+        async move {
+            let mut scalar = HbmScalar::alloc_in(self.dma.device())?;
+            self.write(&mut scalar).await?;
+            Ok(scalar)
+        }
+        .submit()
+    }
+}
+
+impl<'t, D: RuntimeScalar, B: Backend> Prepared<FromHost<'t, D, B>> {
+    /// Copies into `scalar`'s existing HBM allocation instead of a fresh one.
+    pub fn output(self, scalar: &'t mut HbmScalar<D, B>) -> Prepared<impl Future<Output = Result<(), Error>>> {
+        Prepared::new(self.into_work().write(scalar))
     }
 }

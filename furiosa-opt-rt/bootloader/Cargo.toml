@@ -1,4 +1,4 @@
-# The signed boot image. A standalone workspace like `device/`, reaching `abi` through a symlink so
+# The signed boot image. A standalone workspace like `firmware/`, reaching `abi` through a symlink so
 # the image's bytes do not depend on where the repository is checked out.
 [workspace]
 
@@ -8,7 +8,7 @@
 publish = false
 
 [workspace.dependencies]
-elf = { version = "0.8.0", default-features = false }
+bincode2 = { package = "bincode", version = "2", default-features = false, features = ["alloc", "derive"] }
 thiserror-core = { package = "thiserror", version = "2.0.17", default-features = false }
 
 [workspace.lints.rust]

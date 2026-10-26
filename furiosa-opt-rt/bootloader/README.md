@@ -1,27 +1,24 @@
 # furiosa-opt-bootloader
 
-The signed bootloader: what production chips insist on, kept to what the hardware makes obvious.
-It initializes the core, then answers one request written in the kernel driver's queue entry format,
-`[header][addr][len][token]`: authenticate the firmware image at `addr` in device memory, copy it
-into the scratchpad and jump to it. The contract lives in `furiosa_opt_abi::bootloader`.
+The signed code a PE runs from reset. The chip's secure boot runs only signed code, so the
+bootloader is the one signed part of the runtime: it authenticates the firmware image the host
+staged in device memory, copies it into the scratchpad and enters it. Before that it serves
+nothing but the boot request; `furiosa_opt_abi::bootloader` holds the contract with the host.
 
-Its signed bytes contain the SHA-256 digest of one firmware image. A firmware change therefore
-requires rebuilding and signing the bootloader even though the images remain separate.
+The bootloader authenticates exactly one firmware image, because its signed bytes carry that
+image's SHA-256 digest. A firmware change therefore needs a rebuilt and re-signed bootloader, even
+though the two images stay separate.
 
 ## Build
 
-```sh
-make furiosa-opt-vendor SIGN=dev
-```
-
-The vendor target builds the firmware first and supplies it to the bootloader build as
-`FURIOSA_OPT_FIRMWARE`.
-
-`make furiosa-opt-bootloader-test` exercises the copy-and-authenticate path on the host, including
-rejection of a changed firmware word and replacement of those rejected bytes by a valid retry.
+`make furiosa-opt-vendor SIGN=dev` (or `SIGN=release`, with the release credentials) builds the
+firmware, binds its digest into the bootloader through `FURIOSA_OPT_FIRMWARE`, then signs and
+vendors both images.
+`make furiosa-opt-bootloader-test` runs the host tests.
 
 ## Signing
 
-The device's secure boot accepts a bootloader only with a signature from a key it trusts, so the runtime embeds `furiosa-opt-bootloader.signed`, never the bare `bootloader.bin`.
-The public distribution carries that signed image but not the signer, its certificates or the
-release-key configuration.
+The device accepts a bootloader only with a signature from a key it trusts, so the runtime
+embeds `furiosa-opt-bootloader.signed`, never the bare `bootloader.bin`. The signer lives in
+`sign/`; the public distribution carries the signed image but not the signer, its certificates or
+the release-key configuration.

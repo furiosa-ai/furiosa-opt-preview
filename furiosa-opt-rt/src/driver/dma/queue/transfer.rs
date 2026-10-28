@@ -317,7 +317,12 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 loop {
-                    let mut slot = queue.slots[0].lock().unwrap();
+                    // The slot is created by the acquire below, which may run after this.
+                    let Some(slot) = queue.slots.created().next() else {
+                        std::thread::yield_now();
+                        continue;
+                    };
+                    let mut slot = slot.lock().unwrap();
                     if matches!(slot.state, State::Active { .. }) {
                         break slot.release(State::Complete(Ok(())));
                     }

@@ -6,7 +6,7 @@ use furiosa_opt_rt::registry::Key;
 use super::{Launched, Returns, Submitted};
 use crate::Error;
 use crate::backend::Runtime;
-use crate::runtime::{CurrentBackend, Device, DeviceFn, DeviceSend};
+use crate::runtime::{CurrentBackend, Device, DeviceFn, DeviceSend, Topology};
 
 /// A function a `#[device]` item declares, which the selected backend finds and loads. A generic
 /// function loads the instantiation its arguments `Args` select.
@@ -93,6 +93,7 @@ impl<F, Args> Debug for Kernel<F, Args> {
 }
 
 impl<F: Loadable<Args>, Args: DeviceSend> DeviceFn<Args> for Kernel<F, Args> {
+    const TOPOLOGY: Topology = F::TOPOLOGY;
     type Output = F::Output;
 
     fn launch<R: Returns<F::Output>>(self, args: Args, returns: R) -> Submitted<Launched<R::Value>> {

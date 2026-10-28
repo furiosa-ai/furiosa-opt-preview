@@ -111,6 +111,25 @@ async fn kernels_load_by_type() -> Result<(), Error> {
     Ok(())
 }
 
+#[device(chip = C::SIZE)]
+fn sharded<C: M>(device: &mut Device, input: &HbmTensor<i32, C, m![1]>) {}
+
+/// A kernel loaded from a generic function has the topology its argument types select.
+#[test]
+fn kernel_topology_follows_arguments() {
+    fn topology<F: Loadable<A>, A: DeviceSend>(_: F) -> Topology {
+        <Kernel<F, A> as DeviceFn<A>>::TOPOLOGY
+    }
+    assert_eq!(
+        topology::<_, (&mut Device, &HbmTensor<i32, m![2], m![1]>)>(sharded),
+        Topology { chips: 2, pes: 8 }
+    );
+    assert_eq!(
+        topology::<_, (&mut Device, &HbmTensor<i32, m![4], m![1]>)>(sharded),
+        Topology { chips: 4, pes: 8 }
+    );
+}
+
 #[device(chip = 1)]
 fn traced(device: &mut Device) {
     tracing::info!("executing");

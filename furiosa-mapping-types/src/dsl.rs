@@ -83,6 +83,16 @@ impl<const SIZE: usize> Count for Broadcast<SIZE> {}
 pub type Identity = Broadcast<1>;
 // ANCHOR_END: identity_impl
 
+/// A mapping with its outer broadcast axis removed, keeping the remaining cell order.
+pub trait Unbroadcast: M {
+    /// The mapping of one copy of the repeated cells.
+    type Mapping: M;
+}
+
+impl<const N: usize, S: M> Unbroadcast for Pair<Broadcast<N>, S> {
+    type Mapping = S;
+}
+
 /// Symbol expression that represents a single axis.
 #[primitive(mapping::Symbol)]
 #[derive(Debug, Clone)]
@@ -312,3 +322,20 @@ where
     }
 }
 // ANCHOR_END: pair_impl
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Removing replication preserves every cell of one copy, including named axes and padding.
+    #[test]
+    fn preserves_one_copy() {
+        crate::axes!(Feature = 8);
+        type Cells = Pair<Symbol<Feature>, Padding<Identity, Broadcast<4>>>;
+        type Host = <Pair<Broadcast<4>, Cells> as Unbroadcast>::Mapping;
+        assert_eq!(Host::SIZE, Cells::SIZE);
+        for index in 0..=Cells::SIZE {
+            assert_eq!(Host::map(index), Cells::map(index));
+        }
+    }
+}

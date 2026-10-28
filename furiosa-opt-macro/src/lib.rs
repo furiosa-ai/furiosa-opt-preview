@@ -3,6 +3,8 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
 use syn::visit_mut::{self, VisitMut};
 use syn::{
     Attribute, Data, DeriveInput, Error, ExprForLoop, Item, Meta, Type, Variant, parse_macro_input, parse_quote,
@@ -204,6 +206,8 @@ pub fn device_send(input: TokenStream) -> TokenStream {
 /// Defines `name` as a value whose type implements `DeviceFn`, so `launch(name, args)` runs it,
 /// and `Loadable`, so `name.load(&device)?` returns a `Kernel` that launches without a lookup. `cargo <subcommand>` runs the Rust body on the
 /// host; `cargo furiosa-opt <subcommand>` runs the compiled program on the NPU.
+/// `chip` and `pe` are usize constant expressions (defaults 1 and 8), evaluated per `Args`.
+/// An inherent `topology()` exists only when neither expression names a generic parameter.
 #[proc_macro_attribute]
 pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_device(&attr.to_string(), parse_macro_input!(item as Item)).into()
@@ -212,15 +216,36 @@ pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The `proc_macro` bridge exists only inside a real expansion, so the attribute's work takes
 /// parsed input: unit tests drive it on `syn::parse_quote!` items.
 fn expand_device(attr: &str, item: Item) -> TokenStream2 {
-    let attr_int = |key: &str, default: usize| -> usize {
-        attr.split(',')
-            .filter_map(|kv| kv.split_once('='))
-            .find(|(k, _)| k.trim() == key)
-            .and_then(|(_, v)| v.trim().parse().ok())
-            .unwrap_or(default)
+    let pairs = match Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated.parse_str(attr) {
+        Ok(pairs) => pairs,
+        Err(error) => return error.to_compile_error(),
     };
-    let devices = attr_int("chip", 1) as u8;
-    let pes = attr_int("pe", 8) as u8;
+    for (index, pair) in pairs.iter().enumerate() {
+        if !pair.path.is_ident("chip") && !pair.path.is_ident("pe") {
+            return Error::new_spanned(pair, "expected chip or pe").to_compile_error();
+        }
+        if pairs
+            .iter()
+            .take(index)
+            .any(|other| other.path.get_ident() == pair.path.get_ident())
+        {
+            return Error::new_spanned(pair, "duplicate topology attribute").to_compile_error();
+        }
+    }
+    let value = |key: &str, default: syn::Expr| {
+        pairs
+            .iter()
+            .find(|pair| pair.path.is_ident(key))
+            .map_or(default, |pair| pair.value.clone())
+    };
+    let (devices, pes) = (value("chip", parse_quote!(1)), value("pe", parse_quote!(8)));
+    let topology = quote!({
+        let chips: usize = #devices;
+        let pes: usize = #pes;
+        assert!(chips <= u8::MAX as usize, "chip count does not fit u8");
+        assert!(pes <= u8::MAX as usize, "PE count does not fit u8");
+        furiosa_opt_std::Topology { chips: chips as u8, pes: pes as u8 }
+    });
     let mut func = match item {
         Item::Fn(f) => f,
         other => {
@@ -343,6 +368,34 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
         }
     };
 
+    let names: Vec<_> = generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Lifetime(_) => None,
+            syn::GenericParam::Type(param) => Some(param.ident.to_string()),
+            syn::GenericParam::Const(param) => Some(param.ident.to_string()),
+        })
+        .collect();
+    let mentions = |tokens: TokenStream2| {
+        let mut tokens: Vec<_> = tokens.into_iter().collect();
+        while let Some(token) = tokens.pop() {
+            match token {
+                proc_macro2::TokenTree::Ident(ident) if names.contains(&ident.to_string()) => return true,
+                proc_macro2::TokenTree::Group(group) => tokens.extend(group.stream()),
+                _ => {}
+            }
+        }
+        false
+    };
+    let topology_fn = (!mentions(quote!(#devices #pes))).then(|| {
+        quote! {
+            pub const fn topology(&self) -> furiosa_opt_std::Topology {
+                const TOPOLOGY: furiosa_opt_std::Topology = #topology;
+                TOPOLOGY
+            }
+        }
+    });
     let rev = rev();
     quote! {
         #[furiosa_opt::rev = #rev]
@@ -365,10 +418,7 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
         #vis const #name: #hidden = #hidden {};
 
         impl #hidden {
-            /// The device this function runs on, as `#[device(chip, pe)]` declares it.
-            pub fn topology(&self) -> furiosa_opt_std::Topology {
-                furiosa_opt_std::Topology { chips: #devices, pes: #pes }
-            }
+            #topology_fn
 
             /// The name the compiler uses for this function's registry entry.
             /// A caller that filters functions takes it from here rather than restating the path.
@@ -380,6 +430,7 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
         }
 
         impl #impl_generics furiosa_opt_std::runtime::DeviceFn<#tuple_type> for #hidden #where_clause {
+            const TOPOLOGY: furiosa_opt_std::Topology = #topology;
             type Output = #return_ty;
             fn launch<__FuriosaOptReturns: furiosa_opt_std::runtime::Returns<Self::Output>>(
                 self,
@@ -407,6 +458,22 @@ mod device_tests {
     use syn::{Item, parse_quote};
 
     use super::expand_device;
+
+    /// Topology attributes accept Rust expressions and reject malformed or repeated keys.
+    #[test]
+    fn parses_topology() {
+        let item = || {
+            parse_quote!(
+                fn f<C: M>(device: &mut Device, input: &C) {}
+            )
+        };
+        for attr in ["", "chip = C::SIZE, pe = 2 * 4", "chip = <Pair<C, D> as M>::SIZE"] {
+            assert!(!expand_device(attr, item()).to_string().contains("compile_error"));
+        }
+        for attr in ["chip =", "chips = 2", "chip = 1, chip = 2", "pe = 4, pe = 8"] {
+            assert!(expand_device(attr, item()).to_string().contains("compile_error"));
+        }
+    }
 
     #[test]
     fn accepts_only_mutable_context_references() {

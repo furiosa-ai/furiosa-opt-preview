@@ -304,8 +304,8 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
     ///
     /// The wire width, not the staging width: the types staged wider (`i5` / `i9`) are not
     /// `MaterializableScalar`, so no host-facing buffer ever holds one.
-    pub fn size() -> usize {
-        D::size_in_bytes_from_length(Pair::<Chip, Element>::SIZE)
+    pub const fn size() -> usize {
+        constraints::size_in_bytes(D::BITS, Pair::<Chip, Element>::SIZE)
     }
 
     /// Prepares a transfer of this tensor to the host, which waits for the launches and transfers
@@ -2161,6 +2161,14 @@ mod tests {
 
         assert!(std::panic::catch_unwind(write).is_err());
         assert_eq!(tensor.load().into_vec(), values);
+    }
+
+    /// An HBM tensor's byte size follows from its type alone, so a constant can hold it.
+    #[test]
+    fn size_is_const() {
+        axes![A = 64];
+        const BYTES: usize = HbmTensor::<bf16, m![1], m![A]>::size();
+        assert_eq!(BYTES, 2 * A::SIZE);
     }
 
     #[test]

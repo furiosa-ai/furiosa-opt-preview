@@ -148,11 +148,28 @@ impl<B: Backend> Device<B> {
     }
 }
 
+/// The tensor DMA engine, for an operation generic over `const DMA: Dma`: it bounds
+/// `Device: AsMut<DmaContext<DMA>>` and transfers on `device.as_mut()`.
+impl<B: Backend> AsMut<DmaContext<{ Dma::Tensor }, B>> for Device<B> {
+    fn as_mut(&mut self) -> &mut DmaContext<{ Dma::Tensor }, B> {
+        &mut self.tdma
+    }
+}
+
+/// The PCIe DMA engine, for an operation generic over `const DMA: Dma`.
+impl<B: Backend> AsMut<DmaContext<{ Dma::Pcie }, B>> for Device<B> {
+    fn as_mut(&mut self) -> &mut DmaContext<{ Dma::Pcie }, B> {
+        &mut self.pdma
+    }
+}
+
 /// Executes a `#[device]` function on the selected backend with device-representable arguments
 /// and returns. CPU builds execute its Rust body; NPU builds load its compiled registry entry.
 // The kernel translator finds launches through this trait's path,
 // `furiosa_opt_std::runtime::DeviceFn` (npu-visa-translate `device_marker`).
 pub trait DeviceFn<Args: DeviceSend> {
+    /// The topology of this argument specialization.
+    const TOPOLOGY: Topology;
     /// The function's return value.
     type Output: DeviceOutput;
     /// Submits work whose returns go where `returns` says.

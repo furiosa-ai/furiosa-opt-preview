@@ -19,6 +19,10 @@ How entries are written:
 
 ### Changed
 
+- `#[device(chip = ..., pe = ...)]` accepts usize constant expressions evaluated for each
+  launched specialization through the required `DeviceFn<Args>::TOPOLOGY` constant.
+  The inherent `topology()` method exists only when neither expression names a generic
+  parameter. Unknown or repeated keys and counts that do not fit u8 are rejected.
 - An `#[unroll]` loop over an empty constant range expands to nothing, as the same loop without
   `#[unroll]` does; it was rejected before.
 - Large kernels compile in less time, and the compiled images are byte-identical.
@@ -98,6 +102,7 @@ How entries are written:
   for the whole copy.
 - A kernel whose PCIe DMA copy is first read after a runtime guard or loop compiles; it stopped with
   an internal compiler error (`called Option::unwrap() on a None value`).
+- `HbmTensor::size()` is a `const fn`, so a constant can hold the byte size of an HBM tensor type.
 
 ### Added
 
@@ -123,6 +128,9 @@ How entries are written:
   `Time` that `OutTime` drops, over its first `count` units, clamped to `1..=Depth::SIZE`, with
   `count` known at run time: the fetch and the accumulation stop after the live units, so a value
   product over a window of keys sums only the valid ones.
+- `Device` implements `AsMut<DmaContext<{ Dma::Tensor }>>` and `AsMut<DmaContext<{ Dma::Pcie }>>`,
+  so an operation generic over `const DMA: Dma` bounds `Device: AsMut<DmaContext<DMA>>` and
+  transfers on `device.as_mut()`, in device code as on the host.
 
 ### Fixed
 

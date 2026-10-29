@@ -28,7 +28,8 @@ use crate::backend::{Allocation, Backend, Cpu, Npu};
 use crate::constraints;
 use crate::context::*;
 use crate::runtime::{
-    CurrentBackend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, Prepared, Region, Returned, Submitted, Work,
+    CurrentBackend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Prepared,
+    Region, Returned, Submitted, Work,
 };
 use crate::scalar::*;
 use crate::tensor::view::Tiled;
@@ -123,7 +124,7 @@ impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> 
         dma: &'t mut DmaContext<{ Dma::Pcie }, B>,
     ) -> Prepared<ToHbm<'t, D, Element, Chip, Element2, B>> {
         Prepared::new(ToHbm {
-            host: self,
+            host: Source::Tensor(self),
             dma,
             to: Returned,
             _marker: PhantomData,
@@ -202,6 +203,98 @@ impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> 
     }
 }
 
+/// Host bytes read as `D` values laid out as `Element`, such as one row of a larger host buffer;
+/// [`Self::to_hbm`] copies them as [`HostTensor::to_hbm`] copies a tensor.
+pub struct HostTensorView<'a, D: MaterializableScalar, Element: M, B: Backend = CurrentBackend> {
+    bytes: HostBufferSlice<'a>,
+    shape: PhantomData<fn() -> (D, Element, B)>,
+}
+
+/// Host bytes to hold `D` values laid out as `Element`, which [`HbmTensor::to_host`] reads into
+/// with `.output(view)`.
+pub struct HostTensorViewMut<'a, D: MaterializableScalar, Element: M, B: Backend = CurrentBackend> {
+    bytes: HostBufferSliceMut<'a>,
+    shape: PhantomData<fn() -> (D, Element, B)>,
+}
+
+/// `bytes` read as the tensor, once their length is its.
+impl<'a, D: MaterializableScalar, Element: M, B: Backend> TryFrom<HostBufferSlice<'a>>
+    for HostTensorView<'a, D, Element, B>
+{
+    type Error = Error;
+
+    fn try_from(bytes: HostBufferSlice<'a>) -> Result<Self, Error> {
+        if bytes.0.len() != D::size_in_bytes_from_length(Element::SIZE) {
+            return Err(Error::Invalid("the host bytes' length is not the tensor's"));
+        }
+        Ok(Self {
+            bytes,
+            shape: PhantomData,
+        })
+    }
+}
+
+/// `bytes` to hold the tensor, once their length is its.
+impl<'a, D: MaterializableScalar, Element: M, B: Backend> TryFrom<HostBufferSliceMut<'a>>
+    for HostTensorViewMut<'a, D, Element, B>
+{
+    type Error = Error;
+
+    fn try_from(bytes: HostBufferSliceMut<'a>) -> Result<Self, Error> {
+        if bytes.0.len() != D::size_in_bytes_from_length(Element::SIZE) {
+            return Err(Error::Invalid("the host bytes' length is not the tensor's"));
+        }
+        Ok(Self {
+            bytes,
+            shape: PhantomData,
+        })
+    }
+}
+
+/// The tensor's own memory, to read into.
+impl<'a, D: MaterializableScalar, Element: M, B: Backend> From<&'a mut HostTensor<D, Element, B>>
+    for HostTensorViewMut<'a, D, Element, B>
+{
+    fn from(host: &'a mut HostTensor<D, Element, B>) -> Self {
+        Self {
+            bytes: B::bytes_mut(host.storage_mut()),
+            shape: PhantomData,
+        }
+    }
+}
+
+impl<'a, D: MaterializableScalar, Element: M, B: Backend> HostTensorView<'a, D, Element, B> {
+    /// Prepares a transfer of these values to HBM, as [`HostTensor::to_hbm`] does: `.await` into a
+    /// fresh device allocation, `.output(&mut hbm).await` into an existing one.
+    pub fn to_hbm<Chip: M, Element2: M>(
+        self,
+        dma: &'a mut DmaContext<{ Dma::Pcie }, B>,
+    ) -> Prepared<ToHbm<'a, D, Element, Chip, Element2, B>> {
+        Prepared::new(ToHbm {
+            host: Source::View(self),
+            dma,
+            to: Returned,
+            _marker: PhantomData,
+        })
+    }
+}
+
+impl<D: MaterializableScalar, Element: M, B: Backend> std::fmt::Debug for HostTensorView<'_, D, Element, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostTensorView")
+            .field("bytes", &self.bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<D: MaterializableScalar, Element: M, B: Backend> std::fmt::Debug for HostTensorViewMut<'_, D, Element, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostTensorViewMut")
+            .field("bytes", &self.bytes)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Tensor stored in HBM memory: device memory with a type.
 ///
 /// `TryFrom<crate::HbmBuffer>` takes a buffer whose per-chip size, chip count and alignment fit the
@@ -229,6 +322,26 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> TryFrom<crate::HbmBuffer<B>> fo
             return Err(Error::Invalid("the buffer is larger than the tensor"));
         }
         Ok(Self::from_buffer(buffer.0))
+    }
+}
+
+/// The tensor's memory on every chip, for a batch to read: the cells of `m![Chip, Element]`, chip
+/// after chip in rank order.
+impl<'a, D: Scalar, Chip: M, Element: M, B: Backend> From<&'a HbmTensor<D, Chip, Element, B>>
+    for HbmBufferSlice<'a, B>
+{
+    fn from(tensor: &'a HbmTensor<D, Chip, Element, B>) -> Self {
+        tensor.memory()
+    }
+}
+
+/// The tensor's memory on every chip, for a batch to write: the cells of `m![Chip, Element]`, chip
+/// after chip in rank order.
+impl<'a, D: Scalar, Chip: M, Element: M, B: Backend> From<&'a mut HbmTensor<D, Chip, Element, B>>
+    for HbmBufferSliceMut<'a, B>
+{
+    fn from(tensor: &'a mut HbmTensor<D, Chip, Element, B>) -> Self {
+        tensor.memory_mut()
     }
 }
 
@@ -2311,25 +2424,44 @@ mod tests {
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct ToHbm<'t, D: MaterializableScalar, Element: M, Chip: M, Element2: M, B: Backend, To = Returned> {
-    host: &'t HostTensor<D, Element, B>,
+    host: Source<'t, D, Element, B>,
     dma: &'t mut DmaContext<{ Dma::Pcie }, B>,
     to: To,
     _marker: PhantomData<(Chip, Element2)>,
 }
 
-impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> {
-    /// Submits a copy of this tensor into `hbm`, relaid out on the host first unless it already
-    /// lays the cells out as `hbm` does, since a backend moves bytes unchanged.
+/// The host values a transfer to HBM copies: a host tensor, relaid out from its own storage, or
+/// host bytes a view types.
+#[derive(Debug)]
+enum Source<'t, D: MaterializableScalar, Element: M, B: Backend> {
+    Tensor(&'t HostTensor<D, Element, B>),
+    View(HostTensorView<'t, D, Element, B>),
+}
+
+impl<D: MaterializableScalar, Element: M, B: Backend> Source<'_, D, Element, B> {
+    /// Submits a copy of these values into `hbm`, relaid out on the host first unless they already
+    /// lay the cells out as `hbm` does, since a backend moves bytes unchanged.
     fn copy_to<Chip: M, Element2: M>(
-        &self,
+        self,
         device: &B::Device,
         hbm: &mut HbmTensor<D, Chip, Element2, B>,
     ) -> impl Future<Output = Result<(), Error>> + Send + 'static + use<D, Element, Chip, Element2, B> {
-        if same_layout::<Element, Pair<Chip, Element2>>() {
-            return B::write(device, vec![(B::bytes(self.storage()), hbm.memory_mut())]);
-        }
-        let staged: Tensor<D, m![{ Chip }, { Element2 }], B> = self.inner().transpose(true);
-        B::write(device, vec![(B::bytes(&staged.inner), hbm.memory_mut())])
+        let written = if same_layout::<Element, Pair<Chip, Element2>>() {
+            let bytes = match self {
+                Self::Tensor(host) => B::bytes(host.storage()),
+                Self::View(view) => view.bytes,
+            };
+            Ok(B::write(device, vec![(bytes, hbm.memory_mut())]))
+        } else {
+            let staged: Result<Tensor<D, m![{ Chip }, { Element2 }], B>, Error> = match self {
+                Self::Tensor(host) => Ok(host.inner().transpose(true)),
+                Self::View(view) => {
+                    (view.bytes.bytes()).map(|bytes| Tensor::<D, Element, B>::from_buf(bytes.to_vec()).transpose(true))
+                }
+            };
+            staged.map(|staged| B::write(device, vec![(B::bytes(&staged.inner), hbm.memory_mut())]))
+        };
+        async move { written?.await }
     }
 }
 
@@ -2415,29 +2547,28 @@ impl<D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend> Work
     }
 }
 
-/// Reads into `host`'s own storage when it lays the cells out as the HBM tensor does; otherwise
-/// into storage in the HBM layout, relaid out into `host` once the read ended.
+/// Reads into the view's bytes when they lay the cells out as the HBM tensor does; otherwise into
+/// storage in the HBM layout, relaid out into the view's bytes once the read ended.
 impl<'h, D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend> Work
-    for ToHost<'_, D, Chip, Element, Element2, B, &'h mut HostTensor<D, Element2, B>>
+    for ToHost<'_, D, Chip, Element, Element2, B, HostTensorViewMut<'h, D, Element2, B>>
 {
     type Output = ();
     type Future = impl Future<Output = Result<(), Error>> + 'h;
 
     fn submit(self) -> Submitted<Self::Future> {
-        let host = self.to;
         let mut staged = (!same_layout::<Element2, Pair<Chip, Element>>())
             .then(|| Tensor::<D, m![{ Chip }, { Element }], B>::zeroed().inner);
-        let into = match &mut staged {
-            Some(staged) => B::bytes_mut(staged),
-            None => B::bytes_mut(host.storage_mut()),
+        let (into, host) = match &mut staged {
+            Some(staged) => (B::bytes_mut(staged), Some(self.to.bytes)),
+            None => (self.to.bytes, None),
         };
         let read = B::read(self.dma.device(), vec![(self.hbm.memory(), into)]);
         Submitted(async move {
             read.await?;
-            if let Some(staged) = staged {
-                *host = Tensor::<D, m![{ Chip }, { Element }], B>::from_inner(staged)
-                    .transpose(true)
-                    .into();
+            if let (Some(staged), Some(host)) = (staged, host) {
+                let staged = Tensor::<D, m![{ Chip }, { Element }], B>::from_inner(staged);
+                let relaid: Tensor<D, Element2, B> = staged.transpose(true);
+                host.into_bytes()?.copy_from_slice(&B::bytes(&relaid.inner).bytes()?);
             }
             Ok(())
         })
@@ -2447,23 +2578,23 @@ impl<'h, D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend> 
 impl<'t, D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend>
     Prepared<ToHost<'t, D, Chip, Element, Element2, B>>
 {
-    /// Reads into `host`'s own memory instead of fresh memory; the submitted read borrows `host`
-    /// alone, not the DMA context.
+    /// Reads into `host`, a host tensor's own memory or host bytes a [`HostTensorViewMut`] types,
+    /// instead of fresh memory; the submitted read borrows `host` alone, not the DMA context.
     pub fn output<'h>(
         self,
-        host: &'h mut HostTensor<D, Element2, B>,
-    ) -> Prepared<ToHost<'t, D, Chip, Element, Element2, B, &'h mut HostTensor<D, Element2, B>>> {
+        host: impl Into<HostTensorViewMut<'h, D, Element2, B>>,
+    ) -> Prepared<ToHost<'t, D, Chip, Element, Element2, B, HostTensorViewMut<'h, D, Element2, B>>> {
         let ToHost { hbm, dma, _marker, .. } = self.into_work();
         Prepared::new(ToHost {
             hbm,
             dma,
-            to: host,
+            to: host.into(),
             _marker,
         })
     }
 }
 
 /// Whether `A` and `B` lay the same cells out in the same order, so their bytes agree.
-fn same_layout<A: M, B: M>() -> bool {
+pub fn same_layout<A: M, B: M>() -> bool {
     A::SIZE == B::SIZE && A::to_value().normalize() == B::to_value().normalize()
 }

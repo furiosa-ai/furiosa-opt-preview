@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 pub(crate) mod access;
 mod allocator;
-pub(crate) use access::{Active, Admission, Owner, Region, Waiters};
+pub(crate) use access::{Active, Admission, Owner, Request, Waiters};
 pub use access::{Blocks, Hold, Lease};
 pub use allocator::Allocator;
 pub(crate) use allocator::{Ranges, Reservation};

@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Weak};
 
-use crate::buffer::{Lease, Owner, Region};
+use crate::buffer::{Lease, Owner, Request};
 use crate::pinned::{DmaBuf, Registration};
 use crate::{Access, Buffer, BufferSlice, BufferSliceMut, Device, Error, Hold, HostBufferSliceMut, Result};
 
@@ -106,14 +106,14 @@ impl Arguments {
                 .iter()
                 .filter_map(|operand| match operand {
                     Operand::Device { access, .. } => {
-                        Some(Region::from((operand.buffer().expect("device operand"), *access)))
+                        Some(Request::from((operand.buffer().expect("device operand"), *access)))
                     }
                     Operand::Host {
                         allocation,
                         registration,
                         offset,
                         len,
-                    } => Some(Region::host(
+                    } => Some(Request::host(
                         crate::pinned::Backing {
                             dmabuf: allocation,
                             registration: Some(registration),
@@ -124,7 +124,7 @@ impl Arguments {
                     )),
                     Operand::Unbound | Operand::Value(_) => None,
                 })
-                .chain(held.into_iter().map(Region::from)),
+                .chain(held.into_iter().map(Request::from)),
         )
     }
 

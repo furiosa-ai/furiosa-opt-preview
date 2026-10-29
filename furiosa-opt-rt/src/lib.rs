@@ -15,7 +15,7 @@ pub mod registry;
 pub use buffer::{Access, Blocks, Buffer, BufferSlice, BufferSliceMut, Hold, Lease};
 pub use device::{Clock, ClockReading, Device, Transfer};
 pub use function::{Argument, Arguments, Each, Epilogue, Function, Launch, Supplied, Supply};
-pub use pinned::{HostBufferSlice, HostBufferSliceMut, Pinned};
+pub use pinned::{Bytes, BytesMut, HostBufferSlice, HostBufferSliceMut, Pinned};
 pub use placement::{Placement, ToPlacements, Topology};
 
 /// Why the runtime refused or failed a device operation.

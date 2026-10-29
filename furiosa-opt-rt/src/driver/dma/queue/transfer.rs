@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use super::{DmaQueue, Route, State};
 use crate::Result;
-use crate::buffer::{Lease, Region};
+use crate::buffer::{Lease, Request};
 
 /// A slot held by one caller; dropping it before submission releases its access.
 pub(crate) struct Transfer<'a> {
@@ -15,9 +15,9 @@ pub(crate) struct Transfer<'a> {
 
 impl Transfer<'_> {
     /// Holds `view` for this transfer's commands.
-    pub(crate) fn access(&mut self, region: impl Into<Region>) -> Result<()> {
+    pub(crate) fn access<'a>(&mut self, request: impl Into<Request<'a>>) -> Result<()> {
         let mut slot = self.queue.slots[self.index].lock().unwrap();
-        slot.access.extend([region.into()])
+        slot.access.extend([request.into()])
     }
 
     pub(crate) fn hold(&mut self, access: Lease) {
@@ -273,7 +273,9 @@ mod tests {
         let host = crate::test::pinned();
         let backing = host.slice(..).pinned.unwrap();
         let mut transfer = queue.acquire().await.unwrap();
-        transfer.access(Region::host(backing, 2, crate::Access::Write)).unwrap();
+        transfer
+            .access(Request::host(backing, 2, crate::Access::Write))
+            .unwrap();
         for offset in 0..2 {
             transfer.push(crate::driver::dma::Route::Channel(crate::driver::dma::Command::new(
                 0,
@@ -294,14 +296,14 @@ mod tests {
         fake.respond(tag, Ok(1));
         queue.complete();
         assert!(matches!(
-            Lease::new(1).extend([Region::host(backing, 2, crate::Access::Read)]),
+            Lease::new(1).extend([Request::host(backing, 2, crate::Access::Read)]),
             Err(crate::Error::Busy)
         ));
         fake.respond(tag + 1, Ok(1));
         queue.complete();
         assert!(
             Lease::new(1)
-                .extend([Region::host(backing, 2, crate::Access::Read)])
+                .extend([Request::host(backing, 2, crate::Access::Read)])
                 .is_ok()
         );
     }

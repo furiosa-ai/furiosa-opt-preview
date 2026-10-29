@@ -237,7 +237,7 @@ pub(crate) mod fixture {
             Some(host) => {
                 let backing = host.slice(..).pinned.unwrap();
                 transfer
-                    .access(crate::buffer::Region::host(backing, 1, Access::Write))
+                    .access(crate::buffer::Request::host(backing, 1, Access::Write))
                     .unwrap();
                 Host::Owned(Arc::clone(backing.dmabuf), 0)
             }

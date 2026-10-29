@@ -11,7 +11,7 @@ use arrayvec::ArrayVec;
 use smallvec::SmallVec;
 
 use crate::arch::rngd;
-use crate::buffer::{Admission, Lease, Region, Waiters};
+use crate::buffer::{Admission, Lease, Request, Waiters};
 use crate::device::{Contention, Device};
 use crate::driver::dma::{Command, Copy, Direction, Host, Route};
 use crate::memory::Kind;
@@ -258,7 +258,7 @@ impl TransferContext {
             let result = transfer
                 .access((piece.view, Access::Write))
                 .and_then(|()| match pair.pinned {
-                    Some(backing) => transfer.access(Region::host(
+                    Some(backing) => transfer.access(Request::host(
                         Backing {
                             offset: backing.offset + piece.at,
                             ..backing
@@ -348,11 +348,11 @@ impl TransferContext {
             .map(|(commands, count)| {
                 // A piece holds its device bytes, and its host bytes when they are pinned.
                 let mut lease = Lease::new(2 * count);
-                let regions = pieces.by_ref().take(count).flat_map(|piece| {
+                let requests = pieces.by_ref().take(count).flat_map(|piece| {
                     let pair = &pairs[piece.pair];
-                    let device = Region::from((piece.view, device_access));
+                    let device = Request::from((piece.view, device_access));
                     let host = pair.pinned.map(|backing| {
-                        Region::host(
+                        Request::host(
                             Backing {
                                 offset: backing.offset + piece.at,
                                 ..backing
@@ -363,7 +363,7 @@ impl TransferContext {
                     });
                     std::iter::once(device).chain(host)
                 });
-                lease.enqueue(&admission, regions)?;
+                lease.enqueue(&admission, requests)?;
                 Ok(Slot {
                     commands,
                     lease,

@@ -8,7 +8,7 @@ use furiosa_opt_macro::primitive;
 
 use crate::Error;
 use crate::backend::{Allocation, Backend, Runtime};
-use crate::runtime::{CurrentBackend, Kind, Usage};
+use crate::runtime::{Bytes, BytesMut, CurrentBackend, Kind, Usage};
 
 /// A byte range at the same offset on every chip of a device, which an
 /// [`HbmTensor`](crate::tensor::memory::HbmTensor) takes by `TryFrom` and gives back by
@@ -269,10 +269,12 @@ impl<'a, B: Backend> From<&'a mut HbmBuffer<B>> for HbmBufferSliceMut<'a, B> {
 
 /// Host memory for transfers: page-locked where the system provides it, so a transfer reads or
 /// writes it directly and asynchronously; otherwise ordinary memory, whose transfer completes before
-/// its first poll returns. CPU access through `Deref` waits for any transfer still using it.
+/// its first poll returns. CPU access through `Deref` waits for any transfer still using it; a
+/// slice's [`HostBufferSlice::bytes`] waits only for the transfers on its own bytes.
 ///
 /// # Panics
-/// CPU access panics if failed device work leaves the pinned buffer's contents unknown.
+/// CPU access through `Deref` panics if failed device work leaves the pinned buffer's contents
+/// unknown; a slice's `bytes` and `into_bytes` return that error instead.
 pub struct HostBuffer(HostMemory);
 
 enum HostMemory {
@@ -419,7 +421,22 @@ pub struct HostBufferSlice<'a>(pub(crate) furiosa_opt_rt::HostBufferSlice<'a>);
 #[derive(Debug)]
 pub struct HostBufferSliceMut<'a>(pub(crate) furiosa_opt_rt::HostBufferSliceMut<'a>);
 
-impl HostBufferSliceMut<'_> {
+impl HostBufferSlice<'_> {
+    /// Consecutive pieces of `len` bytes, the last one shorter (one byte each when `len` is zero),
+    /// each keeping its place in the memory, so one batch can move them apart.
+    pub fn chunks(self, len: usize) -> impl Iterator<Item = Self> {
+        self.0.chunks(len).map(Self)
+    }
+
+    /// The bytes, once the device work submitted before this call that writes them ended; work on
+    /// other bytes of the memory is not waited for. `DeviceError::Poisoned` once failed device work
+    /// left the memory unknown.
+    pub fn bytes(&self) -> Result<Bytes<'_>, Error> {
+        Ok(self.0.bytes()?)
+    }
+}
+
+impl<'a> HostBufferSliceMut<'a> {
     /// The bytes before `offset` and from it on, so one batch can read into them apart.
     pub fn split_at(self, offset: usize) -> Result<(Self, Self), Error> {
         if offset > self.0.len() {
@@ -427,6 +444,18 @@ impl HostBufferSliceMut<'_> {
         }
         let (head, tail) = self.0.split_at(offset);
         Ok((Self(head), Self(tail)))
+    }
+
+    /// [`HostBufferSlice::chunks`] of these bytes, to read into apart.
+    pub fn chunks(self, len: usize) -> impl Iterator<Item = Self> {
+        self.0.chunks(len).map(Self)
+    }
+
+    /// The bytes, to write, once the device work submitted before this call on them ended; work on
+    /// other bytes of the memory is not waited for. `DeviceError::Poisoned` once failed device work
+    /// left the memory unknown.
+    pub fn into_bytes(self) -> Result<BytesMut<'a>, Error> {
+        Ok(self.0.into_bytes()?)
     }
 }
 

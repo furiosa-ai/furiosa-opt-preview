@@ -277,3 +277,115 @@ async fn batches_accept_empty_input() -> Result<(), Error> {
     assert_eq!(device.memory().usage().available, available);
     Ok(())
 }
+
+/// A host slice's pieces are its consecutive byte ranges: a batch fills them in order, and each one
+/// reads and writes only its own bytes.
+#[tokio::test]
+async fn host_slices_split_into_pieces() -> Result<(), Error> {
+    let mut device = Device::<Cpu>::new(Topology { chips: 1, pes: 8 })?;
+    let source = HostBufferSlice::from(&(0..10).collect::<Vec<u8>>())
+        .to_hbm(&mut device.pdma)
+        .await?;
+    let mut host = HostBuffer::zero(10);
+    let rows = [source.slice(.., ..4)?, source.slice(.., 4..8)?, source.slice(.., 8..)?];
+    device
+        .pdma
+        .to_host(rows.into_iter().zip(host.slice_mut(..)?.chunks(4)))
+        .await?;
+    let pieces = (host.slice(..)?.chunks(4))
+        .map(|piece| Ok(piece.bytes()?.to_vec()))
+        .collect::<Result<Vec<_>, Error>>()?;
+    assert_eq!(pieces, [vec![0, 1, 2, 3], vec![4, 5, 6, 7], vec![8, 9]]);
+    let (_, tail) = host.slice_mut(..)?.split_at(8)?;
+    tail.into_bytes()?.copy_from_slice(&[7, 7]);
+    assert_eq!(host[..], [0, 1, 2, 3, 4, 5, 6, 7, 7, 7]);
+    Ok(())
+}
+
+/// A typed tensor's memory moves in a byte batch as its cells in `m![Chip, Element]` order.
+#[tokio::test]
+async fn tensors_move_in_byte_batches() -> Result<(), Error> {
+    axes![Rank = 2];
+    let mut device = Device::<Cpu>::new(Topology { chips: 2, pes: 8 })?;
+    let mut tensor = HostTensor::<i32, m![A, Rank]>::from_vec(0..32)
+        .to_hbm::<m![Rank], m![A]>(&mut device.pdma)
+        .await?;
+    let bytes = |values: Vec<i32>| values.into_iter().flat_map(i32::to_le_bytes).collect::<Vec<u8>>();
+    let mut host = HostBuffer::zero(128);
+    device.pdma.to_host([(&tensor, &mut host)]).await?;
+    let chip_major = (0..2).flat_map(|rank| (0..16).map(move |a| a * 2 + rank));
+    assert_eq!(host[..], bytes(chip_major.collect())[..]);
+    device
+        .pdma
+        .to_hbm([(&bytes((100..132).collect()), &mut tensor)])
+        .await?;
+    let read = tensor.to_host::<m![Rank, A]>(&mut device.pdma).await?;
+    assert_eq!(read.into_vec(), (100..132).collect::<Vec<_>>());
+    Ok(())
+}
+
+/// Two mappings lay their cells out alike exactly when their bytes agree: an axis of size one
+/// may sit anywhere, other axes keep their order.
+#[test]
+fn compares_layouts() {
+    axes![Block = 4, Kv = 2, Head = 2, Width = 8];
+    assert!(same_layout::<
+        m![Block, Kv, { m![1] }, Head, Width],
+        m![1, Block, Kv, Head, Width],
+    >());
+    assert!(!same_layout::<m![Block, Kv, Head, Width], m![Kv, Block, Head, Width]>());
+}
+
+/// Rows of a host buffer, typed as tensors, move to and from device tensors as host tensors of
+/// those types do, relaid out where a row's order is not the device's; other rows keep their bytes.
+#[tokio::test]
+async fn views_move_rows_of_host_memory() -> Result<(), Error> {
+    axes![Rank = 2, Head = 2, Lane = 4];
+    type Row = m![Head, Rank, Lane];
+    type ChipMajor = m![Rank, Lane, Head];
+    let mut device = Device::<Cpu>::new(Topology { chips: 2, pes: 8 })?;
+    let chip_major: Vec<i32> = (0..2)
+        .flat_map(|rank| (0..4).flat_map(move |lane| (0..2).map(move |head| head * 8 + rank * 4 + lane)))
+        .collect();
+    let mut host = HostBuffer::zero(4 * 64);
+    host[64..128].copy_from_slice(&HostTensor::<i32, Row>::from_vec(0..16).into_buffer());
+
+    let mut tensor = HostTensorView::<i32, Row>::try_from(host.slice(64..128)?)?
+        .to_hbm::<m![Rank], m![Lane, Head]>(&mut device.pdma)
+        .await?;
+    assert_eq!(
+        tensor.to_host::<ChipMajor>(&mut device.pdma).await?.into_vec(),
+        chip_major
+    );
+    (tensor.to_host::<ChipMajor>(&mut device.pdma))
+        .output(HostTensorViewMut::try_from(host.slice_mut(128..192)?)?)
+        .await?;
+    assert_eq!(
+        &host[128..192],
+        &*HostTensor::<i32, ChipMajor>::from_vec(chip_major).into_buffer()
+    );
+
+    HostBufferSlice::from(&[0; 64])
+        .to_hbm(&mut device.pdma)
+        .output(&mut tensor)
+        .await?;
+    (HostTensorView::<i32, ChipMajor>::try_from(host.slice(128..192)?)?.to_hbm(&mut device.pdma))
+        .output(&mut tensor)
+        .await?;
+    (tensor.to_host::<Row>(&mut device.pdma))
+        .output(HostTensorViewMut::try_from(host.slice_mut(192..)?)?)
+        .await?;
+    assert_eq!(host[192..], host[64..128]);
+    assert_eq!(host[..64], [0; 64]);
+    Ok(())
+}
+
+/// A host view takes host bytes of exactly its tensor's length.
+#[test]
+fn views_refuse_other_lengths() -> Result<(), Error> {
+    let mut host = HostBuffer::zero(68);
+    assert!(invalid(HostTensorView::<i32, m![A]>::try_from(host.slice(..60)?)));
+    assert!(invalid(HostTensorViewMut::<i32, m![A]>::try_from(host.slice_mut(..)?)));
+    assert!(HostTensorView::<i32, m![A]>::try_from(host.slice(4..)?).is_ok());
+    Ok(())
+}

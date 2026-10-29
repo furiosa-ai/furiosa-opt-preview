@@ -52,12 +52,12 @@ impl Lease {
 
     /// Adds regions to this batch; a conflict releases only the regions this call added, since
     /// the earlier ones guard work already queued.
-    pub(crate) fn extend<T: Into<Region>>(&mut self, regions: impl IntoIterator<Item = T>) -> Result<()> {
+    pub(crate) fn extend<'a, T: Into<Request<'a>>>(&mut self, requests: impl IntoIterator<Item = T>) -> Result<()> {
         if let Owner::Ordered(_) = self.owner {
             assert_eq!(self.len, 0, "an ordered owner admits one complete batch");
         }
         let mark = self.len;
-        coalesce(regions.into_iter().map(Into::into))
+        coalesce(requests.into_iter().map(Into::into))
             .try_for_each(|request| self.hold(request, Queued::Excludes).map(drop))
             .inspect_err(|_| self.truncate(mark))?;
         self.seal();
@@ -66,7 +66,7 @@ impl Lease {
 
     /// Adds a launch's regions as [`Self::extend`] does, except that queued work on their bytes does
     /// not refuse them: they wait for it, and work queued after them waits for them in turn.
-    pub(crate) fn admit<T: Into<Region>>(&mut self, regions: impl IntoIterator<Item = T>) -> Result<()> {
+    pub(crate) fn admit<'a, T: Into<Request<'a>>>(&mut self, requests: impl IntoIterator<Item = T>) -> Result<()> {
         if let Owner::Ordered(_) = self.owner {
             assert_eq!(self.len, 0, "an ordered owner admits one complete batch");
         }
@@ -74,7 +74,7 @@ impl Lease {
         // Batches queue under the same lock, so in every allocation each one is all before these
         // regions or all after them, which leaves no cycle of work waiting for each other.
         let admission = Admission::begin();
-        let behind = coalesce(regions.into_iter().map(Into::into))
+        let behind = coalesce(requests.into_iter().map(Into::into))
             .try_fold(false, |behind, request| {
                 self.hold(request, Queued::Precedes).map(|waits| waits | behind)
             })
@@ -102,21 +102,21 @@ impl Lease {
         self.records.len()
     }
 
-    /// Adds `regions` of queued work without refusing conflicts: [`Self::ready`] waits for them.
+    /// Adds `requests` of queued work without refusing conflicts: [`Self::ready`] waits for them.
     /// `admission` keeps every region of one batch ahead of every later batch's, in every
     /// allocation, so two batches never wait for each other.
-    pub(crate) fn enqueue(&mut self, admission: &Admission, regions: impl IntoIterator<Item = Region>) -> Result<()> {
+    pub(crate) fn enqueue<'a>(
+        &mut self,
+        admission: &Admission,
+        requests: impl IntoIterator<Item = Request<'a>>,
+    ) -> Result<()> {
         let mark = self.len;
-        let mut regions = coalesce(regions).collect::<Vec<_>>();
+        let mut requests = coalesce(requests).collect::<Vec<_>>();
         // Grouped by allocation, the lease's records there take one lock, one sequence and one list.
-        regions.sort_unstable_by_key(|region| ptr::from_ref(region.allocation.active()).addr());
-        (regions.chunk_by(|left, right| left.allocation.same(&right.allocation)))
+        requests.sort_unstable_by_key(|request| ptr::from_ref(request.memory.active()).addr());
+        (requests.chunk_by(|left, right| left.memory.same(right.memory)))
             .try_for_each(|group| {
-                let mut active = group[0]
-                    .allocation
-                    .active()
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let mut active = group[0].memory.active().lock().unwrap_or_else(PoisonError::into_inner);
                 if active.poisoned {
                     return Err(Error::Poisoned);
                 }
@@ -128,13 +128,10 @@ impl Lease {
                 }
                 let sequence = active.admitted;
                 for request in requests {
-                    let region = Region {
-                        owner: Cell::new(Owner::Unordered),
-                        sequence,
-                        batch: Some(*admission.batch),
-                        ..request.clone()
-                    };
-                    active.insert(&self.records[self.len], region);
+                    active.insert(
+                        &self.records[self.len],
+                        request.region(sequence, Some(*admission.batch)),
+                    );
                     self.len += 1;
                 }
                 Ok(())
@@ -147,10 +144,10 @@ impl Lease {
     pub(crate) fn ready(&self) -> impl Future<Output = Result<()>> + Send + '_ {
         std::future::poll_fn(|context| {
             let mut regions = self.regions().collect::<Vec<_>>();
-            regions.sort_unstable_by_key(|region| ptr::from_ref(region.allocation.active()).addr());
-            for group in regions.chunk_by(|left, right| left.allocation.same(&right.allocation)) {
+            regions.sort_unstable_by_key(|region| ptr::from_ref(region.memory().active()).addr());
+            for group in regions.chunk_by(|left, right| left.memory().same(right.memory())) {
                 let mut active = group[0]
-                    .allocation
+                    .memory()
                     .active()
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
@@ -176,13 +173,9 @@ impl Lease {
 
     /// Holds `request` in this batch's next record, unless work already holding its bytes refuses
     /// it; true when queued work holds some of them, which `queued` says it then waits for.
-    fn hold(&mut self, request: Region, queued: Queued) -> Result<bool> {
+    fn hold(&mut self, request: Request<'_>, queued: Queued) -> Result<bool> {
         // Nothing panics while a list is half updated, so a poisoned lock still guards a whole list.
-        let mut active = request
-            .allocation
-            .active()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut active = request.memory.active().lock().unwrap_or_else(PoisonError::into_inner);
         if active.poisoned {
             return Err(Error::Poisoned);
         }
@@ -190,7 +183,7 @@ impl Lease {
             return Ok(false);
         }
         let record = self.records.get(self.len).ok_or(Error::Capacity)?;
-        if active.refuses(&request, self.owner.on(&request.allocation)) {
+        if active.refuses(&request, self.owner.on(request.memory)) {
             return Err(Error::Busy);
         }
         let behind = active.blocker(&request, active.admitted).is_some();
@@ -198,20 +191,7 @@ impl Lease {
             return Err(Error::Busy);
         }
         let sequence = active.admitted;
-        active.insert(
-            record,
-            Region {
-                allocation: request.allocation.clone(),
-                bytes: request.bytes,
-                chips: request.chips,
-                access: request.access,
-                blocks: request.blocks,
-                // Batch members stay non-exempt until intra-launch aliases have been checked.
-                owner: Cell::new(Owner::Unordered),
-                sequence,
-                batch: None,
-            },
-        );
+        active.insert(record, request.region(sequence, None));
         self.len += 1;
         Ok(behind)
     }
@@ -220,14 +200,10 @@ impl Lease {
     /// the bytes they conflict with; [`Error::Poisoned`] once that work left them unknown.
     fn follow(&self, mark: usize) -> Result<()> {
         for region in self.regions().skip(mark) {
-            let mut active = region
-                .allocation
-                .active()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut active = region.memory().active().lock().unwrap_or_else(PoisonError::into_inner);
             let idle = Arc::clone(&active.idle);
             // Earlier records only leave, so each blocker is looked for once, not at every wake.
-            while let Some(blocker) = active.blocker(region, region.sequence) {
+            while let Some(blocker) = active.blocker(&region.request(), region.sequence) {
                 while !active.poisoned && active.batches.contains_key(&blocker) {
                     active = idle.wait(active).unwrap_or_else(PoisonError::into_inner);
                 }
@@ -248,12 +224,8 @@ impl Lease {
         for record in &self.records[..self.len] {
             // SAFETY: this Lease owns the region; its allocation mutex excludes list readers.
             let region = unsafe { &*record.region.get() }.as_ref().expect("owned access");
-            let mut active = region
-                .allocation
-                .active()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let owner = self.owner.on(&region.allocation);
+            let mut active = region.memory().active().lock().unwrap_or_else(PoisonError::into_inner);
+            let owner = self.owner.on(region.memory());
             region.owner.set(owner);
             if let Owner::Ordered(_) = owner {
                 active.unordered -= 1;
@@ -266,11 +238,7 @@ impl Lease {
             // SAFETY: Lease owns this region until unlink; no shared Lease method can run concurrently.
             let region = unsafe { &*record.region.get() }.as_ref().expect("owned access");
             let waiters = {
-                let mut active = region
-                    .allocation
-                    .active()
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let mut active = region.memory().active().lock().unwrap_or_else(PoisonError::into_inner);
                 let (prev, next) = (record.prev.replace(ptr::null()), record.next.replace(ptr::null()));
                 // SAFETY: every neighbor remains linked and alive under this allocation's mutex.
                 match (unsafe { prev.as_ref() }, region.batch) {
@@ -317,19 +285,17 @@ impl BufferSlice<'_> {
     /// admitted later is not waited for. [`Error::Poisoned`] once failed device work left the
     /// memory unknown.
     pub fn ready(self, access: Access) -> impl Future<Output = Result<()>> + Send + use<> {
-        let request = Region::from((self, access));
-        let before = request
-            .allocation
+        // The future outlives the view, so it keeps the memory as a record does.
+        let held = Request::from((self, access)).region(0, None);
+        let before = held
+            .memory()
             .active()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .admitted;
         std::future::poll_fn(move |context| {
-            let mut active = request
-                .allocation
-                .active()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let request = held.request();
+            let mut active = request.memory.active().lock().unwrap_or_else(PoisonError::into_inner);
             if active.poisoned {
                 return Poll::Ready(Err(Error::Poisoned));
             }
@@ -412,14 +378,14 @@ pub(crate) enum Owner {
 }
 
 impl Owner {
-    fn on(self, allocation: &Memory) -> Self {
-        match allocation {
-            Memory::Device(allocation)
+    fn on(self, memory: MemoryRef<'_>) -> Self {
+        match memory {
+            MemoryRef::Device(allocation)
                 if allocation.kind == Kind::DramShared && allocation.allocator.topology().chips > 1 =>
             {
                 Self::Unordered
             }
-            Memory::Device(_) | Memory::Host(_, _) => self,
+            MemoryRef::Device(_) | MemoryRef::Host(_, _) => self,
         }
     }
 }
@@ -449,11 +415,11 @@ unsafe impl Send for Active {}
 impl Active {
     /// Whether work admitted at once refuses `owner`'s `request` by conflicting with it, unless both
     /// are distinct ordered owners of memory they order alike.
-    fn refuses(&self, request: &Region, owner: Owner) -> bool {
+    fn refuses(&self, request: &Request<'_>, owner: Owner) -> bool {
         let overlaps = match owner {
-            Owner::Ordered(_) => match request.allocation {
-                Memory::Host(_, _) => overlap(&request.bytes, &self.bytes),
-                Memory::Device(_) => self.unordered != 0 && overlap(&request.bytes, &self.unordered_bytes),
+            Owner::Ordered(_) => match request.memory {
+                MemoryRef::Host(_, _) => overlap(&request.bytes, &self.bytes),
+                MemoryRef::Device(_) => self.unordered != 0 && overlap(&request.bytes, &self.unordered_bytes),
             },
             Owner::Unordered => overlap(&request.bytes, &self.bytes),
         };
@@ -462,7 +428,7 @@ impl Active {
             && self.list(self.head).any(|region| {
                 let exempt = match (owner, region.owner.get()) {
                     (Owner::Ordered(left), Owner::Ordered(right)) => {
-                        left != right && request.allocation.ordered(&region.allocation)
+                        left != right && request.memory.ordered(region.memory())
                     }
                     (Owner::Unordered, _) | (_, Owner::Unordered) => false,
                 };
@@ -472,7 +438,7 @@ impl Active {
 
     /// A queued lease admitted before `sequence`, by its batch and sequence, that holds bytes
     /// `request` conflicts with, if one does.
-    fn blocker(&self, request: &Region, sequence: u64) -> Option<(u64, u64)> {
+    fn blocker(&self, request: &Request<'_>, sequence: u64) -> Option<(u64, u64)> {
         if self.batches.is_empty()
             || (request.access == Access::Read && self.writers == 0)
             || !overlap(&request.bytes, &self.bytes)
@@ -530,7 +496,7 @@ impl Active {
                 other.sequence < sequence
                     && requests.iter().any(|request| {
                         inspect();
-                        other.sequence < request.sequence && other.conflicts(request)
+                        other.sequence < request.sequence && other.conflicts(&request.request())
                     })
             })
     }
@@ -567,8 +533,8 @@ unsafe impl Send for Record {}
 // readers of that region finish under the same mutex before it is unlinked and cleared.
 unsafe impl Sync for Record {}
 
-#[derive(Clone)]
-pub(crate) struct Region {
+/// A record's admitted request, owning the memory it holds until the record is released.
+struct Region {
     allocation: Memory,
     bytes: Range<usize>,
     chips: u8,
@@ -583,27 +549,28 @@ pub(crate) struct Region {
 }
 
 impl Region {
-    /// Blocks the CPU until no admitted work holds bytes this access conflicts with; panics once
-    /// the memory is poisoned, since its contents are then unknown. The CPU holds nothing after
-    /// the wait: the borrow its access comes from keeps new device work off the bytes.
-    pub(crate) fn wait(&self) {
-        let mut active = self.allocation.active().lock().unwrap_or_else(PoisonError::into_inner);
-        let idle = Arc::clone(&active.idle);
-        loop {
-            assert!(
-                !active.poisoned,
-                "DMA failed; this host allocation is no longer accessible"
-            );
-            if !active.refuses(self, Owner::Unordered) && active.blocker(self, u64::MAX).is_none() {
-                return;
-            }
-            active = idle.wait(active).unwrap_or_else(PoisonError::into_inner);
+    /// The memory this region holds, as a request names it.
+    fn memory(&self) -> MemoryRef<'_> {
+        match &self.allocation {
+            Memory::Device(allocation) => MemoryRef::Device(allocation),
+            Memory::Host(dmabuf, registration) => MemoryRef::Host(dmabuf, registration.as_ref()),
+        }
+    }
+
+    /// The request this region admitted.
+    fn request(&self) -> Request<'_> {
+        Request {
+            memory: self.memory(),
+            bytes: self.bytes.clone(),
+            chips: self.chips,
+            access: self.access,
+            blocks: self.blocks.as_ref(),
         }
     }
 
     /// Makes the allocation refuse every later access, and fails the waits on it.
     fn poison(&self) {
-        let mut active = self.allocation.active().lock().unwrap_or_else(PoisonError::into_inner);
+        let mut active = self.memory().active().lock().unwrap_or_else(PoisonError::into_inner);
         active.poisoned = true;
         active.idle.notify_all();
         let waiters = active.waiters.take();
@@ -611,93 +578,142 @@ impl Region {
         waiters.wake();
     }
 
-    /// Whether this region's access and `other`'s race: either writes, on a shared chip, at a byte
-    /// both hold.
-    fn conflicts(&self, other: &Region) -> bool {
-        let common = self.bytes.start.max(other.bytes.start)..self.bytes.end.min(other.bytes.end);
-        if (self.access == Access::Read && other.access == Access::Read)
-            || self.chips & other.chips == 0
+    /// Whether this region's access and `request`'s race: either writes, on a shared chip, at a
+    /// byte both hold.
+    fn conflicts(&self, request: &Request<'_>) -> bool {
+        let common = self.bytes.start.max(request.bytes.start)..self.bytes.end.min(request.bytes.end);
+        if (self.access == Access::Read && request.access == Access::Read)
+            || self.chips & request.chips == 0
             || common.is_empty()
         {
             return false;
         }
-        match (&self.blocks, &other.blocks) {
+        match (&self.blocks, request.blocks) {
             (None, None) => true,
             (Some(blocks), None) => blocks.reach(self.bytes.start, &common),
-            (None, Some(blocks)) => blocks.reach(other.bytes.start, &common),
-            (Some(left), Some(right)) => left.meets(self.bytes.start, right, other.bytes.start, &common),
+            (None, Some(blocks)) => blocks.reach(request.bytes.start, &common),
+            (Some(left), Some(right)) => left.meets(self.bytes.start, right, request.bytes.start, &common),
         }
     }
 }
 
-#[derive(Clone)]
+/// One contiguous access a batch asks for, borrowing the memory it names from the caller.
+pub(crate) struct Request<'a> {
+    memory: MemoryRef<'a>,
+    bytes: Range<usize>,
+    chips: u8,
+    access: Access,
+    /// The blocks of `bytes` asked for, if not all of them.
+    blocks: Option<&'a Blocks>,
+}
+
+impl<'a> Request<'a> {
+    pub(crate) fn host(backing: crate::pinned::Backing<'a>, len: usize, access: Access) -> Self {
+        Self {
+            memory: MemoryRef::Host(backing.dmabuf, backing.registration),
+            bytes: backing.offset..backing.offset + len,
+            chips: 1,
+            access,
+            blocks: None,
+        }
+    }
+
+    /// Blocks the CPU until no admitted work holds bytes this access conflicts with;
+    /// [`Error::Poisoned`] once the memory is poisoned, since its contents are then unknown. The
+    /// CPU holds nothing after the wait: the borrow its access comes from keeps new device work off
+    /// the bytes.
+    pub(crate) fn wait(&self) -> Result<()> {
+        let mut active = self.memory.active().lock().unwrap_or_else(PoisonError::into_inner);
+        let idle = Arc::clone(&active.idle);
+        loop {
+            if active.poisoned {
+                return Err(Error::Poisoned);
+            }
+            if !active.refuses(self, Owner::Unordered) && active.blocker(self, u64::MAX).is_none() {
+                return Ok(());
+            }
+            active = idle.wait(active).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// The region a record holds for this request, as its allocation's `sequence`th record,
+    /// queued by `batch` if any.
+    fn region(&self, sequence: u64, batch: Option<u64>) -> Region {
+        Region {
+            allocation: match self.memory {
+                MemoryRef::Device(allocation) => Memory::Device(Arc::clone(allocation)),
+                MemoryRef::Host(dmabuf, registration) => Memory::Host(Arc::clone(dmabuf), registration.cloned()),
+            },
+            bytes: self.bytes.clone(),
+            chips: self.chips,
+            access: self.access,
+            blocks: self.blocks.cloned(),
+            // Batch members stay non-exempt until intra-launch aliases have been checked.
+            owner: Cell::new(Owner::Unordered),
+            sequence,
+            batch,
+        }
+    }
+}
+
+/// The memory a record keeps alive.
 enum Memory {
     Device(Arc<Allocation>),
     Host(Arc<DmaBuf>, Option<Arc<Registration>>),
 }
 
-impl Memory {
-    fn active(&self) -> &Mutex<Active> {
+/// The memory a request or record names, borrowed.
+#[derive(Clone, Copy)]
+enum MemoryRef<'a> {
+    Device(&'a Arc<Allocation>),
+    Host(&'a Arc<DmaBuf>, Option<&'a Arc<Registration>>),
+}
+
+impl<'a> MemoryRef<'a> {
+    fn active(self) -> &'a Mutex<Active> {
         match self {
             Self::Device(allocation) => &allocation.active,
             Self::Host(allocation, _) => &allocation.active,
         }
     }
 
-    fn same(&self, other: &Self) -> bool {
+    fn same(self, other: MemoryRef<'_>) -> bool {
         match (self, other) {
-            (Self::Device(left), Self::Device(right)) => Arc::ptr_eq(left, right),
-            (Self::Host(left, _), Self::Host(right, _)) => Arc::ptr_eq(left, right),
-            (Self::Device(_), Self::Host(_, _)) | (Self::Host(_, _), Self::Device(_)) => false,
+            (Self::Device(left), MemoryRef::Device(right)) => Arc::ptr_eq(left, right),
+            (Self::Host(left, _), MemoryRef::Host(right, _)) => Arc::ptr_eq(left, right),
+            (Self::Device(_), MemoryRef::Host(_, _)) | (Self::Host(_, _), MemoryRef::Device(_)) => false,
         }
     }
 
-    fn ordered(&self, other: &Self) -> bool {
+    fn ordered(self, other: MemoryRef<'_>) -> bool {
         match (self, other) {
-            (Self::Device(_), Self::Device(_)) => true,
-            (Self::Host(_, Some(left)), Self::Host(_, Some(right))) => Arc::ptr_eq(left, right),
+            (Self::Device(_), MemoryRef::Device(_)) => true,
+            (Self::Host(_, Some(left)), MemoryRef::Host(_, Some(right))) => Arc::ptr_eq(left, right),
             (Self::Host(_, None), _)
-            | (_, Self::Host(_, None))
-            | (Self::Device(_), Self::Host(_, Some(_)))
-            | (Self::Host(_, Some(_)), Self::Device(_)) => false,
+            | (_, MemoryRef::Host(_, None))
+            | (Self::Device(_), MemoryRef::Host(_, Some(_)))
+            | (Self::Host(_, Some(_)), MemoryRef::Device(_)) => false,
         }
     }
 }
 
-impl From<Hold<'_>> for Region {
-    fn from(Hold { view, access, blocks }: Hold<'_>) -> Self {
+/// A request may borrow no longer than the requests it is admitted beside.
+impl<'a: 'b, 'b> From<Hold<'a>> for Request<'b> {
+    fn from(Hold { view, access, blocks }: Hold<'a>) -> Self {
         let start = view.buffer.offset + view.offset;
         Self {
-            allocation: Memory::Device(Arc::clone(&view.buffer.allocation)),
+            memory: MemoryRef::Device(&view.buffer.allocation),
             bytes: start..start + view.len,
             chips: view.chips,
             access,
-            blocks: blocks.cloned(),
-            owner: Cell::new(Owner::Unordered),
-            sequence: 0,
-            batch: None,
+            blocks,
         }
     }
 }
 
-impl From<(BufferSlice<'_>, Access)> for Region {
-    fn from(pair: (BufferSlice<'_>, Access)) -> Self {
+impl<'a> From<(BufferSlice<'a>, Access)> for Request<'a> {
+    fn from(pair: (BufferSlice<'a>, Access)) -> Self {
         Hold::from(pair).into()
-    }
-}
-
-impl Region {
-    pub(crate) fn host(backing: crate::pinned::Backing<'_>, len: usize, access: Access) -> Self {
-        Self {
-            allocation: Memory::Host(Arc::clone(backing.dmabuf), backing.registration.cloned()),
-            bytes: backing.offset..backing.offset + len,
-            chips: 1,
-            access,
-            blocks: None,
-            owner: Cell::new(Owner::Unordered),
-            sequence: 0,
-            batch: None,
-        }
     }
 }
 
@@ -850,14 +866,14 @@ impl Blocks {
     }
 }
 
-fn coalesce(regions: impl IntoIterator<Item = Region>) -> impl Iterator<Item = Region> {
-    let mut regions = regions.into_iter().peekable();
+fn coalesce<'a>(requests: impl IntoIterator<Item = Request<'a>>) -> impl Iterator<Item = Request<'a>> {
+    let mut requests = requests.into_iter().peekable();
     std::iter::from_fn(move || {
-        let mut request = regions.next()?;
-        while let Some(next) = regions.next_if(|next| {
+        let mut request = requests.next()?;
+        while let Some(next) = requests.next_if(|next| {
             request.blocks.is_none()
                 && next.blocks.is_none()
-                && next.allocation.same(&request.allocation)
+                && next.memory.same(request.memory)
                 && next.chips == request.chips
                 && next.access == request.access
                 && next.bytes.start == request.bytes.end
@@ -904,7 +920,7 @@ mod tests {
     fn compares_fragments_with_other_work() {
         let buffer = allocation(8192);
         // Separate fragments, so none coalesce; other work holds later bytes, conflicting with none.
-        let fragment = |index: usize| Region::from((buffer.slice(8 * index..8 * index + 4).unwrap(), Write));
+        let fragment = |index: usize| Request::from((buffer.slice(8 * index..8 * index + 4).unwrap(), Write));
         let other = |index: usize| (buffer.slice(4096 + 64 * index..4096 + 64 * index + 32).unwrap(), Write);
         let wakes = Arc::new(Wakes::default());
         // Fragments, regions of other work admitted before them, fragments of the transfer's other slot.
@@ -915,7 +931,7 @@ mod tests {
                     0 => {
                         let mut lease = Lease::new(1);
                         lease
-                            .enqueue(&Admission::begin(), [Region::from(other(index))])
+                            .enqueue(&Admission::begin(), [Request::from(other(index))])
                             .unwrap();
                         lease
                     }
@@ -932,7 +948,7 @@ mod tests {
             drop(admission);
             let later = Lease::acquire([other(earlier)]).unwrap();
             let requests = lease.regions().collect::<Vec<_>>();
-            let active = requests[0].allocation.active().lock().unwrap();
+            let active = requests[0].memory().active().lock().unwrap();
             let mut count = 0;
             assert!(!active.blocks(&requests, || count += 1));
             drop(active);
@@ -948,7 +964,7 @@ mod tests {
     #[test]
     fn waits_for_earlier_work_of_others() {
         let buffer = allocation(512);
-        let write = |bytes: Range<usize>| Region::from((buffer.slice(bytes).unwrap(), Write));
+        let write = |bytes: Range<usize>| Request::from((buffer.slice(bytes).unwrap(), Write));
         let wakes = Arc::new(Wakes::default());
         let admission = Admission::begin();
         let mut first = Lease::new(2);
@@ -980,7 +996,7 @@ mod tests {
     #[test]
     fn releases_queued_leases() {
         let buffer = allocation(512);
-        let write = |bytes: Range<usize>| Region::from((buffer.slice(bytes).unwrap(), Write));
+        let write = |bytes: Range<usize>| Request::from((buffer.slice(bytes).unwrap(), Write));
         // Two separate fragments, so each slot links two records.
         let slot = |index: usize| {
             [
@@ -1028,7 +1044,7 @@ mod tests {
         let buffers = [allocation(256), allocation(256)];
         let regions = buffers
             .iter()
-            .flat_map(|buffer| [0..16, 32..48].map(|bytes| Region::from((buffer.slice(bytes).unwrap(), Write))));
+            .flat_map(|buffer| [0..16, 32..48].map(|bytes| Request::from((buffer.slice(bytes).unwrap(), Write))));
         let mut lease = Lease::new(3);
         assert_eq!(lease.enqueue(&Admission::begin(), regions), Err(Error::Capacity));
         let whole = buffers.each_ref().map(|buffer| (buffer.slice(..).unwrap(), Write));
@@ -1057,7 +1073,7 @@ mod tests {
             let _held = Lease::acquire([(view(&buffer, bytes, chips), access)]).unwrap();
             let (bytes, chips, access) = queued.clone();
             let mut lease = Lease::new(1);
-            let region = Region::from((view(&buffer, bytes, chips), access));
+            let region = Request::from((view(&buffer, bytes, chips), access));
             lease.enqueue(&Admission::begin(), [region]).unwrap();
             assert_eq!(
                 poll(&mut lease.ready(), &wakes).is_pending(),
@@ -1069,7 +1085,9 @@ mod tests {
         // Fragments alternating between two allocations at the same offsets wait in each only for
         // that allocation's earlier work.
         let (left, right) = (allocation(256), allocation(256));
-        let write = |buffer: &Buffer, bytes: Range<usize>| Region::from((buffer.slice(bytes).unwrap(), Write));
+        fn write(buffer: &Buffer, bytes: Range<usize>) -> Request<'_> {
+            Request::from((buffer.slice(bytes).unwrap(), Write))
+        }
         let earlier = Lease::acquire([(right.slice(64..80).unwrap(), Read)]).unwrap();
         let mut lease = Lease::new(4);
         let fragments = [(&left, 0..16), (&right, 0..16), (&left, 64..80), (&right, 64..80)];
@@ -1094,7 +1112,9 @@ mod tests {
     #[test]
     fn orders_concurrent_batches() {
         let (left, right) = (allocation(256), allocation(256));
-        let region = |buffer: &Buffer| Region::from((buffer.slice(..).unwrap(), Write));
+        fn region(buffer: &Buffer) -> Request<'_> {
+            Request::from((buffer.slice(..).unwrap(), Write))
+        }
         let batch = |first: &Buffer, second: &Buffer| {
             let admission = Admission::begin();
             let mut lease = Lease::new(2);
@@ -1281,7 +1301,7 @@ mod tests {
             );
             let mut queued = Lease::new(1);
             queued
-                .enqueue(&Admission::begin(), [Region::from((view, access))])
+                .enqueue(&Admission::begin(), [Request::from((view, access))])
                 .unwrap();
             assert_eq!(
                 poll(&mut queued.ready(), &wakes).is_pending(),
@@ -1357,7 +1377,7 @@ mod tests {
                     "two leases: {first:?} {second:?}"
                 );
                 let mut queued = Lease::new(1);
-                queued.enqueue(&Admission::begin(), [Region::from(holds[1])]).unwrap();
+                queued.enqueue(&Admission::begin(), [Request::from(holds[1])]).unwrap();
                 let wakes = Arc::new(Wakes::default());
                 assert_eq!(poll(&mut queued.ready(), &wakes).is_pending(), race, "queued");
                 drop((queued, held));
@@ -1380,7 +1400,7 @@ mod tests {
         let mut next = Lease::new(2);
         next.extend([(first, Write)]).unwrap();
         assert_eq!(next.extend([(second, Read)]), Err(Error::Busy));
-        next.extend(std::iter::empty::<Region>()).unwrap();
+        next.extend(std::iter::empty::<Request>()).unwrap();
         let mut probe = Lease::new(1);
         assert_eq!(probe.extend([(first, Read)]), Err(Error::Busy));
         next.clear();
@@ -1450,7 +1470,7 @@ mod tests {
             );
             assert_eq!(
                 Lease::new(1)
-                    .extend([Region::host(host.slice(..).pinned.unwrap(), host.len(), Access::Read)])
+                    .extend([Request::host(host.slice(..).pinned.unwrap(), host.len(), Access::Read)])
                     .err(),
                 Some(Error::Poisoned)
             );

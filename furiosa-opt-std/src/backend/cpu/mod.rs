@@ -90,10 +90,11 @@ impl Runtime for Cpu {
         let checked = pairs
             .iter()
             .try_for_each(|(_, to)| to.buffer.check_device(&device.allocator));
-        std::future::ready(checked.map(|()| {
-            for (host, to) in pairs {
-                to.buffer.store(&to.region, &host.0.bytes().to_vec().into());
-            }
+        std::future::ready(checked.and_then(|()| {
+            pairs.into_iter().try_for_each(|(host, to)| {
+                to.buffer.store(&to.region, &host.0.bytes()?.to_vec().into());
+                Ok(())
+            })
         }))
     }
 
@@ -104,10 +105,11 @@ impl Runtime for Cpu {
         let checked = pairs
             .iter()
             .try_for_each(|(from, _)| from.buffer.check_device(&device.allocator));
-        std::future::ready(checked.map(|()| {
-            for (from, host) in pairs {
-                host.0.into_bytes().copy_from_slice(&from.buffer.load(&from.region));
-            }
+        std::future::ready(checked.and_then(|()| {
+            pairs.into_iter().try_for_each(|(from, host)| {
+                host.0.into_bytes()?.copy_from_slice(&from.buffer.load(&from.region));
+                Ok(())
+            })
         }))
     }
 

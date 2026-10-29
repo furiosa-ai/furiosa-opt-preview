@@ -127,6 +127,21 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> Slice<HbmTensor<D, Chip, Elemen
             .map(|block| HbmTensor::from_buffer(block.buffer.alias(..).unwrap_or_else(|error| panic!("{error}"))))
             .collect()
     }
+
+    /// Aliases the blocks `indices` names, in that order and repeats included, retaining their
+    /// current device allocations; [`Error::Invalid`] when an index is past the end.
+    ///
+    /// # Safety
+    /// As [`Self::alias`]: an access through one alias must complete before an overlapping access
+    /// through another starts.
+    pub unsafe fn pick(&self, indices: &[usize]) -> Result<Self, Error> {
+        (indices.iter())
+            .map(|&index| {
+                let block = (self.values.get(index)).ok_or(Error::Invalid("the index is past the slice's end"))?;
+                Ok(HbmTensor::from_buffer(block.buffer.alias(..)?))
+            })
+            .collect()
+    }
 }
 
 impl<T> Extend<T> for Slice<T> {
@@ -260,6 +275,28 @@ mod tests {
         values.table.set(Box::new(())).unwrap();
         let moved = Box::new(values);
         assert!(moved.table.get().unwrap().is::<()>());
+    }
+
+    /// A pick aliases the blocks its indices name, in their order and repeats included, and
+    /// refuses an index past the end.
+    #[test]
+    fn picks_named_blocks() {
+        use crate::prelude::*;
+
+        axes![Count = 4];
+        let device = Device::<Cpu>::new(Topology { chips: 1, pes: 1 }).unwrap();
+        let blocks: Slice<HbmTensor<i32, m![1], m![Count], Cpu>> = (0..3)
+            .map(|block| HbmTensor::from_value(&device.tdma, &Tensor::from_vec((0..4).map(|cell| block * 4 + cell))))
+            .collect();
+        // SAFETY: the test accesses one alias of a block at a time.
+        let (picked, beyond, none) = unsafe { (blocks.pick(&[2, 0, 2]), blocks.pick(&[1, 3]), blocks.pick(&[])) };
+        let mut picked = picked.unwrap();
+        let cells: Vec<_> = picked.iter().map(|block| block.load().into_vec()).collect();
+        assert_eq!(cells, [[8, 9, 10, 11], [0, 1, 2, 3], [8, 9, 10, 11]]);
+        picked[1].store(&device.tdma, &Tensor::from_vec([7; 4]));
+        assert_eq!(blocks[0].load().into_vec(), [7; 4]);
+        assert!(matches!(beyond, Err(Error::Invalid(_))));
+        assert!(none.unwrap().is_empty());
     }
 
     #[test]

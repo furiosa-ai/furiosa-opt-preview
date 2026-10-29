@@ -124,6 +124,12 @@ How entries are written:
   read relaid out into an existing host tensor keeps only that tensor borrowed until it ends.
   `furiosa-opt-rt`'s `Device::write` and `read` submit when called, not at their first poll, and
   return a `Transfer` that owns what the copy still needs.
+- `furiosa-opt-rt`'s `HostBufferSlice::bytes` and `HostBufferSliceMut::into_bytes` return
+  `Error::Poisoned` once failed device work left the memory unknown, instead of panicking. CPU
+  access to `Pinned` through `Deref` still panics.
+- `HbmTensor::to_host(..).output(host)` takes a `HostTensorViewMut`, which `&mut HostTensor`
+  converts into. A read relaid out into a host tensor now writes the tensor's own memory instead of
+  replacing it, so a pinned tensor stays pinned.
 
 ### Added
 
@@ -160,6 +166,22 @@ How entries are written:
   another. A lease, or a launch through `launch_holding`, then excludes only the work that reaches
   those blocks, by each one's access, so a transfer into another block of the allocation neither
   waits for it nor is refused. Two holds of blocks of one size on one grid compare 64 blocks a word.
+- `HostBufferSlice::chunks` and `HostBufferSliceMut::chunks` split host bytes into consecutive
+  pieces that keep their place in the memory, so the rows of one host buffer pair apart in a batch.
+  A slice's `bytes()` / `into_bytes()` give the CPU its bytes once the transfers on them ended,
+  without waiting for transfers on the rest of the buffer, and return `DeviceError::Poisoned`
+  instead of panicking.
+- `HbmBufferSlice::from(&tensor)` and `HbmBufferSliceMut::from(&mut tensor)` give a typed tensor's
+  memory, its cells in `m![Chip, Element]` order, to the batched `to_host(pairs)` and
+  `to_hbm(pairs)`. `same_layout::<A, B>()` says whether two mappings lay their cells out alike, so
+  bytes in one order need no relayout into the other.
+- `HostTensorView` and `HostTensorViewMut` type host bytes, such as one row of a larger
+  `HostBuffer`, as a tensor; `try_from(slice)` checks their length. `view.to_hbm::<Chip, Element>`
+  copies them as `HostTensor::to_hbm` does, `.output(&mut hbm)` included, and
+  `hbm.to_host(..).output(view)` reads into them, relaid out where their order is not the device's.
+- `unsafe { blocks.pick(&indices) }` aliases the blocks of a `Slice` of HBM tensors that `indices`
+  names, in that order and repeats included, as `alias` aliases a range of them; an index past the
+  end is `Error::Invalid`.
 
 ### Fixed
 

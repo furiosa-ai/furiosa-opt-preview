@@ -1,7 +1,7 @@
 //! Pinned host storage and borrowed transfer views.
 
 mod view;
-pub use view::{HostBufferSlice, HostBufferSliceMut};
+pub use view::{Bytes, BytesMut, HostBufferSlice, HostBufferSliceMut};
 
 use std::ops::RangeBounds;
 use std::ops::{Deref, DerefMut};
@@ -12,7 +12,7 @@ use dma_heap::{Heap, HeapKind};
 use memmap2::MmapRaw;
 
 use crate::arch::rngd;
-use crate::buffer::{Active, Allocator, Region};
+use crate::buffer::{Active, Allocator, Request};
 use crate::{Access, Buffer, Error, Result};
 
 /// Page-locked host bytes.
@@ -129,13 +129,13 @@ impl Pinned {
     }
 
     /// All of the memory, as a CPU `access` to it.
-    fn region(&self, access: Access) -> Region {
+    fn request(&self, access: Access) -> Request<'_> {
         let backing = Backing {
             dmabuf: &self.dmabuf,
             registration: None,
             offset: 0,
         };
-        Region::host(backing, self.bytes, access)
+        Request::host(backing, self.bytes, access)
     }
 
     /// Makes `registration` the one the memory's device DMA goes through.
@@ -145,22 +145,26 @@ impl Pinned {
 }
 
 /// CPU access blocks while device work holds the memory, and panics once a device access to it
-/// failed, since its contents are then unknown.
+/// failed, since its contents are then unknown; a view's `bytes` reports that instead.
 impl Deref for Pinned {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        self.region(Access::Read).wait();
+        self.request(Access::Read)
+            .wait()
+            .expect("DMA failed; this host allocation is no longer accessible");
         // SAFETY: earlier device writes ended, and the returned borrow keeps later ones off the bytes.
         unsafe { std::slice::from_raw_parts(self.mmap.as_ptr(), self.bytes) }
     }
 }
 
 /// CPU access blocks while device work holds the memory, and panics once a device access to it
-/// failed, since its contents are then unknown.
+/// failed, since its contents are then unknown; a view's `into_bytes` reports that instead.
 impl DerefMut for Pinned {
     fn deref_mut(&mut self) -> &mut [u8] {
-        self.region(Access::Write).wait();
+        self.request(Access::Write)
+            .wait()
+            .expect("DMA failed; this host allocation is no longer accessible");
         // SAFETY: earlier device accesses ended, and this exclusive borrow keeps later ones off the bytes.
         unsafe { std::slice::from_raw_parts_mut(self.mmap.as_mut_ptr(), self.bytes) }
     }
@@ -199,10 +203,7 @@ impl<'a> Backing<'a> {
 
 impl std::fmt::Debug for Pinned {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Pinned")
-            .field("bytes", &&*self.slice(..).bytes())
-            .finish()
+        formatter.debug_struct("Pinned").field("bytes", &&**self).finish()
     }
 }
 
@@ -256,36 +257,45 @@ mod tests {
         let host = crate::test::pinned();
         let mut first = Lease::new(1);
         first
-            .extend([Region::host(host.slice(..128).pinned.unwrap(), 128, Access::Write)])
+            .extend([Request::host(host.slice(..128).pinned.unwrap(), 128, Access::Write)])
             .unwrap();
         let mut second = Lease::new(1);
-        let second = second.extend([Region::host(host.slice(128..256).pinned.unwrap(), 128, Access::Write)]);
+        let second = second.extend([Request::host(host.slice(128..256).pinned.unwrap(), 128, Access::Write)]);
         assert!(second.is_ok());
         drop(first);
     }
 
-    /// Poisoned transfer views reject CPU reads and writes without exposing bytes.
+    /// Poisoned transfer views refuse CPU reads and writes with `Poisoned`, exposing no bytes.
     #[test]
     fn refuses_poisoned_views() {
         let mut host = crate::test::pinned();
         let mut lease = Lease::new(1);
         lease
-            .extend([Region::host(host.slice(..).pinned.unwrap(), host.len(), Access::Write)])
+            .extend([Request::host(host.slice(..).pinned.unwrap(), host.len(), Access::Write)])
             .unwrap();
         lease.poison();
         drop(lease);
-        assert!(
-            std::panic::catch_unwind(|| {
-                let _bytes = host.slice(..).bytes();
-            })
-            .is_err()
-        );
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _bytes = host.slice_mut(..).into_bytes();
-            }))
-            .is_err()
-        );
+        assert!(matches!(host.slice(..).bytes(), Err(Error::Poisoned)));
+        assert!(matches!(host.slice_mut(..).into_bytes(), Err(Error::Poisoned)));
+    }
+
+    /// A CPU read waits only for the device writes of its own bytes.
+    #[test]
+    fn reads_beside_device_writes() {
+        let host = crate::test::pinned();
+        let (head, tail) = (host.slice(..128), host.slice(128..));
+        let mut writer = Lease::new(1);
+        writer
+            .extend([Request::host(tail.pinned.unwrap(), tail.len(), Access::Write)])
+            .unwrap();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| head.bytes().map(|bytes| bytes[0]));
+            std::thread::sleep(Duration::from_millis(50));
+            let finished = reader.is_finished();
+            drop(writer);
+            assert!(finished, "a CPU read waited for a device write of other bytes");
+            assert_eq!(reader.join().unwrap(), Ok(0));
+        });
     }
 
     /// CPU readers coexist, and each waits for the device writes admitted before it.
@@ -295,16 +305,16 @@ mod tests {
         let view = host.slice(..);
         let mut writer = Lease::new(1);
         writer
-            .extend([Region::host(view.pinned.unwrap(), view.len(), Access::Write)])
+            .extend([Request::host(view.pinned.unwrap(), view.len(), Access::Write)])
             .unwrap();
         std::thread::scope(|scope| {
-            let reader = scope.spawn(|| view.bytes()[0]);
+            let reader = scope.spawn(|| view.bytes().map(|bytes| bytes[0]));
             std::thread::sleep(Duration::from_millis(50));
             assert!(!reader.is_finished(), "a CPU read waits for the device write");
             drop(writer);
-            assert_eq!(reader.join().unwrap(), 0);
+            assert_eq!(reader.join().unwrap(), Ok(0));
         });
-        let (first, second) = (view.bytes(), view.bytes());
+        let (first, second) = (view.bytes().unwrap(), view.bytes().unwrap());
         assert_eq!(first[0], second[0]);
     }
 
@@ -315,17 +325,17 @@ mod tests {
         let backing = host.slice(..).pinned.unwrap();
         let mut first = Lease::new(1);
         first
-            .extend([Region::host(backing, host.len(), Access::Write)])
+            .extend([Request::host(backing, host.len(), Access::Write)])
             .unwrap();
         let last = first;
         assert!(matches!(
-            Lease::new(1).extend([Region::host(backing, host.len(), Access::Read)]),
+            Lease::new(1).extend([Request::host(backing, host.len(), Access::Read)]),
             Err(Error::Busy)
         ));
         drop(last);
         assert!(
             Lease::new(1)
-                .extend([Region::host(backing, host.len(), Access::Read)])
+                .extend([Request::host(backing, host.len(), Access::Read)])
                 .is_ok()
         );
     }
@@ -339,16 +349,17 @@ mod tests {
         let mut first = Lease::new(1);
         first.set_owner(crate::buffer::Owner::Ordered(1));
         first
-            .extend([Region::host(backing, host.len(), Access::Write)])
+            .extend([Request::host(backing, host.len(), Access::Write)])
             .unwrap();
         let mut last = Lease::new(1);
         last.set_owner(crate::buffer::Owner::Ordered(2));
-        last.extend([Region::host(backing, host.len(), Access::Write)]).unwrap();
+        last.extend([Request::host(backing, host.len(), Access::Write)])
+            .unwrap();
         drop(first);
         drop(last);
         assert!(
             Lease::new(1)
-                .extend([Region::host(backing, host.len(), Access::Write)])
+                .extend([Request::host(backing, host.len(), Access::Write)])
                 .is_ok()
         );
     }
@@ -359,7 +370,7 @@ mod tests {
         let host = crate::test::pinned();
         let mut lease = Lease::new(1);
         lease
-            .extend([Region::host(host.slice(..).pinned.unwrap(), host.len(), Access::Write)])
+            .extend([Request::host(host.slice(..).pinned.unwrap(), host.len(), Access::Write)])
             .unwrap();
         lease.poison();
         drop(lease);

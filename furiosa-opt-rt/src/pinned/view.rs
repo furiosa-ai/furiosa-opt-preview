@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 use super::Backing;
-use crate::buffer::Region;
+use crate::buffer::Request;
 
 /// Immutable host bytes with their DMA allocation identity, when pinned.
 #[derive(Clone)]
@@ -28,14 +28,16 @@ impl<'a> HostBufferSlice<'a> {
         })
     }
 
-    /// The bytes the view covers.
-    pub fn bytes(&self) -> Bytes<'_> {
+    /// The bytes the view covers, once the device work admitted before this call that writes them
+    /// ended; [`Error::Poisoned`](crate::Error::Poisoned) once failed device work left the memory
+    /// unknown.
+    pub fn bytes(&self) -> crate::Result<Bytes<'_>> {
         if let Some(backing) = self.pinned {
-            Region::host(backing, self.len, crate::Access::Read).wait();
+            Request::host(backing, self.len, crate::Access::Read).wait()?;
         }
         // SAFETY: earlier device writes ended, and this shared borrow keeps later ones off the bytes.
         let bytes = unsafe { std::slice::from_raw_parts(std::ptr::with_exposed_provenance(self.address), self.len) };
-        Bytes { bytes }
+        Ok(Bytes { bytes })
     }
 
     /// Bytes the view covers.
@@ -98,15 +100,16 @@ impl<'a> HostBufferSliceMut<'a> {
         (piece(0, offset), piece(offset, self.len - offset))
     }
 
-    /// The bytes the view covers.
-    pub fn into_bytes(self) -> BytesMut<'a> {
+    /// The bytes the view covers, once the device work admitted before this call on them ended;
+    /// [`Error::Poisoned`](crate::Error::Poisoned) once failed device work left the memory unknown.
+    pub fn into_bytes(self) -> crate::Result<BytesMut<'a>> {
         if let Some(backing) = self.pinned {
-            Region::host(backing, self.len, crate::Access::Write).wait();
+            Request::host(backing, self.len, crate::Access::Write).wait()?;
         }
         // SAFETY: earlier device accesses ended, and this exclusive borrow keeps later ones off the bytes.
         let bytes =
             unsafe { std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut(self.address), self.len) };
-        BytesMut { bytes }
+        Ok(BytesMut { bytes })
     }
 
     /// Bytes the view covers.

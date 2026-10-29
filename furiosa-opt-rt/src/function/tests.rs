@@ -696,7 +696,7 @@ async fn holds_memory_until_the_hardware_answers() {
         let published = read.as_mut().poll(&mut Context::from_waker(Waker::noop()));
         assert!(published.is_pending(), "{published:?}");
         assert!(matches!(
-            crate::Lease::new(1).extend([crate::buffer::Region::host(backing, 2048, Access::Read)]),
+            crate::Lease::new(1).extend([crate::buffer::Request::host(backing, 2048, Access::Read)]),
             Err(Error::Busy)
         ));
     }
@@ -724,7 +724,7 @@ async fn holds_memory_until_the_hardware_answers() {
         );
         drop(transfer);
         assert!(matches!(
-            crate::Lease::new(1).extend([crate::buffer::Region::host(backing, size * 8, Access::Read)]),
+            crate::Lease::new(1).extend([crate::buffer::Request::host(backing, size * 8, Access::Read)]),
             Err(Error::Busy)
         ));
     }

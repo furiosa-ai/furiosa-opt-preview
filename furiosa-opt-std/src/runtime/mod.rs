@@ -41,6 +41,14 @@ pub use furiosa_opt_rt::Topology;
 /// Physical chips in rank order and the PEs used on each.
 pub use furiosa_opt_rt::Placement;
 
+/// Host bytes the CPU reads, as [`HostBufferSlice::bytes`] gives them; their borrow keeps device
+/// writes off them.
+pub use furiosa_opt_rt::Bytes;
+
+/// Host bytes the CPU writes, as [`HostBufferSliceMut::into_bytes`] gives them; their borrow keeps
+/// device accesses off them.
+pub use furiosa_opt_rt::BytesMut;
+
 /// The placements `Device::new` tries, in order.
 pub trait ToPlacements<B: Backend = CurrentBackend> {
     /// Resolves candidates using the backend's placement policy.

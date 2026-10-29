@@ -2,7 +2,7 @@
 
 use std::os::fd::RawFd;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
 use furiosa_opt_ipc::{Launch, LaunchOption, Profile, Records, Staged, Status};
@@ -22,7 +22,7 @@ pub(crate) mod link;
 pub(crate) mod mailbox;
 
 use chip::{Chip, Pdma};
-use mailbox::{Mailbox, PATIENCE, Sent};
+use mailbox::{Mailbox, Sent};
 
 /// The hardware one process reserved for a device.
 pub(crate) struct Driver {
@@ -34,12 +34,14 @@ pub(crate) struct Driver {
     pub(crate) pdma: Option<Pdma>,
     /// In rank order: a view's chip index is an index here.
     pub(crate) chips: Vec<Chip>,
-    pub(crate) transfers: dma::DmaQueue,
+    pub(crate) dma: dma::DmaQueue,
     /// Set once a launch or transfer fails; shared with the transfers.
     pub(crate) poison: Arc<Poison>,
     pub(crate) topology: Topology,
     /// The device memory the open left free, which the device's allocator hands out.
     pub(crate) allocatable: Ranges,
+    /// How long the host waits for a launch's answers: the kernel driver's IPC deadline.
+    pub(crate) patience: Duration,
 }
 
 impl Driver {
@@ -59,12 +61,7 @@ impl Driver {
             return Err(Error::ForeignBuffer);
         }
         let mut args = [0; furiosa_opt_ipc::MAX_SUBMISSION_WORDS];
-        let mut ticket = Ticket {
-            ids: [None; MAX_CLUSTERS],
-            replies: mailboxes.iter().map(|_| Records::new()).collect(),
-            deadline: Instant::now() + PATIENCE,
-            reservation: None,
-        };
+        let clusters = mailboxes.len();
         let mut submissions = ArrayVec::<_, MAX_CLUSTERS>::new();
         for (cluster, mailbox) in mailboxes.iter_mut().enumerate() {
             let window = self.chip(cluster).base - DRAM_BASE;
@@ -85,12 +82,15 @@ impl Driver {
             };
             submissions.push(submission);
         }
-        ticket.reservation = Some(executable.device.allocations.reserve(executable.sram_end)?);
+        let reservation = executable.device.allocator.reserve(executable.sram_end)?;
         // Send together so frame writes and queue waits do not separate cluster starts.
-        for (id, submission) in ticket.ids.iter_mut().zip(submissions) {
-            *id = Some(submission.send());
-        }
-        Ok(Some(ticket))
+        let mut sent = submissions.into_iter().map(|submission| submission.send());
+        Ok(Some(Ticket {
+            ids: std::array::from_fn(|_| sent.next()),
+            replies: (0..clusters).map(|_| Records::new()).collect(),
+            deadline: Instant::now() + self.patience,
+            reservation: Some(reservation),
+        }))
     }
 
     /// Advances `ticket`; once every cluster answered, releases its SRAM and returns what they
@@ -155,7 +155,7 @@ impl Driver {
                     return Err(Error::Device(format!(
                         "rank {cluster} left request {} unanswered for {}s",
                         sent.id(),
-                        PATIENCE.as_secs()
+                        self.patience.as_secs()
                     )));
                 }
                 continue;

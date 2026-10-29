@@ -39,9 +39,11 @@ pub enum ConfigureOption {
     LogLevel(u8),
     /// Kernel-reserved PCIe DMA registers, descriptor storage and channels the firmware drives.
     Dma(Config),
+    /// How long a launch may run, in milliseconds, before the firmware fails it as timed out.
+    LaunchTimeout(u32),
 }
 
-tagged! { ConfigureOption { Identity, LogLevel, Dma } }
+tagged! { ConfigureOption { Identity, LogLevel, Dma, LaunchTimeout } }
 
 /// The cluster's place in the device, which selects the task code it runs from an image.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +92,17 @@ mod tests {
             assert_eq!(&frame[..len], golden);
             assert_eq!(frame::decode::<Request<'_>>(golden), Ok(request));
         }
+    }
+
+    /// A launch timeout travels in milliseconds beside the other options.
+    #[test]
+    fn carries_the_launch_timeout() {
+        let request = Request::Configure(Configure {
+            options: vec![ConfigureOption::LogLevel(3), ConfigureOption::LaunchTimeout(59_000)],
+        });
+        let mut frame = [0; MAX_SUBMISSION_WORDS];
+        let len = frame::encode(&request, &mut frame).unwrap();
+        assert_eq!(frame::decode::<Request<'_>>(&frame[..len]), Ok(request));
     }
 
     /// An option given twice is refused on both sides: a cluster has one identity.

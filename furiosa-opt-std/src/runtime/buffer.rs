@@ -15,9 +15,9 @@ use crate::runtime::{CurrentBackend, Kind, Usage};
 /// `into_buffer`. [`HbmBuffer::slice`] picks chips and a byte range of each, for a transfer or,
 /// through `HbmTensorView::try_from`, a typed tensor view. It splits into disjoint owners with
 /// `split_at`, and has no `Clone`; `alias` makes a second owner. Compiled launches reuse chip-local
-/// memory in submission order, and a transfer waits for the device work submitted before it on its
-/// bytes; a launch that conflicts with multi-chip peer memory, or with a transfer in flight, is
-/// `DeviceError::Busy`. `addr()` is where it starts.
+/// memory in submission order, a launch waits for the transfers submitted before it on its bytes,
+/// and a transfer for all device work submitted before it there; a launch that conflicts with
+/// multi-chip peer memory is `DeviceError::Busy`. `addr()` is where it starts.
 #[primitive(HbmBuffer)]
 pub struct HbmBuffer<B: Runtime = CurrentBackend>(pub(crate) B::Buffer, OnceLock<B::Buffer>);
 
@@ -418,6 +418,17 @@ pub struct HostBufferSlice<'a>(pub(crate) furiosa_opt_rt::HostBufferSlice<'a>);
 /// Host bytes a transfer reads from a device into: part of a [`HostBuffer`], or any other bytes.
 #[derive(Debug)]
 pub struct HostBufferSliceMut<'a>(pub(crate) furiosa_opt_rt::HostBufferSliceMut<'a>);
+
+impl HostBufferSliceMut<'_> {
+    /// The bytes before `offset` and from it on, so one batch can read into them apart.
+    pub fn split_at(self, offset: usize) -> Result<(Self, Self), Error> {
+        if offset > self.0.len() {
+            return Err(Error::Invalid("the offset is outside the host bytes"));
+        }
+        let (head, tail) = self.0.split_at(offset);
+        Ok((Self(head), Self(tail)))
+    }
+}
 
 impl<'a, T: AsRef<[u8]> + ?Sized> From<&'a T> for HostBufferSlice<'a> {
     fn from(bytes: &'a T) -> Self {

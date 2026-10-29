@@ -12,8 +12,8 @@ mod pinned;
 mod placement;
 pub mod registry;
 
-pub use buffer::{Access, Buffer, BufferSlice, BufferSliceMut, Lease};
-pub use device::{Clock, ClockReading, Device};
+pub use buffer::{Access, Blocks, Buffer, BufferSlice, BufferSliceMut, Hold, Lease};
+pub use device::{Clock, ClockReading, Device, Transfer};
 pub use function::{Argument, Arguments, Each, Epilogue, Function, Launch, Supplied, Supply};
 pub use pinned::{HostBufferSlice, HostBufferSliceMut, Pinned};
 pub use placement::{Placement, ToPlacements, Topology};
@@ -79,7 +79,7 @@ mod test {
     use std::sync::Mutex;
     use std::task::{Context, Poll, Waker};
 
-    use crate::buffer::Allocations;
+    use crate::buffer::Allocator;
     use crate::driver::dma::{DmaQueue, Transport, fake::Fake};
     use crate::pinned::Registration;
     use crate::{Arguments, Device, Function, Pinned};
@@ -152,13 +152,13 @@ mod test {
     /// Bytes of device DRAM that [`device`] and its siblings give a test device.
     const DRAM: usize = 4096;
 
-    struct Allocator;
+    struct Counting;
 
     #[global_allocator]
-    static ALLOCATOR: Allocator = Allocator;
+    static ALLOCATOR: Counting = Counting;
 
     // SAFETY: allocation delegates to System; the default zeroing and reallocation call `alloc`.
-    unsafe impl GlobalAlloc for Allocator {
+    unsafe impl GlobalAlloc for Counting {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             ALLOCATIONS.with(|count| count.set(count.get().map(|count| count + 1)));
             unsafe { System.alloc(layout) }
@@ -179,9 +179,9 @@ mod test {
     }
 
     /// A one-chip allocator over `dram`, shared DRAM ending at `shared_end`, and the device's SRAM.
-    pub(crate) fn allocations(dram: Range<usize>, shared_end: usize) -> Arc<Allocations> {
+    pub(crate) fn allocator(dram: Range<usize>, shared_end: usize) -> Arc<Allocator> {
         let ranges = crate::buffer::Ranges::new(dram, shared_end);
-        Arc::new(Allocations::over((1, 8).into(), ranges))
+        Arc::new(Allocator::over((1, 8).into(), ranges))
     }
 
     pub(crate) fn pinned() -> Pinned {
@@ -198,10 +198,7 @@ mod test {
     pub(crate) fn mapped(device: &Device, offsets: Vec<usize>, len: usize) -> Pinned {
         let mut host = sized(len);
         let table = device.alloc(crate::memory::Kind::Dram, offsets.len() * 256).unwrap();
-        host.set_registration(Some(Arc::new(Registration {
-            buffer: table,
-            tables: offsets,
-        })));
+        host.set_registration(Some(Arc::new(Registration { tables: table, offsets })));
         host
     }
 
@@ -216,7 +213,10 @@ mod test {
         let bar2 = Mapping::new(&file, CQ_LEN as i64, BAR2_LEN).unwrap();
         let link = crate::driver::link::Link::new(bar2, page, 0).unwrap();
         let cluster = crate::driver::cluster::Cluster::new(file.try_clone().unwrap());
-        (crate::driver::mailbox::Mailbox::new(cluster, link), file)
+        (
+            crate::driver::mailbox::Mailbox::new(cluster, link, furiosa_opt_ipc::DRIVER_DEADLINE),
+            file,
+        )
     }
 
     /// A chip whose lock, BAR4 window and firmware PDMA mapping are temporary files, with the
@@ -243,7 +243,7 @@ mod test {
         mailboxes: Vec<crate::driver::mailbox::Mailbox>,
     ) -> crate::driver::Driver {
         let mailboxes = Arc::new(Mutex::new(mailboxes));
-        let transfers = DmaQueue::new(
+        let queue = DmaQueue::new(
             Transport::Fake(Fake::default()),
             Arc::clone(&mailboxes),
             Waker::noop().clone(),
@@ -259,10 +259,11 @@ mod test {
                 chips: chips.iter().map(dma).collect(),
             }),
             chips,
-            poison: Arc::clone(transfers.poison()),
-            transfers,
+            poison: Arc::clone(queue.poison()),
+            dma: queue,
             mailboxes,
             allocatable: crate::buffer::Ranges::new(0..DRAM, DRAM),
+            patience: furiosa_opt_ipc::DRIVER_DEADLINE,
         }
     }
 
@@ -326,12 +327,13 @@ mod test {
     ) -> crate::Device {
         let mut driver = driver(chips.iter().map(|&index| chip(index, 0)).collect(), pes, mailboxes);
         driver.allocatable = crate::buffer::Ranges::new(0..dram, dram);
-        let allocations = Arc::new(Allocations::over(driver.topology, driver.allocatable.clone()));
+        let allocator = Arc::new(Allocator::over(driver.topology, driver.allocatable.clone()));
         let driver = Arc::new(driver);
         crate::Device {
             worker: crate::device::Worker::new(),
             launches: Arc::default(),
-            allocations,
+            transfers: Arc::new(crate::device::Transfers::new(Waker::noop().clone())),
+            allocator,
             driver,
             placement: crate::Placement {
                 chips: chips.to_vec(),

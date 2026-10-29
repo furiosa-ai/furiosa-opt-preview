@@ -5,10 +5,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 
+use furiosa_opt_abi::image::{self, Image, Level, MARKER_IDS};
 use furiosa_opt_ipc::Records;
 
-use crate::registry::image::{self, Image, MARKER_IDS};
-use crate::registry::{Level, TARGET};
+use crate::registry::TARGET;
 use crate::{Epilogue, Error, Result};
 
 /// The profile a function's launches ask every chunk to record, and the spans its image names.
@@ -152,12 +152,12 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use furiosa_opt_abi::executable::Executable;
+    use furiosa_opt_abi::image::{DramKind, Parts, Slot, Stack};
     use tracing_subscriber::prelude::*;
 
     use super::*;
     use crate::Topology;
     use crate::memory::Kind;
-    use crate::registry::image::{DramKind, Parts, Slot, Stack};
 
     /// Spans on chunks 0 and 1 of cluster 0 and on chunk 0 of cluster 1, each opened by marker 1,
     /// in a ring of eight.

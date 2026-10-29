@@ -44,32 +44,42 @@ impl Runtime for Npu {
         Ok(device.device.alloc(kind, bytes)?)
     }
 
-    async fn write<'a>(
+    fn write<'a>(
         device: &Self::Device,
         pairs: Vec<(HostBufferSlice<'a>, HbmBufferSliceMut<'a, Self>)>,
-    ) -> Result<(), Error> {
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<> {
         let mut pieces = Vec::with_capacity(pairs.len());
-        for (host, to) in pairs {
-            let Region { chips, bytes } = to.region;
-            let len = bytes.len();
-            let views = to.buffer.slice_mut(bytes)?.chips().enumerate();
-            let views = views.filter(|(rank, _)| chips & 1 << rank != 0).map(|(_, view)| view);
-            pieces.extend(host.0.chunks(len.max(1)).zip(views));
-        }
-        Ok(device.device.write(pieces).await?)
+        let written = pairs
+            .into_iter()
+            .try_for_each(|(host, to)| {
+                let Region { chips, bytes } = to.region;
+                let len = bytes.len();
+                let views = to.buffer.slice_mut(bytes)?.chips().enumerate();
+                let views = views.filter(|(rank, _)| chips & 1 << rank != 0).map(|(_, view)| view);
+                pieces.extend(host.0.chunks(len.max(1)).zip(views));
+                Ok::<_, Error>(())
+            })
+            .map(|()| device.device.write(pieces));
+        async move { Ok(written?.await?) }
     }
 
-    async fn read(
+    fn read<'a>(
         device: &Self::Device,
-        from: HbmBufferSlice<'_, Self>,
-        host: HostBufferSliceMut<'_>,
-    ) -> Result<(), Error> {
-        let Region { chips, bytes } = from.region;
-        let len = bytes.len();
-        let host = host.0;
-        let views = from.buffer.slice(bytes)?.chips().enumerate();
-        let views = views.filter(|(rank, _)| chips & 1 << rank != 0).map(|(_, view)| view);
-        Ok(device.device.read(views.zip(host.chunks(len))).await?)
+        pairs: Vec<(HbmBufferSlice<'a, Self>, HostBufferSliceMut<'a>)>,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<> {
+        let mut pieces = Vec::with_capacity(pairs.len());
+        let read = pairs
+            .into_iter()
+            .try_for_each(|(from, host)| {
+                let Region { chips, bytes } = from.region;
+                let len = bytes.len();
+                let views = from.buffer.slice(bytes)?.chips().enumerate();
+                let views = views.filter(|(rank, _)| chips & 1 << rank != 0).map(|(_, view)| view);
+                pieces.extend(views.zip(host.0.chunks(len)));
+                Ok::<_, Error>(())
+            })
+            .map(|()| device.device.read(pieces));
+        async move { Ok(read?.await?) }
     }
 
     fn synchronize(device: &Self::Device) -> impl Future<Output = Result<(), Error>> + Send + use<> {
@@ -77,7 +87,7 @@ impl Runtime for Npu {
         async move { Ok(synchronized.await?) }
     }
 
-    fn load(device: &Self::Device, path: &'static str, key: rt::registry::Key<'_>) -> Result<usize, Error> {
+    fn load(device: &Self::Device, path: &'static str, key: rt::registry::Key<'static>) -> Result<usize, Error> {
         let index = registry::index(path, key)?;
         registry::function(device, index)?;
         Ok(index)
@@ -95,10 +105,10 @@ impl Runtime for Npu {
             args.prepare(device.pdma.device())?;
             output.prepare(device.pdma.device())?;
             // Memory reached through an operand's contents; most launches have none, so this holds nothing.
-            let mut held = Vec::new();
+            let mut held = Vec::<rt::Hold<'_>>::new();
             launch_memory(&args, output, &mut |slice, access| {
                 for buffer in slice.behind {
-                    held.push((buffer.slice(..)?, access));
+                    held.push((buffer.slice(..)?, access).into());
                 }
                 Ok(())
             })?;

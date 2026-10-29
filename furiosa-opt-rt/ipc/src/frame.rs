@@ -3,10 +3,11 @@
 
 use bincode::error::{DecodeError, EncodeError};
 
-use crate::Profile;
+use crate::{Answer, Profile, Request};
 
-/// Encodes one message into caller-owned words, returning the frame length in words.
-pub fn encode<T: bincode::Encode>(message: &T, out: &mut [u64]) -> Result<usize, Error> {
+/// Encodes one message into caller-owned words, returning the frame length in words; a frame past
+/// the message's [`Message::MAX_WORDS`] is refused, however much room `out` has.
+pub fn encode<T: Message>(message: &T, out: &mut [u64]) -> Result<usize, Error> {
     let bytes: &mut [u8] = bytemuck::cast_slice_mut(out);
     let (header, payload) = bytes.split_at_mut_checked(HEADER_BYTES).ok_or(Error::Capacity)?;
     let len = bincode::encode_into_slice(message, payload, config()).map_err(|error| match error {
@@ -14,7 +15,7 @@ pub fn encode<T: bincode::Encode>(message: &T, out: &mut [u64]) -> Result<usize,
         _ => Error::Capacity,
     })?;
     let words = (HEADER_BYTES + len).div_ceil(WORD_BYTES);
-    if words > MAX_RESPONSE_WORDS {
+    if words > T::MAX_WORDS {
         return Err(Error::Capacity);
     }
     payload[len..words * WORD_BYTES - HEADER_BYTES].fill(0);
@@ -39,6 +40,19 @@ pub fn decode<'a, T: bincode::BorrowDecode<'a, ()>>(words: &'a [u64]) -> Result<
         return Err(Error::Padding);
     }
     Ok(message)
+}
+
+/// A message one side sends, and the most words its frame takes, this header included.
+pub trait Message: bincode::Encode {
+    const MAX_WORDS: usize;
+}
+
+impl Message for Request<'_> {
+    const MAX_WORDS: usize = MAX_SUBMISSION_WORDS;
+}
+
+impl<T: bincode::Encode> Message for Answer<T> {
+    const MAX_WORDS: usize = MAX_RESPONSE_WORDS;
 }
 
 #[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +125,8 @@ pub const MAX_RESPONSE_WORDS: usize = {
 pub const DIAGNOSTIC_BYTES: usize = 8192 * size_of::<u64>();
 
 /// Host and firmware reject differing revisions. Only a change of the header takes a new one: calls
-/// and options come and go by their tags.
+/// and options come and go by their tags, and a released tag's payload never changes, so a changed
+/// payload takes a new variant name. The golden frames of `preserves_*_frames` pin each one.
 pub(crate) const VERSION: u16 = 1;
 
 pub(crate) const HEADER_BYTES: usize = size_of::<Header>();
@@ -153,6 +168,25 @@ mod tests {
         assert_eq!(encode(&Answer::<()>(Err(failure)), &mut out), Err(Error::Capacity));
     }
 
+    /// A frame stays within its message's limit, however much room the caller gives it.
+    #[test]
+    fn bounds_frames_by_their_message() {
+        /// One word more than a submission frame carries.
+        struct Oversized;
+
+        impl bincode::Encode for Oversized {
+            fn encode<E: bincode::enc::Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
+                bincode::Encode::encode(&[0u64; MAX_SUBMISSION_WORDS], encoder)
+            }
+        }
+
+        impl Message for Oversized {
+            const MAX_WORDS: usize = MAX_SUBMISSION_WORDS;
+        }
+
+        assert_eq!(encode(&Oversized, &mut [0; MAX_RESPONSE_WORDS]), Err(Error::Capacity));
+    }
+
     /// A permanent argument-count rejection is not a request to wait for more words.
     #[test]
     fn distinguishes_invalid_arguments_from_incomplete_frames() {
@@ -162,7 +196,7 @@ mod tests {
         );
     }
 
-    fn words<T: bincode::Encode>(message: &T, limit: usize) -> Vec<u64> {
+    fn words<T: Message>(message: &T, limit: usize) -> Vec<u64> {
         let mut out = vec![0; limit];
         let len = encode(message, &mut out).expect("message fits");
         out.truncate(len);

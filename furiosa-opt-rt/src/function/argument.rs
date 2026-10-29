@@ -2,9 +2,9 @@
 
 use std::sync::{Arc, Weak};
 
-use crate::buffer::{Lease, Owner};
-use crate::pinned::{PinnedLease, Registration};
-use crate::{Access, Buffer, BufferSlice, BufferSliceMut, Device, Error, HostBufferSliceMut, Result};
+use crate::buffer::{Lease, Owner, Region};
+use crate::pinned::{DmaBuf, Registration};
+use crate::{Access, Buffer, BufferSlice, BufferSliceMut, Device, Error, Hold, HostBufferSliceMut, Result};
 
 /// A launch's arguments; device memory is checked against other work by the runtime's access
 /// tracking when the launch is admitted, not by the view's borrow.
@@ -66,7 +66,7 @@ impl Arguments {
 
     /// Binds operand `index`; operands that are never bound are zero, and [`Error::Capacity`]
     /// past the function's argument count. Binding an index again must name the same operand,
-    /// for memory its start, chips and access, and keeps the first length, so an image may list
+    /// for memory its start, length, chips and access, so an image may list
     /// one slot twice. A host operand's memory is [`Error::Busy`] while another device access
     /// holds it.
     pub fn bind(&mut self, index: usize, argument: Argument<'_>) -> Result<()> {
@@ -79,16 +79,7 @@ impl Arguments {
         match &self.values[index] {
             Operand::Unbound => {
                 let device = self.device.upgrade().expect("a function keeps its device");
-                if let Argument::Host(view) = &argument
-                    && let Some(backing) = view.backing
-                    && self.values.iter().any(|operand| match operand {
-                        Operand::Host { lease, .. } => lease.belongs_to(&backing),
-                        Operand::Unbound | Operand::Value(_) | Operand::Device { .. } => false,
-                    })
-                {
-                    return Err(Error::Busy);
-                }
-                self.values[index] = Operand::new(argument, &device, self.owner)?;
+                self.values[index] = Operand::new(argument, &device)?;
                 Ok(())
             }
             bound if bound.names(&argument) => Ok(()),
@@ -108,29 +99,37 @@ impl Arguments {
         }
     }
 
-    pub(super) fn acquire<'s, 'a: 's>(
-        &'s mut self,
-        held: impl IntoIterator<Item = (BufferSlice<'a>, Access)>,
-    ) -> Result<()> {
+    pub(super) fn acquire<'a>(&mut self, held: impl IntoIterator<Item = Hold<'a>>) -> Result<()> {
         self.access.set_owner(self.owner);
-        self.access.extend(
+        self.access.admit(
             self.values
                 .iter()
                 .filter_map(|operand| match operand {
-                    Operand::Device { access, .. } => Some((operand.buffer().expect("device operand"), *access)),
-                    _ => None,
+                    Operand::Device { access, .. } => {
+                        Some(Region::from((operand.buffer().expect("device operand"), *access)))
+                    }
+                    Operand::Host {
+                        allocation,
+                        registration,
+                        offset,
+                        len,
+                    } => Some(Region::host(
+                        crate::pinned::Backing {
+                            dmabuf: allocation,
+                            registration: Some(registration),
+                            offset: *offset as usize,
+                        },
+                        *len,
+                        Access::Write,
+                    )),
+                    Operand::Unbound | Operand::Value(_) => None,
                 })
-                .chain(held.into_iter().map(|(view, access)| (view as BufferSlice<'s>, access))),
+                .chain(held.into_iter().map(Region::from)),
         )
     }
 
     pub(super) fn poison(&self) {
         self.access.poison();
-        for operand in &self.values {
-            if let Operand::Host { lease, .. } = operand {
-                lease.poison();
-            }
-        }
     }
 
     pub(crate) fn clear(&mut self) {
@@ -160,30 +159,29 @@ pub(crate) enum Operand {
     Host {
         registration: Arc<Registration>,
         offset: u32,
-        lease: PinnedLease,
+        len: usize,
+        allocation: Arc<DmaBuf>,
     },
 }
 
 impl Operand {
     /// `argument` as an operand of a launch on `device`.
-    pub(crate) fn new(argument: Argument<'_>, device: &Device, owner: Owner) -> Result<Self> {
+    pub(crate) fn new(argument: Argument<'_>, device: &Device) -> Result<Self> {
         Ok(match argument {
             Argument::Value(value) => Self::Value(value),
             Argument::Host(view) => {
                 device.driver.pdma()?;
                 let backing = view
-                    .backing
+                    .pinned
                     .ok_or_else(|| Error::Invalid("a host operand must be pinned".into()))?;
                 let registration = backing
-                    .registration()
-                    .ok_or_else(|| Error::Invalid("host memory has not been mapped to a device".into()))?;
+                    .mapped_to(&device.allocator)
+                    .ok_or_else(|| Error::Invalid("host memory has not been mapped to this device".into()))?;
                 Self::Host {
                     registration: Arc::clone(registration),
                     offset: backing.offset() as u32,
-                    lease: device.admit(|| match owner {
-                        Owner::Ordered(_) => backing.ordered(),
-                        Owner::Unordered => backing.lease(Access::Write),
-                    })?,
+                    len: view.len(),
+                    allocation: Arc::clone(backing.dmabuf),
                 }
             }
             _ => {
@@ -216,19 +214,25 @@ impl Operand {
         match (self, argument) {
             (Self::Value(value), Argument::Value(other)) => value == other,
             (Self::Device { access, .. }, _) => match (self.buffer(), argument.device()) {
-                (Some(bound), Some((view, other))) => bound.ptr_eq(&view) && *access == other,
+                (Some(bound), Some((view, other))) => {
+                    bound.ptr_eq(&view) && bound.len() == view.len() && *access == other
+                }
                 _ => false,
             },
             (
                 Self::Host {
-                    registration, offset, ..
+                    registration,
+                    offset,
+                    len,
+                    ..
                 },
                 Argument::Host(view),
-            ) => view.backing.is_some_and(|backing| {
+            ) => view.pinned.is_some_and(|backing| {
                 backing
-                    .registration()
+                    .registration
                     .is_some_and(|other| Arc::ptr_eq(registration, other))
                     && backing.offset() == *offset as usize
+                    && view.len() == *len
             }),
             _ => false,
         }
@@ -244,3 +248,23 @@ impl Operand {
 
 /// Regions a launch holds beside its operands and the caller's: the staged image.
 const IMAGE: usize = 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rebinding an operand cannot silently narrow the memory declared by the caller.
+    #[test]
+    fn refuses_different_extent() {
+        let device = Arc::new(crate::test::device(&[0], 8));
+        let buffer = device.alloc(crate::memory::Kind::Dram, 512).unwrap();
+        let mut arguments = Arguments::new(1, Arc::downgrade(&device));
+        arguments
+            .bind(0, Argument::Write(buffer.slice(..100).unwrap()))
+            .unwrap();
+        assert!(matches!(
+            arguments.bind(0, Argument::Write(buffer.slice(..200).unwrap())),
+            Err(Error::Invalid(_)),
+        ));
+    }
+}

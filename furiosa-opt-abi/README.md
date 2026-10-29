@@ -7,6 +7,7 @@ Applications use `furiosa-opt-std` instead.
 | module | contract |
 |---|---|
 | `executable` | the compiled device code the firmware loads and runs |
+| `image`, `registry` | the compiler's image of each launched function, and the table of them a binary carries |
 | `bootloader` | the request that boots the firmware, and its answer |
 | `ring`, `doorbell` | the queues that carry messages between host and firmware |
 | `memory`, `Topology` | device memory kinds and device shapes |

@@ -4,7 +4,8 @@
 
 use std::sync::Arc;
 
-use super::image::{Image, Parts, Slot};
+use furiosa_opt_abi::image::{Image, Parts, Slot};
+
 use super::{Entry, Key};
 use crate::memory::Kind;
 use crate::{Argument, Arguments, Buffer, Device, Error, Function, Result};
@@ -12,84 +13,86 @@ use crate::{Argument, Arguments, Buffer, Device, Error, Function, Result};
 mod profile;
 use profile::{Profile, Report};
 
-impl Entry {
-    /// Loads the image onto `device` and registers every launch through host completion. A
-    /// profiled function's launches report the spans the image names on [`TARGET`](super::TARGET),
-    /// in device cycles.
-    ///
-    /// # Safety
-    /// The image's code must access only its slots, with the modes its inputs and outputs give, as
-    /// the compiler's images of [`entries`](super::entries) do. Private stacks must remain
-    /// inaccessible to callers and their reuse must be ordered by the generated synchronization.
-    pub async unsafe fn load(&self, device: &Arc<Device>, profile: Option<super::Profile>) -> Result<Function> {
-        let image = Image::parse(self.image).map_err(Error::Invalid)?;
-        if image.topology != device.topology() {
-            return Err(Error::Invalid(format!(
-                "image topology {:?} differs from device topology {:?}",
-                image.topology,
-                device.topology()
-            )));
+/// Loads `entry`'s image onto `device` and registers every launch through host completion. A
+/// profiled function's launches report the spans the image names on [`TARGET`](super::TARGET),
+/// in device cycles.
+///
+/// # Safety
+/// The image's code must access only its slots, with the modes its inputs and outputs give, as
+/// the compiler's images of [`entries`](super::entries) do. Every chip must end those accesses,
+/// indirect and host DMA included, before its first cluster answers, as [`Function::ordered`]
+/// requires: the compiler ends every image with a DRAM drain and an all-cluster rendezvous. Private
+/// stacks must remain inaccessible to callers and their reuse must be ordered by the generated
+/// synchronization.
+pub async unsafe fn load(entry: &Entry, device: &Arc<Device>, profile: Option<super::Profile>) -> Result<Function> {
+    let image = Image::parse(entry.image()).map_err(Error::Invalid)?;
+    if image.topology != device.topology() {
+        return Err(Error::Invalid(format!(
+            "image topology {:?} differs from device topology {:?}",
+            image.topology,
+            device.topology()
+        )));
+    }
+    let weight = match image.weight {
+        Some(weight) => {
+            let shard = weight.bytes.len() / usize::from(image.topology.chips);
+            let mut buffer = device.alloc(weight.kind.into(), shard)?;
+            device.write([(weight.bytes.into(), buffer.slice_mut(..)?)]).await?;
+            Some(buffer)
         }
-        let weight = match image.weight {
-            Some(weight) => {
-                let shard = weight.bytes.len() / usize::from(image.topology.chips);
-                let mut buffer = device.alloc(weight.kind.into(), shard)?;
-                device.write([(weight.bytes.into(), buffer.slice_mut(..)?)]).await?;
-                Some(buffer)
-            }
-            None => None,
+        None => None,
+    };
+    let [first, second] = image.stacks.map(|slot| {
+        (slot.size != 0)
+            .then(|| device.alloc(slot.kind.into(), slot.size as usize))
+            .transpose()
+    });
+    let stacks = [first?, second?];
+    let profile = profile.and_then(|profile| {
+        // Spans name the kernel by its path, then any numeric key, or by its function-item type
+        // name.
+        let name = match entry.key() {
+            Key::Numeric([]) => entry.path().to_string(),
+            Key::Numeric(key) => format!(
+                "{}[{}]",
+                entry.path(),
+                key.iter().map(usize::to_string).collect::<Vec<_>>().join(",")
+            ),
+            Key::Type(instance) => instance.to_string(),
         };
-        let [first, second] = image.stacks.map(|slot| {
-            (slot.size != 0)
-                .then(|| device.alloc(slot.kind.into(), slot.size as usize))
-                .transpose()
-        });
-        let stacks = [first?, second?];
-        let profile = profile.and_then(|profile| {
-            // Spans name the kernel as the driver names its artifact: the path, then any key; a
-            // type-keyed instantiation by its function-item type name.
-            let name = match self.key() {
-                Key::Numeric([]) => self.path.to_string(),
-                Key::Numeric(key) => format!(
-                    "{}[{}]",
-                    self.path,
-                    key.iter().map(usize::to_string).collect::<Vec<_>>().join(",")
-                ),
-                Key::Type(instance) => instance.to_string(),
-            };
-            Profile::new(&image, profile.level, name)
-                .inspect_err(|error| (profile.refused)(profile.level, error))
-                .ok()?
-                .map(Arc::new)
-        });
-        let Parts {
-            inputs,
-            outputs,
-            slots,
-            executable,
-            sram_end,
-            ..
-        } = image.into_parts();
-        let binder = Binder {
-            weight,
-            stacks,
-            signature: Signature { inputs, outputs, slots },
-            profile,
-        };
-        let capacity = operand::SLOTS + binder.signature.slots.len();
-        // SAFETY: binding checks caller regions and modes; generated code confines its effects to
-        // those operands and private compiler storage ordered by its DRAM-reuse synchronization.
-        unsafe {
-            Function::load(
-                device,
-                executable.bytes(),
-                sram_end as usize,
-                capacity,
-                move |args, arguments| binder.bind(args, arguments),
-            )
-            .await
-            .map(|function| function.ordered())
-        }
+        Profile::new(&image, profile.level, name)
+            .inspect_err(|error| (profile.refused)(profile.level, error))
+            .ok()?
+            .map(Arc::new)
+    });
+    let Parts {
+        inputs,
+        outputs,
+        slots,
+        executable,
+        sram_end,
+        ..
+    } = image.into_parts();
+    let binder = Binder {
+        weight,
+        stacks,
+        signature: Signature { inputs, outputs, slots },
+        profile,
+    };
+    let capacity = operand::SLOTS + binder.signature.slots.len();
+    // SAFETY: binding checks caller regions and modes; generated code confines its effects to
+    // those operands and private compiler storage ordered by its DRAM-reuse synchronization, and
+    // its exit drain and rendezvous end them on every chip before any cluster answers.
+    unsafe {
+        Function::load(
+            device,
+            executable.bytes(),
+            sram_end as usize,
+            capacity,
+            move |args, arguments| binder.bind(args, arguments),
+        )
+        .await
+        .map(|function| function.ordered())
     }
 }
 

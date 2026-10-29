@@ -57,7 +57,7 @@ pub(crate) struct Indirect<'a> {
 
 impl<'a> Indirect<'a> {
     pub(crate) fn new(device: &'a Device, table: &'a Buffer, count: usize) -> Result<Self> {
-        if !table.belongs_to(&device.allocations) {
+        if !table.belongs_to(&device.allocator) {
             return Err(Error::ForeignBuffer);
         }
         let count = u32::try_from(count).map_err(|_| Error::Invalid("argument count exceeds u32".into()))?;
@@ -80,8 +80,6 @@ pub(super) struct Table {
     host: Staging,
     table: Buffer,
     written: Vec<u8>,
-    /// Refuses an upload while a running launch reads the table; kept so an upload allocates nothing.
-    guard: crate::Lease,
 }
 
 impl Table {
@@ -99,7 +97,6 @@ impl Table {
             host: Staging::zeroed(words * usize::from(device.topology().chips)),
             table: device.alloc(Kind::Dram, words * 8)?,
             written: Vec::with_capacity(words * usize::from(device.topology().chips) * size_of::<u64>()),
-            guard: crate::Lease::new(1),
         }))
     }
 
@@ -147,10 +144,8 @@ impl Table {
             return Indirect::new(device, &self.table, count);
         }
         let host = self.host.slice(bytes / size_of::<u64>());
-        // Admission refuses, not waits: a table a running launch reads is `Busy`.
-        let (guard, table) = (&mut self.guard, &self.table);
-        device.admit(|| guard.extend([(table.slice(..words * 8)?, crate::Access::Write)]))?;
-        guard.clear();
+        // No launch reads this table now: a slot uploads only while it is idle, and swaps tables
+        // only with an idle slot.
         {
             let mut write = std::pin::pin!(device.write([(host, self.table.slice_mut(..words * 8)?)]));
             loop {
@@ -158,6 +153,9 @@ impl Table {
                     result?;
                     break;
                 }
+                // A pinned staging write is the device worker's job; this thread runs it too, so the
+                // launch does not depend on another thread.
+                device.work().complete(crate::device::Contention::Wait);
                 std::thread::yield_now();
             }
         }

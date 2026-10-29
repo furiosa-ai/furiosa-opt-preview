@@ -3,7 +3,7 @@
 use std::fmt::{self, Debug};
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker, ready};
+use std::task::{Context, Poll, ready};
 use tracing::Instrument;
 
 use crate::Error;
@@ -54,7 +54,7 @@ impl<O: DeviceOutput> Returns<O> for &mut O {
 }
 
 /// Work that has not started: a launch or a host transfer. `.await` runs it; `.submit()` starts it
-/// now and returns it as [`Submitted`] to await later.
+/// now and returns it as [`Submitted`] to await later. Dropping it before submission does nothing.
 #[must_use = "work does nothing until submitted or awaited"]
 pub struct Prepared<W>(W);
 
@@ -80,8 +80,11 @@ impl<W: Work> Prepared<W> {
 
     /// Starts the work now. A transfer of host memory that is not pinned completes before this
     /// returns, since the device must not use memory the runtime cannot keep alive. A transfer
-    /// first waits for the device work submitted before it on its bytes, and dropping it before
-    /// that wait ends cancels it.
+    /// hands every pinned transfer piece to the device worker, including waits for earlier work
+    /// and queue room, and keeps its pinned host memory leased until the piece ends, so the
+    /// returned Future borrows neither the DMA context nor the bytes copied from; one that relays a
+    /// read out into existing host memory keeps only that memory borrowed. Dropping the returned
+    /// Future does not cancel any piece.
     pub fn submit(self) -> Submitted<W::Future> {
         self.0.submit()
     }
@@ -104,8 +107,9 @@ impl<W> Debug for Prepared<W> {
 
 /// Started work: a launch or a host transfer, which runs to completion even when this Future is
 /// dropped or forgotten.
+/// Its Future only observes the result; the device worker owns submitted pinned transfers.
 #[must_use = "await the work to observe its result"]
-pub struct Submitted<F>(F);
+pub struct Submitted<F>(pub(crate) F);
 
 impl<F> Debug for Submitted<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -188,66 +192,6 @@ impl<O> Future for Launched<O> {
     }
 }
 
-/// A host transfer is work a [`Prepared`] starts by polling it once.
-impl<O, F: Future<Output = Result<O, Error>>> Work for F {
-    type Output = O;
-    type Future = Issued<F>;
-
-    fn submit(self) -> Submitted<Issued<F>> {
-        Submitted(Issued::new(self))
-    }
-}
-
-/// A host transfer issued by one poll at submission, then pending or ready until its result is
-/// taken; the awaiting task's poll registers its own waker.
-#[doc(hidden)]
-pub enum Issued<F: Future> {
-    /// The transfer still runs.
-    Pending(Pin<Box<F>>),
-    /// The transfer finished within its first poll.
-    Ready(F::Output),
-    /// Its result was taken.
-    Taken,
-}
-
-impl<F: Future> Debug for Issued<F> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Issued").finish_non_exhaustive()
-    }
-}
-
-impl<F: Future> Issued<F> {
-    fn new(transfer: F) -> Self {
-        let mut transfer = Box::pin(transfer);
-        // rt finishes a transfer of host memory it does not own within this poll, so a forgotten
-        // `Submitted` leaves the device no borrowed bytes (rt `Device::write` / `read`).
-        match transfer.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
-            Poll::Ready(output) => Self::Ready(output),
-            Poll::Pending => Self::Pending(transfer),
-        }
-    }
-}
-
-impl<F: Future> Future for Issued<F> {
-    type Output = F::Output;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
-        // SAFETY: the transfer is pinned in its own box, and the finished output is not pinned.
-        let this = unsafe { self.get_unchecked_mut() };
-        match std::mem::replace(this, Self::Taken) {
-            Self::Pending(mut transfer) => {
-                let poll = transfer.as_mut().poll(cx);
-                if poll.is_pending() {
-                    *this = Self::Pending(transfer);
-                }
-                poll
-            }
-            Self::Ready(output) => Poll::Ready(output),
-            Self::Taken => panic!("transfer polled after completion"),
-        }
-    }
-}
-
 /// Prepares a launch of `function` with `args`; `.await` submits it and waits, `.submit()` only
 /// submits, and `.output(&mut out)` writes its returns into existing storage. The first launch of
 /// a function on a device loads it on the calling thread; `function.load(&device)` does that up
@@ -274,7 +218,7 @@ pub struct Launch<F, Args, Output = Returned> {
     output: Output,
 }
 
-/// The returns of a launch go into storage the launch returns.
+/// The returns of a launch, or the bytes of a transfer, go into storage the work returns.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct Returned;

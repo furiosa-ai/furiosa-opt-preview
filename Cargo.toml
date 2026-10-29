@@ -17,6 +17,9 @@ members = [
 exclude = ["furiosa-opt-rt/bootloader"]
 resolver = "3"
 
+[workspace.package]
+publish = true
+
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(backend, values("npu"))', 'cfg(furiosa_opt)'] }
 

@@ -6,37 +6,47 @@
 use core::ops::Range;
 use core::ptr;
 
-/// One register of `T`, accessed volatile.
+use zerocopy::FromBytes;
+
+/// One register of `T`, accessed volatile. Reading one needs a `T` that every bit pattern is
+/// ([`FromBytes`]), since the other party may write any.
 #[derive(Clone, Copy, Debug)]
 pub struct Register<T>(*mut T);
 
-// SAFETY: a register has no memory of its own to race on; the hardware serializes accesses.
+// SAFETY: construction promised a register outside every Rust allocation, where the hardware
+// defines concurrent volatile accesses, or one that no two threads access at once.
 unsafe impl<T> Sync for Register<T> {}
-// SAFETY: as above; a register may be used from whichever thread holds its owner.
+// SAFETY: as above.
 unsafe impl<T> Send for Register<T> {}
 
 impl<T: Copy> Register<T> {
     /// # Safety
     ///
-    /// `register` must point at a `T`-sized register mapped for as long as the value is used.
+    /// `register` must point at a `T`-sized register on `T`'s alignment, mapped for as long as
+    /// the value is used, and outside every Rust allocation unless no two threads access it at once.
     pub const unsafe fn new(register: *mut T) -> Self {
         Self(register)
     }
 
     /// # Safety
     ///
-    /// `address` must be a `T`-sized register the MMU maps for as long as the image runs.
+    /// `address` must be a `T`-sized register on `T`'s alignment, outside every Rust allocation,
+    /// that the MMU maps for as long as the image runs.
     pub const unsafe fn at(address: usize) -> Self {
         Self(ptr::without_provenance_mut(address))
     }
 
-    pub fn read(&self) -> T {
-        // SAFETY: construction (`new` or `at`) promised a mapped register of this width.
+    pub fn read(&self) -> T
+    where
+        T: FromBytes,
+    {
+        // SAFETY: construction (`new` or `at`) promised a mapped, aligned register of this width,
+        // and `FromBytes` makes whatever it holds a `T`.
         unsafe { ptr::read_volatile(self.0) }
     }
 
     pub fn write(&self, value: T) {
-        // SAFETY: construction (`new` or `at`) promised a mapped register of this width.
+        // SAFETY: construction (`new` or `at`) promised a mapped, aligned register of this width.
         unsafe { ptr::write_volatile(self.0, value) }
     }
 
@@ -56,7 +66,10 @@ impl<T: Copy> Register<T> {
 impl<T: Copy> Register<T> {
     /// Reads the register; the memory reads after it see what the value announced
     /// (load-acquire): a consumer reads the producer index, then the entries it covers.
-    pub fn read_acquire(&self) -> T {
+    pub fn read_acquire(&self) -> T
+    where
+        T: FromBytes,
+    {
         let value = self.read();
         #[cfg(target_arch = "aarch64")]
         // SAFETY: a barrier alone.
@@ -104,7 +117,8 @@ impl<T: Copy> Register<T> {
 /// # Safety
 ///
 /// Every offset in [`Memory::mapped`] from [`Memory::origin`] addresses mapped memory, and stays
-/// mapped while the value lives.
+/// mapped while the value lives. The memory lies outside every Rust allocation, or no two threads
+/// access it at once.
 pub unsafe trait Memory {
     /// Where offset zero lies; it need not be mapped itself.
     fn origin(&self) -> *mut u8;
@@ -121,8 +135,8 @@ pub struct Fixed {
     end: usize,
 }
 
-// SAFETY: the memory is fixed and mapped for the program's lifetime; the hardware serializes
-// accesses to it.
+// SAFETY: the memory is fixed and mapped for the program's lifetime, and `new` promised the same
+// thread rule a register's construction does.
 unsafe impl Send for Fixed {}
 // SAFETY: as above.
 unsafe impl Sync for Fixed {}
@@ -130,7 +144,8 @@ unsafe impl Sync for Fixed {}
 impl Fixed {
     /// # Safety
     ///
-    /// The offsets `mapped` from `origin` must stay mapped for as long as the program runs.
+    /// The offsets `mapped` from `origin` must stay mapped for as long as the program runs, and
+    /// lie outside every Rust allocation unless no two threads access them at once.
     pub const unsafe fn new(origin: *mut u8, mapped: Range<usize>) -> Self {
         Self {
             origin,
@@ -140,7 +155,7 @@ impl Fixed {
     }
 }
 
-// SAFETY: `new` promised the range stays mapped.
+// SAFETY: `new` promised the range stays mapped, under the thread rule `Memory` asks.
 unsafe impl Memory for Fixed {
     fn origin(&self) -> *mut u8 {
         self.origin

@@ -3,24 +3,23 @@
 mod view;
 pub use view::{HostBufferSlice, HostBufferSliceMut};
 
+use std::ops::RangeBounds;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::slice::SliceIndex;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use dma_heap::{Heap, HeapKind};
-use memmap2::MmapMut;
+use memmap2::MmapRaw;
 
 use crate::arch::rngd;
+use crate::buffer::{Active, Allocator, Region};
 use crate::{Access, Buffer, Error, Result};
 
 /// Page-locked host bytes.
-#[derive(Debug)]
 pub struct Pinned {
     /// CPU access to the dma-buf; leases retain the buffer itself, not this mapping.
-    mmap: MmapMut,
-    allocation: Arc<DmaBuf>,
+    mmap: MmapRaw,
+    dmabuf: Arc<DmaBuf>,
     /// The registration [`crate::Device::map`] made.
     registration: Option<Arc<Registration>>,
     /// Bytes the caller asked for; the mapping is page-rounded past them.
@@ -41,15 +40,13 @@ impl Pinned {
 
     pub(crate) fn new(fd: OwnedFd, bytes: usize) -> Result<Self> {
         // SAFETY: this allocation owns the file and its only mapping.
-        let mmap = unsafe { MmapMut::map_mut(&fd) }
+        let mmap = MmapRaw::map_raw(&fd)
             .map_err(|why| Error::Device(format!("mapping {bytes} bytes of pinned memory: {why}")))?;
         Ok(Self {
             mmap,
-            allocation: Arc::new(DmaBuf {
+            dmabuf: Arc::new(DmaBuf {
                 fd,
-                active: AtomicUsize::new(0),
-                ordered: Mutex::new(None),
-                idle: Default::default(),
+                active: Mutex::default(),
             }),
             registration: None,
             bytes,
@@ -59,15 +56,18 @@ impl Pinned {
     /// Borrows a range of bytes without losing the DMA-buf or its byte offset.
     pub fn slice<I>(&self, range: I) -> HostBufferSlice<'_>
     where
-        I: SliceIndex<[u8], Output = [u8]>,
+        I: RangeBounds<usize>,
     {
-        let bytes = &self.mmap[..self.bytes][range];
+        let range = self.range(range);
+        let address = self.mmap.as_ptr().expose_provenance() + range.start;
         HostBufferSlice {
-            bytes,
-            backing: Some(Backing {
-                allocation: &self.allocation,
+            address,
+            len: range.len(),
+            borrow: std::marker::PhantomData,
+            pinned: Some(Backing {
+                dmabuf: &self.dmabuf,
                 registration: self.registration.as_ref(),
-                offset: bytes.as_ptr().addr() - self.mmap.as_ptr().addr(),
+                offset: range.start,
             }),
         }
     }
@@ -75,15 +75,17 @@ impl Pinned {
     /// Exclusively borrows a range of bytes for a read from the device.
     pub fn slice_mut<I>(&mut self, range: I) -> HostBufferSliceMut<'_>
     where
-        I: SliceIndex<[u8], Output = [u8]>,
+        I: RangeBounds<usize>,
     {
-        let base = self.mmap.as_ptr().addr();
-        let bytes = &mut self.mmap[..self.bytes][range];
-        let offset = bytes.as_ptr().addr() - base;
+        let range = self.range(range);
+        let offset = range.start;
+        let address = self.mmap.as_mut_ptr().expose_provenance() + offset;
         HostBufferSliceMut {
-            bytes,
-            backing: Some(Backing {
-                allocation: &self.allocation,
+            address,
+            len: range.len(),
+            borrow: std::marker::PhantomData,
+            pinned: Some(Backing {
+                dmabuf: &self.dmabuf,
                 registration: self.registration.as_ref(),
                 offset,
             }),
@@ -100,14 +102,40 @@ impl Pinned {
         self.bytes == 0
     }
 
+    fn range(&self, range: impl RangeBounds<usize>) -> std::ops::Range<usize> {
+        use std::ops::Bound;
+        let start = match range.start_bound() {
+            Bound::Included(&start) => start,
+            Bound::Excluded(&start) => start.checked_add(1).expect("range start overflow"),
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&end) => end.checked_add(1).expect("range end overflow"),
+            Bound::Excluded(&end) => end,
+            Bound::Unbounded => self.bytes,
+        };
+        assert!(start <= end && end <= self.bytes, "pinned range exceeds allocation");
+        start..end
+    }
+
     /// The dma-buf behind the memory.
-    pub(crate) fn allocation(&self) -> &Arc<DmaBuf> {
-        &self.allocation
+    pub(crate) fn dmabuf(&self) -> &Arc<DmaBuf> {
+        &self.dmabuf
     }
 
     /// The registration [`crate::Device::map`] made, if it made one.
     pub(crate) fn registration(&self) -> Option<&Arc<Registration>> {
         self.registration.as_ref()
+    }
+
+    /// All of the memory, as a CPU `access` to it.
+    fn region(&self, access: Access) -> Region {
+        let backing = Backing {
+            dmabuf: &self.dmabuf,
+            registration: None,
+            offset: 0,
+        };
+        Region::host(backing, self.bytes, access)
     }
 
     /// Makes `registration` the one the memory's device DMA goes through.
@@ -122,8 +150,9 @@ impl Deref for Pinned {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        self.allocation.wait();
-        &self.mmap[..self.bytes]
+        self.region(Access::Read).wait();
+        // SAFETY: earlier device writes ended, and the returned borrow keeps later ones off the bytes.
+        unsafe { std::slice::from_raw_parts(self.mmap.as_ptr(), self.bytes) }
     }
 }
 
@@ -131,100 +160,27 @@ impl Deref for Pinned {
 /// failed, since its contents are then unknown.
 impl DerefMut for Pinned {
     fn deref_mut(&mut self) -> &mut [u8] {
-        self.allocation.wait();
-        &mut self.mmap[..self.bytes]
+        self.region(Access::Write).wait();
+        // SAFETY: earlier device accesses ended, and this exclusive borrow keeps later ones off the bytes.
+        unsafe { std::slice::from_raw_parts_mut(self.mmap.as_mut_ptr(), self.bytes) }
     }
 }
 
 /// The dma-buf behind a pinned range: its descriptor, its device registration and where the range
 /// starts in it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(crate) struct Backing<'a> {
-    allocation: &'a Arc<DmaBuf>,
-    registration: Option<&'a Arc<Registration>>,
-    offset: usize,
+    pub(crate) dmabuf: &'a Arc<DmaBuf>,
+    pub(crate) registration: Option<&'a Arc<Registration>>,
+    pub(crate) offset: usize,
 }
 
 impl<'a> Backing<'a> {
-    /// Holds the allocation for a device access; [`Error::Busy`] while another access writes it,
-    /// or holds it at all when this one writes.
-    pub(crate) fn lease(&self, access: Access) -> Result<PinnedLease> {
-        let weight = match access {
-            Access::Read => 1,
-            Access::Write => WRITER,
-        };
-        self.allocation
-            .active
-            .fetch_update(Ordering::Acquire, Ordering::Acquire, |active| match active {
-                0 => Some(weight),
-                _ if access == Access::Read && active < ORDERED => Some(active + 1),
-                _ => None,
-            })
-            .map_err(|active| {
-                if active & FAILED == 0 {
-                    Error::Busy
-                } else {
-                    Error::Poisoned
-                }
-            })?;
-        Ok(PinnedLease {
-            allocation: Arc::clone(self.allocation),
-            weight,
-            ordered: false,
-            offset: 0,
-        })
-    }
-
-    pub(crate) fn ordered(&self) -> Result<PinnedLease> {
-        let registration = self.registration.expect("ordered host operands are mapped");
-        let mut domain = self.allocation.ordered.lock().unwrap_or_else(PoisonError::into_inner);
-        self.allocation
-            .active
-            .fetch_update(Ordering::Acquire, Ordering::Acquire, |active| match active {
-                0 => Some(ORDERED | 1),
-                _ if active & (FAILED | WRITER) == 0
-                    && active & ORDERED != 0
-                    && domain.as_ref().is_some_and(|other| Arc::ptr_eq(registration, other)) =>
-                {
-                    Some(active + 1)
-                }
-                _ => None,
-            })
-            .map_err(|active| {
-                if active & FAILED == 0 {
-                    Error::Busy
-                } else {
-                    Error::Poisoned
-                }
-            })?;
-        domain.get_or_insert_with(|| Arc::clone(registration));
-        Ok(PinnedLease {
-            allocation: Arc::clone(self.allocation),
-            weight: 1,
-            ordered: true,
-            offset: 0,
-        })
-    }
-
-    /// Another hold for an access that already leased this allocation.
-    pub(crate) fn retain(&self) -> PinnedLease {
-        self.allocation.active.fetch_add(1, Ordering::Relaxed);
-        PinnedLease {
-            allocation: Arc::clone(self.allocation),
-            weight: 1,
-            ordered: false,
-            offset: 0,
-        }
-    }
-
-    /// Whether both ranges lie in one allocation.
-    pub(crate) fn shares(&self, other: &Backing<'_>) -> bool {
-        Arc::ptr_eq(self.allocation, other.allocation)
-    }
-
-    /// The registration through which a device's clusters reach this memory, if it has one.
-    pub(crate) fn registration(&self) -> Option<&'a Arc<Registration>> {
+    /// The registration through which `allocator`'s device reaches this memory, if `map` made one
+    /// there.
+    pub(crate) fn mapped_to(&self, allocator: &Arc<Allocator>) -> Option<&'a Arc<Registration>> {
         self.registration
+            .filter(|registration| registration.belongs_to(allocator))
     }
 
     /// Where the range starts in its dma-buf.
@@ -241,147 +197,183 @@ impl<'a> Backing<'a> {
     }
 }
 
-/// One device access's hold on a pinned allocation, released at its physical completion.
-#[derive(Debug)]
-pub(crate) struct PinnedLease {
-    allocation: Arc<DmaBuf>,
-    weight: usize,
-    ordered: bool,
-    /// Where the bytes the access moves start in the allocation.
-    offset: usize,
-}
-
-impl PinnedLease {
-    /// The lease for the access's bytes starting at `offset` of the allocation.
-    pub(crate) fn at(mut self, offset: usize) -> Self {
-        self.offset = offset;
-        self
-    }
-
-    pub(crate) fn poison(&self) {
-        self.allocation.active.fetch_or(FAILED, Ordering::Release);
-        self.allocation.notify();
-    }
-
-    pub(crate) fn belongs_to(&self, backing: &Backing<'_>) -> bool {
-        Arc::ptr_eq(&self.allocation, backing.allocation)
-    }
-
-    /// Where the bytes the access moves start in the allocation.
-    pub(crate) fn offset(&self) -> usize {
-        self.offset
-    }
-
-    pub(crate) fn fd(&self) -> RawFd {
-        self.allocation.fd.as_raw_fd()
+impl std::fmt::Debug for Pinned {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Pinned")
+            .field("bytes", &&*self.slice(..).bytes())
+            .finish()
     }
 }
 
-impl Drop for PinnedLease {
-    fn drop(&mut self) {
-        let active = if self.ordered {
-            let mut domain = self.allocation.ordered.lock().unwrap_or_else(PoisonError::into_inner);
-            let previous = self
-                .allocation
-                .active
-                .fetch_update(Ordering::Release, Ordering::Relaxed, |active| {
-                    Some(if active & !(FAILED | ORDERED) == 1 {
-                        active & FAILED
-                    } else {
-                        active - 1
-                    })
-                })
-                .expect("ordered lease release always succeeds");
-            if previous & !(FAILED | ORDERED) == 1 {
-                *domain = None;
-                previous & FAILED
-            } else {
-                previous - 1
-            }
-        } else {
-            self.allocation.active.fetch_sub(self.weight, Ordering::Release) - self.weight
-        };
-        if active & !FAILED == 0 {
-            self.allocation.notify();
-        }
-    }
-}
-
-/// One pinned allocation registered with a device: each cluster's segment table, in one allocation
-/// of device memory.
+/// One pinned allocation registered with a device: each cluster's segment table, laid out in
+/// device DRAM.
 #[derive(Debug)]
 pub(crate) struct Registration {
-    pub(crate) buffer: Buffer,
-    /// Where each cluster's table starts in `buffer`, by cluster.
-    pub(crate) tables: Vec<usize>,
+    /// The device DRAM the tables lie in.
+    pub(crate) tables: Buffer,
+    /// Where each cluster's table starts in `tables`, by cluster.
+    pub(crate) offsets: Vec<usize>,
 }
 
 impl Registration {
+    /// Whether the registration is `allocator`'s device's: its tables lie in that device's memory.
+    pub(crate) fn belongs_to(&self, allocator: &Arc<Allocator>) -> bool {
+        self.tables.belongs_to(allocator)
+    }
+
     /// The DMA operand cluster `cluster` decodes for `offset` bytes into the mapped memory, on a
     /// chip whose memory its clusters see at `window`.
     pub(crate) fn operand(&self, window: u64, cluster: usize, offset: u32) -> u64 {
-        let table = rngd::DEVICE_MEMORY.start + self.buffer.operand(window) + self.tables[cluster] as u64;
+        let table = rngd::DEVICE_MEMORY.start + self.tables.operand(window) + self.offsets[cluster] as u64;
         rngd::dma::Operand::new(table, offset)
             .expect("registered host descriptor fits the device address space")
             .encode()
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct DmaBuf {
-    fd: OwnedFd,
-    active: AtomicUsize,
-    ordered: Mutex<Option<Arc<Registration>>>,
-    /// Wakes CPU accesses in [`DmaBuf::wait`] once no device access holds the memory.
-    idle: (Mutex<()>, Condvar),
+    pub(crate) fd: OwnedFd,
+    pub(crate) active: Mutex<Active>,
 }
 
 impl DmaBuf {
     pub(crate) fn fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
-
-    /// Sleeps until no device access holds the memory; panics once one failed.
-    fn wait(&self) {
-        let idle = || {
-            let active = self.active.load(Ordering::Acquire);
-            assert_eq!(
-                active & FAILED,
-                0,
-                "DMA failed; this host allocation is no longer accessible"
-            );
-            active == 0
-        };
-        if idle() {
-            return;
-        }
-        // Checked again under the lock, which a lease takes before it notifies.
-        let (lock, wake) = &self.idle;
-        let guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
-        drop(
-            wake.wait_while(guard, |()| !idle())
-                .unwrap_or_else(PoisonError::into_inner),
-        );
-    }
-
-    /// Wakes [`DmaBuf::wait`] after a change of `active`; taking the lock orders the wake
-    /// after a waiter's check.
-    fn notify(&self) {
-        let (lock, idle) = &self.idle;
-        drop(lock.lock().unwrap_or_else(PoisonError::into_inner));
-        idle.notify_all();
-    }
 }
-
-/// Set in `DmaBuf::active` once a device access to the memory failed.
-const FAILED: usize = 1 << (usize::BITS - 1);
-/// The weight a device access that writes the memory adds to `DmaBuf::active`.
-const WRITER: usize = 1 << (usize::BITS - 2);
-const ORDERED: usize = 1 << (usize::BITS - 3);
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::buffer::Lease;
+
+    /// Device work on disjoint pinned ranges does not exclude another range's writer.
+    #[test]
+    fn admits_disjoint_ranges() {
+        let host = crate::test::pinned();
+        let mut first = Lease::new(1);
+        first
+            .extend([Region::host(host.slice(..128).pinned.unwrap(), 128, Access::Write)])
+            .unwrap();
+        let mut second = Lease::new(1);
+        let second = second.extend([Region::host(host.slice(128..256).pinned.unwrap(), 128, Access::Write)]);
+        assert!(second.is_ok());
+        drop(first);
+    }
+
+    /// Poisoned transfer views reject CPU reads and writes without exposing bytes.
+    #[test]
+    fn refuses_poisoned_views() {
+        let mut host = crate::test::pinned();
+        let mut lease = Lease::new(1);
+        lease
+            .extend([Region::host(host.slice(..).pinned.unwrap(), host.len(), Access::Write)])
+            .unwrap();
+        lease.poison();
+        drop(lease);
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _bytes = host.slice(..).bytes();
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _bytes = host.slice_mut(..).into_bytes();
+            }))
+            .is_err()
+        );
+    }
+
+    /// CPU readers coexist, and each waits for the device writes admitted before it.
+    #[test]
+    fn shares_cpu_reads() {
+        let host = crate::test::pinned();
+        let view = host.slice(..);
+        let mut writer = Lease::new(1);
+        writer
+            .extend([Region::host(view.pinned.unwrap(), view.len(), Access::Write)])
+            .unwrap();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| view.bytes()[0]);
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(!reader.is_finished(), "a CPU read waits for the device write");
+            drop(writer);
+            assert_eq!(reader.join().unwrap(), 0);
+        });
+        let (first, second) = (view.bytes(), view.bytes());
+        assert_eq!(first[0], second[0]);
+    }
+
+    /// A split device write excludes other accesses until its last command ends.
+    #[test]
+    fn excludes_reads_until_last_write() {
+        let host = crate::test::pinned();
+        let backing = host.slice(..).pinned.unwrap();
+        let mut first = Lease::new(1);
+        first
+            .extend([Region::host(backing, host.len(), Access::Write)])
+            .unwrap();
+        let last = first;
+        assert!(matches!(
+            Lease::new(1).extend([Region::host(backing, host.len(), Access::Read)]),
+            Err(Error::Busy)
+        ));
+        drop(last);
+        assert!(
+            Lease::new(1)
+                .extend([Region::host(backing, host.len(), Access::Read)])
+                .is_ok()
+        );
+    }
+
+    /// Retaining an ordered hold leaves the allocation accessible after both holds end.
+    #[test]
+    fn releases_retained_ordered_memory() {
+        let device = crate::test::device(&[0], 8);
+        let host = crate::test::mapped(&device, vec![0], 4096);
+        let backing = host.slice(..).pinned.unwrap();
+        let mut first = Lease::new(1);
+        first.set_owner(crate::buffer::Owner::Ordered(1));
+        first
+            .extend([Region::host(backing, host.len(), Access::Write)])
+            .unwrap();
+        let mut last = Lease::new(1);
+        last.set_owner(crate::buffer::Owner::Ordered(2));
+        last.extend([Region::host(backing, host.len(), Access::Write)]).unwrap();
+        drop(first);
+        drop(last);
+        assert!(
+            Lease::new(1)
+                .extend([Region::host(backing, host.len(), Access::Write)])
+                .is_ok()
+        );
+    }
+
+    /// Debugging poisoned pinned memory must not expose its bytes.
+    #[test]
+    fn refuses_poisoned_debug() {
+        let host = crate::test::pinned();
+        let mut lease = Lease::new(1);
+        lease
+            .extend([Region::host(host.slice(..).pinned.unwrap(), host.len(), Access::Write)])
+            .unwrap();
+        lease.poison();
+        drop(lease);
+        assert!(std::panic::catch_unwind(|| format!("{host:?}")).is_err());
+    }
+
+    /// Each half of a split keeps its place in the DMA-buf the driver addresses.
+    #[test]
+    fn splits_keep_their_offsets() {
+        let mut pinned = crate::test::pinned();
+        let (head, tail) = pinned.slice_mut(16..).split_at(32);
+        assert_eq!((head.len(), tail.len()), (32, 4096 - 48));
+        assert_eq!((head.pinned.unwrap().offset(), tail.pinned.unwrap().offset()), (16, 48));
+    }
 
     /// Empty pinned memory is the caller's invalid request.
     #[test]

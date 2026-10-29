@@ -90,7 +90,7 @@ pub(crate) fn launch_memory<'a, B: Backend>(
 ) -> Result<(), Error> {
     let mut whole = |slice: HbmBufferSlice<'a, B>, access| {
         if slice.region.chips != Region::whole(slice.buffer).chips {
-            return Err(Error::Invalid("a launch argument spans every chip of its buffer"));
+            return Err(Error::Invalid("a launch argument must span every chip of its buffer"));
         }
         bind(slice, access)
     };

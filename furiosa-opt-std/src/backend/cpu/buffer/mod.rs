@@ -4,7 +4,7 @@ use std::ops::{Range, RangeBounds};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use furiosa_opt_rt as rt;
-use furiosa_opt_rt::memory::{Allocations, Kind};
+use furiosa_opt_rt::memory::{Allocator, Kind};
 
 use crate::Error;
 use crate::backend::Allocation;
@@ -34,10 +34,10 @@ struct Memory {
 }
 
 impl Buffer {
-    /// A fresh zeroed `len`-byte buffer of `kind` on every chip, placed by `allocations` as on a
+    /// A fresh zeroed `len`-byte buffer of `kind` on every chip, placed by `allocator` as on a
     /// device; [`rt::Error::OutOfMemory`] when no free span holds it.
-    pub(super) fn alloc(allocations: &Arc<Allocations>, kind: Kind, len: usize) -> rt::Result<Self> {
-        let placement = allocations.alloc(kind, len)?;
+    pub(super) fn alloc(allocator: &Arc<Allocator>, kind: Kind, len: usize) -> rt::Result<Self> {
+        let placement = allocator.alloc(kind, len)?;
         let chips = usize::from(placement.topology().chips);
         Ok(Self::new(Some(placement), chips, len))
     }
@@ -61,11 +61,11 @@ impl Buffer {
         }
     }
 
-    /// [`rt::Error::ForeignBuffer`] unless `allocations` placed the memory, or it is a device
+    /// [`rt::Error::ForeignBuffer`] unless `allocator` placed the memory, or it is a device
     /// function's own.
-    pub(super) fn check_device(&self, allocations: &Arc<Allocations>) -> Result<(), Error> {
+    pub(super) fn check_device(&self, allocator: &Arc<Allocator>) -> Result<(), Error> {
         match &self.memory.placement {
-            Some(placement) if !placement.belongs_to(allocations) => Err(rt::Error::ForeignBuffer.into()),
+            Some(placement) if !placement.belongs_to(allocator) => Err(rt::Error::ForeignBuffer.into()),
             _ => Ok(()),
         }
     }
@@ -198,8 +198,8 @@ mod tests {
         Region { chips: 0b11, bytes }
     }
 
-    fn allocations() -> Arc<Allocations> {
-        Arc::new(Allocations::new(Topology { chips: 2, pes: 8 }))
+    fn allocator() -> Arc<Allocator> {
+        Arc::new(Allocator::new(Topology { chips: 2, pes: 8 }))
     }
 
     /// Host memory is placed as the device's allocator places it: DRAM in whole 512-byte units,
@@ -218,7 +218,7 @@ mod tests {
     /// Owners split or aliased from one buffer address and see the same host bytes.
     #[test]
     fn aliases_share_bytes() {
-        let buffer = Buffer::alloc(&allocations(), Kind::DramShared, 4).unwrap();
+        let buffer = Buffer::alloc(&allocator(), Kind::DramShared, 4).unwrap();
         let alias = buffer.alias(1..3).unwrap();
         buffer.store(&whole(0..4), &vec![10, 11, 12, 13, 14, 15, 16, 17].into());
         assert_eq!(*alias.load(&whole(0..2)), [11, 12, 15, 16]);
@@ -232,10 +232,10 @@ mod tests {
     /// the allocation; reads and other bytes do not.
     #[test]
     fn launch_uses_conflict_only_on_overlapping_writes() {
-        let allocations = allocations();
-        let buffer = Buffer::alloc(&allocations, Kind::DramShared, 4).unwrap();
+        let allocator = allocator();
+        let buffer = Buffer::alloc(&allocator, Kind::DramShared, 4).unwrap();
         let alias = buffer.alias(2..).unwrap();
-        let other = Buffer::alloc(&allocations, Kind::DramShared, 4).unwrap();
+        let other = Buffer::alloc(&allocator, Kind::DramShared, 4).unwrap();
         let busy = |uses: &[(&Buffer, Region, Access)]| {
             let held = uses
                 .iter()

@@ -73,20 +73,21 @@ pub trait Runtime: Sized + 'static {
     /// [`Kind::DramShared`] for memory another chip's device code writes, [`Kind::Dram`] otherwise.
     fn alloc(device: &Self::Device, kind: Kind, bytes: usize) -> Result<Self::Buffer, Error>;
 
-    /// Copies a batch in one runtime write, each host's bytes chip after chip in rank order;
-    /// the caller checked every length, and foreign buffers are refused by the backend.
+    /// Submits a batch as one runtime write, each host's bytes chip after chip in rank order, and
+    /// returns its completion, which borrows none of the pairs: pinned host bytes stay leased until
+    /// the copy ends, and other host bytes are copied before this returns. The caller checked every
+    /// length, and foreign buffers are refused by the backend.
     fn write<'a>(
         device: &Self::Device,
         pairs: Vec<(HostBufferSlice<'a>, HbmBufferSliceMut<'a, Self>)>,
-    ) -> impl Future<Output = Result<(), Error>>;
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<Self>;
 
-    /// Copies `from` into `host`, chip after chip in rank order; the caller checked that `host`
-    /// holds exactly those bytes.
-    fn read(
+    /// Submits a batch as one runtime read, into each host's bytes chip after chip in rank order,
+    /// and returns its completion on the terms of [`Self::write`].
+    fn read<'a>(
         device: &Self::Device,
-        from: HbmBufferSlice<'_, Self>,
-        host: HostBufferSliceMut<'_>,
-    ) -> impl Future<Output = Result<(), Error>>;
+        pairs: Vec<(HbmBufferSlice<'a, Self>, HostBufferSliceMut<'a>)>,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<Self>;
 
     /// Resolves once every launch and transfer submitted on `device` before this call ended; the
     /// device's failure once it failed.
@@ -96,7 +97,7 @@ pub trait Runtime: Sized + 'static {
     fn load(
         device: &Self::Device,
         path: &'static str,
-        key: furiosa_opt_rt::registry::Key<'_>,
+        key: furiosa_opt_rt::registry::Key<'static>,
     ) -> Result<Self::Kernel, Error>;
 
     /// Runs `kernel` with `args` on `device`, writing its returns into `output`: the compiled

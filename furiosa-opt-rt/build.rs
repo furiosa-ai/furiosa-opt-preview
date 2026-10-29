@@ -4,6 +4,8 @@ use std::path::Path;
 
 fn main() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    println!("cargo:rerun-if-changed=prebuilt");
+
     for (variable, filename, output) in [
         (
             "FURIOSA_OPT_SIGNED_BOOTLOADER_PATH",

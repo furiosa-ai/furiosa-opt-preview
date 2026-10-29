@@ -2,16 +2,17 @@
 
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
+use std::time::Duration;
 
 use furiosa_opt_abi::bootloader;
-use furiosa_opt_ipc::{Configure, ConfigureOption, Identity, Staged};
+use furiosa_opt_ipc::{Configure, ConfigureOption, DRIVER_DEADLINE, Identity, Staged, launch_timeout};
 
 use super::chip::{Group, Pdma};
 use super::cluster::{Cluster, PeRange};
 use super::dma::DmaQueue;
 use super::dram::Dram;
 use super::kernel::{self, window::Window};
-use super::mailbox::{self, Boot, Bootloader, Mailbox, PATIENCE};
+use super::mailbox::{self, Boot, Bootloader, Mailbox};
 use super::{DRAM_BASE, Driver};
 use crate::arch::rngd;
 use crate::buffer::Ranges;
@@ -21,21 +22,26 @@ impl Driver {
     /// Reserves `placement`, boots every cluster on firmware staged through BAR4 and hands each
     /// its chip's PDMA channels. `worker` is woken to collect host transfers nobody observes.
     pub(crate) fn open(placement: Placement, worker: Waker) -> Result<Self> {
+        // The host waits as long as the driver does; the device fails a launch a second sooner, so
+        // its answer naming the timeout comes first.
+        let patience = (placement.chips.iter())
+            .map(|&chip| kernel::timeout(chip).unwrap_or(DRIVER_DEADLINE))
+            .min()
+            .unwrap_or(DRIVER_DEADLINE);
+        let timeout = launch_timeout(patience);
+        if timeout.is_zero() {
+            return Err(Error::Device(format!(
+                "the driver's {patience:?} deadline leaves a launch no time"
+            )));
+        }
         let Reserved {
             group: Group {
                 chips: joined,
                 shared_end,
             },
             clusters: reserved,
-        } = Self::reserve(&placement)?;
+        } = Self::reserve(&placement, patience)?;
         let Placement { chips: members, pes } = placement;
-        if let Some(deadline) = members.iter().filter_map(|&chip| kernel::timeout(chip)).min()
-            && PATIENCE >= deadline
-        {
-            return Err(Error::Device(format!(
-                "the driver's {deadline:?} deadline does not outlast the host's {PATIENCE:?} wait for a launch"
-            )));
-        }
         // Time and pid: unique among the stagings a boot could confuse, no more.
         let token = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -62,10 +68,8 @@ impl Driver {
             })
             .collect::<Result<Vec<_>>>()?;
         let physical = joined.iter().map(|chip| chip.physical).collect::<Vec<_>>();
-        let chips = joined
-            .into_iter()
-            .zip(&drams)
-            .map(|(chip, dram)| chip.open(DRAM_BASE + dram.at.expect("every chip's first cluster booted")))
+        let chips = (joined.into_iter())
+            .map(|chip| chip.open(DRAM_BASE))
             .collect::<Vec<_>>();
         let pdma = Pdma::reserve(&chips)?;
         for (index, mailbox) in mailboxes.iter_mut().enumerate() {
@@ -80,6 +84,9 @@ impl Driver {
                         cluster: index as u8,
                     })),
                     Some(ConfigureOption::LogLevel(log_level)),
+                    Some(ConfigureOption::LaunchTimeout(
+                        u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX),
+                    )),
                     (pdma.as_ref()).map(|pdma| {
                         let scratch = chip.base + dram.free.end as u64;
                         ConfigureOption::Dma(pdma.config(chip, rank, scratch, column, clusters))
@@ -106,21 +113,23 @@ impl Driver {
             shared_end.saturating_sub(window as usize)
         };
         let mailboxes = Arc::new(Mutex::new(mailboxes));
-        let transfers = DmaQueue::open(members.iter().copied(), Arc::clone(&mailboxes), worker)?;
+        let dma = DmaQueue::open(members.iter().copied(), Arc::clone(&mailboxes), worker)?;
         Ok(Self {
-            poison: Arc::clone(transfers.poison()),
-            transfers,
+            poison: Arc::clone(dma.poison()),
+            dma,
             mailboxes,
             pdma,
             topology: (members.len() as u8, pes.len() as u8).into(),
             chips,
             allocatable: Ranges::new(free, end),
+            patience,
         })
     }
 
     /// Reserves `placement`'s PEs on every one of its chips; PEs another process holds are
     /// [`Error::Reserved`]. Holding PEs is the only way to learn they are free.
-    pub(crate) fn reserve(Placement { chips, pes }: &Placement) -> Result<Reserved> {
+    /// Each cluster's bootloader and firmware wait `patience` for an answer.
+    pub(crate) fn reserve(Placement { chips, pes }: &Placement, patience: Duration) -> Result<Reserved> {
         let ascending = chips.windows(2).all(|pair| pair[0] < pair[1]);
         let max = rngd::MAX_CHIPS;
         if !(1..=usize::from(max)).contains(&chips.len()) || !ascending || chips.len() > 1 && pes.len() < 8 {
@@ -138,7 +147,7 @@ impl Driver {
                 .map(|(rank, chip, pes)| {
                     scope.spawn(move || {
                         let (cluster, link) = Cluster::open(chip, pes, rank as u8, BOOTLOADER)?;
-                        Ok(Bootloader::new(cluster, link))
+                        Ok(Bootloader::new(cluster, link, patience))
                     })
                 })
                 .collect::<Vec<_>>();
@@ -153,36 +162,29 @@ impl Driver {
         Ok(Reserved { group, clusters })
     }
 
-    /// Has the bootloader `loader` start the firmware image staged in `dram`, recording in
-    /// `dram.at` where the cluster sees the chip's window. A chip's first cluster writes the image
-    /// through the chip's BAR4 `window`, which shows the same bytes wherever the cluster sees
-    /// them, then finds the window, trying each candidate until a boot lands on it.
-    fn boot(mut loader: Bootloader, dram: &mut Dram, window: &Window, token: u64) -> Result<Mailbox> {
-        if dram.at.is_none() {
+    /// Has the bootloader `loader` start the firmware image staged in `dram`. A chip's first
+    /// cluster writes the image through the chip's BAR4 `window`; the cluster sees that byte at the
+    /// same offset past its memory's start, as [`rngd::DRAM_FIRMWARE`] lays out.
+    fn boot(loader: Bootloader, dram: &mut Dram, window: &Window, token: u64) -> Result<Mailbox> {
+        if !dram.staged {
             let bytes = [&bootloader::magic(token).to_le_bytes()[..], &FIRMWARE[8..]].concat();
             window.write(dram.offset as u64, &bytes)?;
+            dram.staged = true;
         }
-        // Before a boot found the window, every candidate place is tried; after, the found one.
-        let candidates = dram.at.map_or(rngd::CANDIDATES.to_vec(), |at| vec![at]);
-        for candidate in candidates {
-            let image = Staged {
-                addr: DRAM_BASE + candidate + dram.offset as u64,
-                len: FIRMWARE.len() as u64,
-                token,
-            };
-            loader = match loader.boot(image)? {
-                Boot::Running(mailbox) => {
-                    log::debug!("npu{} booted, its window at {candidate:#x}", dram.chip);
-                    dram.at = Some(candidate);
-                    return Ok(*mailbox);
-                }
-                Boot::NoImage(loader) => loader,
-            };
+        let addr = DRAM_BASE + dram.offset as u64;
+        let image = Staged {
+            addr,
+            len: FIRMWARE.len() as u64,
+            token,
+        };
+        match loader.boot(image)? {
+            Boot::Running(mailbox) => Ok(*mailbox),
+            Boot::NoImage => Err(Error::Device(format!(
+                "npu{}: the bootloader found no firmware image at {addr:#x}, where the host wrote it: \
+                 the kernel driver lays memory out unlike the PF build this runtime supports",
+                dram.chip
+            ))),
         }
-        Err(Error::Device(format!(
-            "no candidate window showed the firmware image staged at {:#x}",
-            dram.offset
-        )))
     }
 }
 

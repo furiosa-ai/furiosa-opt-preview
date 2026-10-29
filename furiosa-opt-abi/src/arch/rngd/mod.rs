@@ -20,6 +20,20 @@ pub const CLUSTER_PES: u8 = 4;
 /// Frequency programmed into CNTFRQ_EL0 by the bootloader, in ticks per second.
 pub const COUNTER_HZ: u64 = 25_000_000;
 
+/// The PCIe outbound translation entries through which a chip reaches its peers' DRAM, each a
+/// window of [`ATU_ENTRY`] bytes. A device of `n` chips maps each chip's own memory in its first `n`
+/// entries and gives member `rank` the `(ATU_ENTRIES - n) / n` consecutive entries from
+/// `n + rank * (ATU_ENTRIES - n) / n`; for `n = 4`, entries 4-6, 7-9, 10-12 and 13-15.
+///
+/// The windows of one member must be consecutive: the PE DMA path restores only the low 32 bits of
+/// a destination, so a window base must advance by exactly 4 GiB, and any other layout redirects
+/// transfers without an error. The kernel driver (`__set_remote_entry`), the task library
+/// (`get_base_raw_dram`) and the PE address map compute the same layout; this is normative for the
+/// code the compiler emits, and a change to one is a change to all.
+pub const ATU_ENTRIES: usize = 16;
+/// Bytes one translation entry maps.
+pub const ATU_ENTRY: usize = 4 << 30;
+
 /// Scratchpad region reserved for task instructions by the firmware linker.
 pub const CODE: Range<usize> = 0x10_0000..0x31_0000;
 

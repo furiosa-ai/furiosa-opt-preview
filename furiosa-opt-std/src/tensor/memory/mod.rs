@@ -28,7 +28,7 @@ use crate::backend::{Allocation, Backend, Cpu, Npu};
 use crate::constraints;
 use crate::context::*;
 use crate::runtime::{
-    CurrentBackend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, Issued, Prepared, Region, Submitted, Work,
+    CurrentBackend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, Prepared, Region, Returned, Submitted, Work,
 };
 use crate::scalar::*;
 use crate::tensor::view::Tiled;
@@ -125,6 +125,7 @@ impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> 
         Prepared::new(ToHbm {
             host: self,
             dma,
+            to: Returned,
             _marker: PhantomData,
         })
     }
@@ -286,7 +287,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
 
     pub(crate) fn alloc_in(device: &B::Device, kind: crate::runtime::Kind) -> Result<Self, Error> {
         let bytes = D::size_in_bytes_from_length(Element::SIZE);
-        Ok(Self::from_buffer(B::alloc(device, kind, bytes)?))
+        crate::HbmBuffer::new(B::alloc(device, kind, bytes)?).try_into()
     }
 
     /// Resolves once the launches and transfers submitted before this call that write this tensor
@@ -322,6 +323,7 @@ impl<D: Scalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip, Element, B> 
         Prepared::new(ToHost {
             hbm: self,
             dma,
+            to: Returned,
             _marker: PhantomData,
         })
     }
@@ -514,7 +516,7 @@ fn tensor_bytes<D: Scalar, Chip: M, Element: M>(buffer: &impl Allocation, offset
 /// `buffer`, from the region's start.
 fn fit_slice<D: Scalar, Chip: M, Element: M>(buffer: &impl Allocation, region: &Region) -> Result<Region, Error> {
     if region.chips.count_ones() as usize != buffer.chips() {
-        return Err(Error::Invalid("a tensor view spans every chip of the buffer"));
+        return Err(Error::Invalid("a tensor view must span every chip of the buffer"));
     }
     let end = region.bytes.start + tensor_bytes::<D, Chip, Element>(buffer, region.bytes.start)?;
     if end > region.bytes.end {
@@ -2304,45 +2306,59 @@ mod tests {
     }
 }
 
-/// A host-to-HBM transfer, as a [`Prepared`] holds it; see [`HostTensor::to_hbm`].
+/// A host-to-HBM transfer, as a [`Prepared`] holds it: into a fresh tensor, or into `To` once
+/// [`Prepared::output`] names one; see [`HostTensor::to_hbm`].
 #[doc(hidden)]
 #[derive(Debug)]
-pub struct ToHbm<'t, D: MaterializableScalar, Element: M, Chip: M, Element2: M, B: Backend> {
+pub struct ToHbm<'t, D: MaterializableScalar, Element: M, Chip: M, Element2: M, B: Backend, To = Returned> {
     host: &'t HostTensor<D, Element, B>,
     dma: &'t mut DmaContext<{ Dma::Pcie }, B>,
+    to: To,
     _marker: PhantomData<(Chip, Element2)>,
 }
 
-impl<'t, D: MaterializableScalar, Element: M, Chip: M, Element2: M, B: Backend>
-    ToHbm<'t, D, Element, Chip, Element2, B>
-{
-    /// Writes the host tensor into `hbm`, relaid out on the host first unless it already lays the
-    /// cells out as `hbm` does, since a backend moves bytes unchanged.
-    async fn write(self, hbm: &mut HbmTensor<D, Chip, Element2, B>) -> Result<(), Error> {
+impl<D: MaterializableScalar, Element: M, B: Backend> HostTensor<D, Element, B> {
+    /// Submits a copy of this tensor into `hbm`, relaid out on the host first unless it already
+    /// lays the cells out as `hbm` does, since a backend moves bytes unchanged.
+    fn copy_to<Chip: M, Element2: M>(
+        &self,
+        device: &B::Device,
+        hbm: &mut HbmTensor<D, Chip, Element2, B>,
+    ) -> impl Future<Output = Result<(), Error>> + Send + 'static + use<D, Element, Chip, Element2, B> {
         if same_layout::<Element, Pair<Chip, Element2>>() {
-            return self
-                .dma
-                .to_hbm([(B::bytes(self.host.storage()), hbm.memory_mut())])
-                .await;
+            return B::write(device, vec![(B::bytes(self.storage()), hbm.memory_mut())]);
         }
-        let staged: Tensor<D, m![{ Chip }, { Element2 }], B> = self.host.inner().transpose(true);
-        self.dma.to_hbm([(B::bytes(&staged.inner), hbm.memory_mut())]).await
+        let staged: Tensor<D, m![{ Chip }, { Element2 }], B> = self.inner().transpose(true);
+        B::write(device, vec![(B::bytes(&staged.inner), hbm.memory_mut())])
     }
 }
 
-impl<'t, D: MaterializableScalar, Element: M, Chip: M, Element2: M, B: Backend> Work
-    for ToHbm<'t, D, Element, Chip, Element2, B>
+impl<D: MaterializableScalar, Element: M, Chip: M, Element2: M, B: Backend> Work
+    for ToHbm<'_, D, Element, Chip, Element2, B>
 {
     type Output = HbmTensor<D, Chip, Element2, B>;
-    type Future = Issued<impl Future<Output = Result<Self::Output, Error>>>;
+    type Future = impl Future<Output = Result<Self::Output, Error>> + 'static;
 
     fn submit(self) -> Submitted<Self::Future> {
-        async move {
-            let mut hbm = HbmTensor::alloc_in(self.dma.device(), crate::runtime::Kind::Dram)?;
-            self.write(&mut hbm).await?;
-            Ok(hbm)
-        }
-        .submit()
+        let device = self.dma.device();
+        let written = HbmTensor::<D, Chip, Element2, B>::alloc_in(device, crate::runtime::Kind::Dram)
+            .map(|mut hbm| (self.host.copy_to(device, &mut hbm), hbm.buffer));
+        Submitted(async move {
+            let (written, buffer) = written?;
+            written.await?;
+            Ok(HbmTensor::from_buffer(buffer))
+        })
+    }
+}
+
+impl<D: MaterializableScalar, Element: M, Chip: M, Element2: M, B: Backend> Work
+    for ToHbm<'_, D, Element, Chip, Element2, B, &mut HbmTensor<D, Chip, Element2, B>>
+{
+    type Output = ();
+    type Future = impl Future<Output = Result<(), Error>> + Send + 'static;
+
+    fn submit(self) -> Submitted<Self::Future> {
+        Submitted(self.host.copy_to(self.dma.device(), self.to))
     }
 }
 
@@ -2350,62 +2366,100 @@ impl<'t, D: MaterializableScalar, Element: M, Chip: M, Element2: M, B: Backend>
     Prepared<ToHbm<'t, D, Element, Chip, Element2, B>>
 {
     /// Writes into `hbm`'s existing device allocation instead of a fresh one.
-    pub fn output(
+    pub fn output<'h>(
         self,
-        hbm: &'t mut HbmTensor<D, Chip, Element2, B>,
-    ) -> Prepared<impl Future<Output = Result<(), Error>>> {
-        Prepared::new(self.into_work().write(hbm))
+        hbm: &'h mut HbmTensor<D, Chip, Element2, B>,
+    ) -> Prepared<ToHbm<'t, D, Element, Chip, Element2, B, &'h mut HbmTensor<D, Chip, Element2, B>>> {
+        let ToHbm { host, dma, _marker, .. } = self.into_work();
+        Prepared::new(ToHbm {
+            host,
+            dma,
+            to: hbm,
+            _marker,
+        })
     }
 }
 
-/// An HBM-to-host transfer, as a [`Prepared`] holds it; see [`HbmTensor::to_host`].
+/// An HBM-to-host transfer, as a [`Prepared`] holds it: into a fresh tensor, or into `To` once
+/// [`Prepared::output`] names one; see [`HbmTensor::to_host`].
 #[doc(hidden)]
 #[derive(Debug)]
-pub struct ToHost<'t, D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend> {
+pub struct ToHost<'t, D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend, To = Returned> {
     hbm: &'t HbmTensor<D, Chip, Element, B>,
     dma: &'t mut DmaContext<{ Dma::Pcie }, B>,
+    to: To,
     _marker: PhantomData<Element2>,
 }
 
-impl<'t, D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend>
-    ToHost<'t, D, Chip, Element, Element2, B>
+/// Reads into storage in the HBM layout, which becomes the host tensor as it is when `Element2`
+/// lays the cells out alike, and is relaid out into a new one once the read ended otherwise.
+impl<D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend> Work
+    for ToHost<'_, D, Chip, Element, Element2, B>
 {
-    /// Reads the HBM tensor into `host`, relaid out on the host after unless `host` lays the cells
-    /// out as the HBM tensor does, since a backend moves bytes unchanged.
-    async fn read(self, host: &mut HostTensor<D, Element2, B>) -> Result<(), Error> {
-        let from = self.hbm.memory();
-        if same_layout::<Element2, Pair<Chip, Element>>() {
-            return from.to_host(self.dma).output(B::bytes_mut(host.storage_mut())).await;
-        }
-        let mut staged = Tensor::<D, m![{ Chip }, { Element }], B>::zeroed();
-        from.to_host(self.dma).output(B::bytes_mut(&mut staged.inner)).await?;
-        *host = staged.transpose(true).into();
-        Ok(())
+    type Output = HostTensor<D, Element2, B>;
+    type Future = impl Future<Output = Result<Self::Output, Error>> + 'static;
+
+    fn submit(self) -> Submitted<Self::Future> {
+        let mut staged = Tensor::<D, m![{ Chip }, { Element }], B>::zeroed().inner;
+        let read = B::read(self.dma.device(), vec![(self.hbm.memory(), B::bytes_mut(&mut staged))]);
+        Submitted(async move {
+            read.await?;
+            Ok(if same_layout::<Element2, Pair<Chip, Element>>() {
+                Tensor::from_inner(staged).into()
+            } else {
+                Tensor::<D, m![{ Chip }, { Element }], B>::from_inner(staged)
+                    .transpose(true)
+                    .into()
+            })
+        })
     }
 }
 
-impl<'t, D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend> Work
-    for ToHost<'t, D, Chip, Element, Element2, B>
+/// Reads into `host`'s own storage when it lays the cells out as the HBM tensor does; otherwise
+/// into storage in the HBM layout, relaid out into `host` once the read ended.
+impl<'h, D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend> Work
+    for ToHost<'_, D, Chip, Element, Element2, B, &'h mut HostTensor<D, Element2, B>>
 {
-    type Output = HostTensor<D, Element2, B>;
-    type Future = Issued<impl Future<Output = Result<Self::Output, Error>>>;
+    type Output = ();
+    type Future = impl Future<Output = Result<(), Error>> + 'h;
 
     fn submit(self) -> Submitted<Self::Future> {
-        async move {
-            let mut host = HostTensor::from(Tensor::zeroed());
-            self.read(&mut host).await?;
-            Ok(host)
-        }
-        .submit()
+        let host = self.to;
+        let mut staged = (!same_layout::<Element2, Pair<Chip, Element>>())
+            .then(|| Tensor::<D, m![{ Chip }, { Element }], B>::zeroed().inner);
+        let into = match &mut staged {
+            Some(staged) => B::bytes_mut(staged),
+            None => B::bytes_mut(host.storage_mut()),
+        };
+        let read = B::read(self.dma.device(), vec![(self.hbm.memory(), into)]);
+        Submitted(async move {
+            read.await?;
+            if let Some(staged) = staged {
+                *host = Tensor::<D, m![{ Chip }, { Element }], B>::from_inner(staged)
+                    .transpose(true)
+                    .into();
+            }
+            Ok(())
+        })
     }
 }
 
 impl<'t, D: MaterializableScalar, Chip: M, Element: M, Element2: M, B: Backend>
     Prepared<ToHost<'t, D, Chip, Element, Element2, B>>
 {
-    /// Reads into `host`'s own memory instead of fresh memory.
-    pub fn output(self, host: &'t mut HostTensor<D, Element2, B>) -> Prepared<impl Future<Output = Result<(), Error>>> {
-        Prepared::new(self.into_work().read(host))
+    /// Reads into `host`'s own memory instead of fresh memory; the submitted read borrows `host`
+    /// alone, not the DMA context.
+    pub fn output<'h>(
+        self,
+        host: &'h mut HostTensor<D, Element2, B>,
+    ) -> Prepared<ToHost<'t, D, Chip, Element, Element2, B, &'h mut HostTensor<D, Element2, B>>> {
+        let ToHost { hbm, dma, _marker, .. } = self.into_work();
+        Prepared::new(ToHost {
+            hbm,
+            dma,
+            to: host,
+            _marker,
+        })
     }
 }
 

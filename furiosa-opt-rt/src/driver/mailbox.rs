@@ -7,7 +7,7 @@ use super::link::Link;
 use crate::{Error, Result};
 use furiosa_opt_abi::bootloader;
 use furiosa_opt_abi::ring::{Completion, header};
-use furiosa_opt_ipc::{Answer, Call, Failure, LAUNCH_TIMEOUT, MAX_SUBMISSION_WORDS, Payload, Staged, Status, frame};
+use furiosa_opt_ipc::{Answer, Call, Failure, MAX_SUBMISSION_WORDS, Payload, Staged, Status, frame};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::task::Poll;
@@ -20,16 +20,20 @@ pub(crate) struct Mailbox {
     cluster: Cluster,
     next: u32,
     answers: [Slot; IN_FLIGHT],
+    /// How long a call waits for its answer.
+    patience: Duration,
 }
 
 impl Mailbox {
-    /// The mailbox of `cluster`, whose firmware runs and answers over `link`.
-    pub(crate) fn new(cluster: Cluster, link: Link) -> Self {
+    /// The mailbox of `cluster`, whose firmware runs and answers over `link`, waiting `patience`
+    /// for an answer.
+    pub(crate) fn new(cluster: Cluster, link: Link, patience: Duration) -> Self {
         Self {
             link,
             cluster,
             next: 1,
             answers: Default::default(),
+            patience,
         }
     }
 
@@ -43,6 +47,8 @@ impl Mailbox {
         let mut frame = [0; 1 + MAX_SUBMISSION_WORDS];
         let words = frame::encode(&call.request(), &mut frame[1..])
             .map_err(|why| Error::Device(format!("encoding request {id}: {why}")))?;
+        // The ring header counts a submission's words in a byte.
+        const _: () = assert!(MAX_SUBMISSION_WORDS <= u8::MAX as usize);
         frame[0] = header::pack(id, words as u8);
         let frame = &frame[..1 + words];
         let Poll::Ready(publication) = self.link.submission().prepare(frame) else {
@@ -80,7 +86,7 @@ impl Mailbox {
             .prepare(call)?
             .ok_or_else(|| Error::Device("a call found its mailbox busy".into()))?
             .send();
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + self.patience;
         loop {
             if let Some(answer) = self.receive(sent)? {
                 return Ok(answer);
@@ -89,7 +95,7 @@ impl Mailbox {
                 return Err(Error::Device(format!(
                     "the device left request {} unanswered for {}s",
                     sent.id(),
-                    PATIENCE.as_secs()
+                    self.patience.as_secs()
                 )));
             }
             std::hint::spin_loop();
@@ -168,11 +174,19 @@ pub(crate) struct Bootloader {
     link: Link,
     cluster: Cluster,
     next: u32,
+    patience: Duration,
 }
 
 impl Bootloader {
-    pub(crate) fn new(cluster: Cluster, link: Link) -> Self {
-        Self { link, cluster, next: 1 }
+    /// The bootloader of `cluster` over `link`, and of the firmware it starts, each waiting
+    /// `patience` for an answer.
+    pub(crate) fn new(cluster: Cluster, link: Link, patience: Duration) -> Self {
+        Self {
+            link,
+            cluster,
+            next: 1,
+            patience,
+        }
     }
 
     /// Has the bootloader verify and start the firmware image `image`.
@@ -188,7 +202,7 @@ impl Bootloader {
             return Err(Error::Device("the boot submission queue is full".into()));
         };
         result.map_err(|why| Error::Device(format!("submitting the boot request: {why}")))?;
-        let deadline = Instant::now() + PATIENCE;
+        let deadline = Instant::now() + self.patience;
         let completion = loop {
             if let Some(completion) = self.link.receive()? {
                 break completion;
@@ -196,7 +210,7 @@ impl Bootloader {
             if Instant::now() >= deadline {
                 return Err(Error::Device(format!(
                     "the bootloader left its request unanswered for {}s",
-                    PATIENCE.as_secs()
+                    self.patience.as_secs()
                 )));
             }
             std::hint::spin_loop();
@@ -208,8 +222,12 @@ impl Bootloader {
             )));
         }
         match bootloader::Code::try_from(code) {
-            Ok(bootloader::Code::Booted) => Ok(Boot::Running(Box::new(Mailbox::new(self.cluster, self.link)))),
-            Ok(bootloader::Code::NoImage) => Ok(Boot::NoImage(self)),
+            Ok(bootloader::Code::Booted) => Ok(Boot::Running(Box::new(Mailbox::new(
+                self.cluster,
+                self.link,
+                self.patience,
+            )))),
+            Ok(bootloader::Code::NoImage) => Ok(Boot::NoImage),
             Ok(other) => Err(Error::Device(format!(
                 "the bootloader refused the firmware image: {other:?}"
             ))),
@@ -223,7 +241,7 @@ pub(crate) enum Boot {
     /// The firmware, which now serves requests.
     Running(Box<Mailbox>),
     /// Still the bootloader: it found no image where the boot pointed.
-    NoImage(Bootloader),
+    NoImage,
 }
 
 /// Cluster `cluster`'s refusal of request `C`, with the firmware's status and detail.
@@ -238,10 +256,6 @@ pub(crate) fn refused<C: Call>(cluster: usize, Failure { status, message }: &Fai
         "rank {cluster} failed a {request}: {status}{separator}{message}"
     ))
 }
-
-/// How long the host waits for an answer: past [`LAUNCH_TIMEOUT`], so a launch the device timed out still
-/// answers first, and short of the driver's own doorbell deadline, 60 s by default.
-pub(crate) const PATIENCE: Duration = LAUNCH_TIMEOUT.saturating_add(Duration::from_secs(2));
 
 /// Requests one mailbox keeps in flight at most; a submitter past this many waits for an answer
 /// to be collected.

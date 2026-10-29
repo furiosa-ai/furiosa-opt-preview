@@ -1,4 +1,4 @@
-//! One PDMA channel command: a segment the driver moves in one direction, from page-locked
+//! One PDMA channel command: a scatter list the driver moves in one direction, from page-locked
 //! memory it already holds by its dma-buf, or from pageable memory it pins for the command.
 
 use std::fs::File;
@@ -7,20 +7,29 @@ use std::ops::Range;
 use std::os::fd::AsRawFd;
 
 use io_uring::{opcode::UringCmd16, squeue::Entry, types::Fd};
+use smallvec::{SmallVec, smallvec};
 
 use crate::driver::kernel::{
     DmabufCommand, ScatterCommand, Segment, URING_CMD_DMABUF_READ, URING_CMD_DMABUF_WRITE, URING_CMD_SCATTER_READ,
     URING_CMD_SCATTER_WRITE, node,
 };
-use crate::pinned::PinnedLease;
+use crate::pinned::DmaBuf;
 use crate::{Error, Result};
+use std::sync::Arc;
 
-/// One segment between `host` memory and `chip`; its command stays at a fixed address until completion.
+/// The bytes one driver request moves at most: the driver rejects requests totaling 4 GiB, and
+/// aligned offsets preserve host page alignment.
+const LIMIT: usize = (1_usize << 32) - 4096;
+
+/// Segments between `host` memory and `chip`; the command stays at a fixed address until
+/// completion, since the driver reads its scatter list in place.
 pub(crate) struct Command {
     chip: u8,
     direction: Direction,
     host: Memory,
-    segment: Segment,
+    segments: SmallVec<[Segment; 1]>,
+    /// The bytes of every segment, at most [`LIMIT`].
+    len: usize,
 }
 
 impl Command {
@@ -34,8 +43,27 @@ impl Command {
             chip,
             direction,
             host,
-            segment: direction.segment(at, device, len),
+            segments: smallvec![direction.segment(at, device, len)],
+            len: len as usize,
         }
+    }
+
+    /// Whether this request has room for `len` more bytes between `chip` and the memory `dmabuf`
+    /// holds, or pageable memory when `None`: it moves at most [`LIMIT`] bytes.
+    pub(crate) fn takes(&self, chip: u8, dmabuf: Option<&Arc<DmaBuf>>, len: usize) -> bool {
+        let memory = match (&self.host, dmabuf) {
+            (Memory::Borrowed, None) => true,
+            (Memory::Owned(held), Some(dmabuf)) => Arc::ptr_eq(held, dmabuf),
+            (Memory::Borrowed, Some(_)) | (Memory::Owned(_), None) => false,
+        };
+        memory && self.chip == chip && self.len + len <= LIMIT
+    }
+
+    /// Adds `len` bytes at `host` in its host memory and at `device` on its chip, once the request
+    /// [`Self::takes`] them.
+    pub(crate) fn push(&mut self, host: u64, device: u64, len: u64) {
+        self.segments.push(self.direction.segment(host, device, len));
+        self.len += len as usize;
     }
 
     pub(crate) fn encode(&self, channel: &Channel, tag: u64) -> Entry {
@@ -46,8 +74,6 @@ impl Command {
     }
 
     pub(crate) fn chunks(len: usize) -> impl ExactSizeIterator<Item = Range<usize>> {
-        // The driver rejects requests totaling 4 GiB; aligned offsets preserve host page alignment.
-        const LIMIT: usize = (1_usize << 32) - 4096;
         (0..len)
             .step_by(LIMIT)
             .map(move |start| start..start + LIMIT.min(len - start))
@@ -66,6 +92,11 @@ impl Command {
         matches!(self.host, Memory::Borrowed)
     }
 
+    #[cfg(test)]
+    pub(crate) fn segments(&self) -> &[Segment] {
+        &self.segments
+    }
+
     fn opcode(&self) -> u32 {
         match (&self.host, self.direction) {
             (Memory::Borrowed, Direction::Write) => URING_CMD_SCATTER_WRITE,
@@ -78,14 +109,19 @@ impl Command {
     /// The sixteen command bytes: a [`ScatterCommand`] for pageable memory, a [`DmabufCommand`]
     /// for a dma-buf.
     fn payload(&self) -> [u8; 16] {
-        let desc_addr = std::ptr::from_ref(&self.segment).expose_provenance() as u64;
+        let desc_addr = self.segments.as_ptr().expose_provenance() as u64;
+        // Each segment holds a byte at least, and a request at most `LIMIT`, so the count fits.
+        let count = u32::try_from(self.segments.len()).expect("fewer segments than bytes");
         // SAFETY: both commands are sixteen bytes of integers with no padding between them.
         unsafe {
             match &self.host {
-                Memory::Borrowed => transmute::<ScatterCommand, [u8; 16]>(ScatterCommand { count: 1, desc_addr }),
+                Memory::Borrowed => transmute::<ScatterCommand, [u8; 16]>(ScatterCommand {
+                    count: u64::from(count),
+                    desc_addr,
+                }),
                 Memory::Owned(lease) => transmute::<DmabufCommand, [u8; 16]>(DmabufCommand {
                     fd: lease.fd(),
-                    count: 1,
+                    count,
                     desc_addr,
                 }),
             }
@@ -111,12 +147,11 @@ impl Direction {
 }
 
 /// Where a command's host bytes are.
-#[derive(Debug)]
 pub(crate) enum Host {
     /// Any process memory at this address; the driver pins its pages for the command.
     Borrowed(u64),
     /// Page-locked memory at this offset of the dma-buf the driver takes by its descriptor.
-    Owned(PinnedLease, u64),
+    Owned(Arc<DmaBuf>, u64),
 }
 
 pub(crate) struct Channel(File);
@@ -134,7 +169,7 @@ impl Channel {
 
 enum Memory {
     Borrowed,
-    Owned(PinnedLease),
+    Owned(Arc<DmaBuf>),
 }
 
 #[cfg(test)]
@@ -159,12 +194,30 @@ mod tests {
         }
     }
 
+    /// A command takes more segments of its own chip and host memory while its request stays
+    /// within the driver's 4 GiB, and its payload counts every segment.
+    #[test]
+    fn takes_segments_of_its_chip_and_memory_within_the_limit() {
+        let (pinned, other) = (crate::test::pinned(), crate::test::pinned());
+        let (dmabuf, foreign) = (pinned.dmabuf(), other.dmabuf());
+        let mut owned = Command::new(0, Direction::Write, Host::Owned(Arc::clone(dmabuf), 0), 0, 4096);
+        assert!(owned.takes(0, Some(dmabuf), LIMIT - 4096));
+        assert!(!owned.takes(0, Some(dmabuf), LIMIT - 4095));
+        assert!(!owned.takes(1, Some(dmabuf), 1));
+        assert!(!owned.takes(0, Some(foreign), 1));
+        assert!(!owned.takes(0, None, 1));
+        let borrowed = Command::new(0, Direction::Read, Host::Borrowed(16), 0, 4096);
+        assert!(borrowed.takes(0, None, 1) && !borrowed.takes(0, Some(dmabuf), 1));
+        owned.push(8192, 4096, 4096);
+        assert_eq!(u32::from_ne_bytes(owned.payload()[4..8].try_into().unwrap()), 2);
+    }
+
     /// Transfers reach the kernel driver as its io_uring opcodes and command payloads.
     #[test]
     fn encodes_driver_commands() {
         let pinned = crate::test::pinned();
-        let backing = pinned.slice(..).backing.unwrap();
-        let leases = [backing.retain(), backing.retain()];
+        let backing = pinned.slice(..).pinned.unwrap();
+        let leases = [Arc::clone(backing.dmabuf), Arc::clone(backing.dmabuf)];
         let fd = u64::try_from(leases[0].fd()).unwrap();
         let [writer, reader] = leases;
         for (host, direction, opcode, header, src) in [
@@ -174,7 +227,7 @@ mod tests {
             (Host::Owned(reader, 16), Direction::Read, 3, fd | 1 << 32, 32),
         ] {
             let command = Command::new(0, direction, host, 32, 48);
-            assert_eq!(command.segment.src, src);
+            assert_eq!(command.segments[0].src, src);
             assert_eq!(command.opcode(), opcode);
             let payload = command.payload();
             assert_eq!(u64::from_ne_bytes(payload[..8].try_into().unwrap()), header);

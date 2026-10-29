@@ -10,27 +10,24 @@ use crate::driver::mailbox::IN_FLIGHT;
 use crate::memory::{Kind, Usage};
 use crate::{Error, Result, Topology};
 
-// Kernels place DRAM tensors on 4-KiB units; matching buffer alignment keeps transfer speed stable.
-const DRAM_UNIT: usize = 4096;
-
-/// One device's DRAM and SRAM allocators. DRAM grows up, shared inside the peer aperture and
+/// One device's memory allocator, over its DRAM and SRAM. DRAM grows up, shared inside the peer aperture and
 /// chip-local from its end, so back-to-back buffers ascend; SRAM residents grow down. A
 /// [`Device`](crate::Device) allocates over the ranges its boot leaves free.
-pub struct Allocations {
+pub struct Allocator {
     topology: Topology,
-    dram: Mutex<Allocator>,
+    dram: Mutex<Spans>,
     sram: Mutex<Sram>,
     /// Where shared DRAM ends, rounded down to whole allocation units.
     shared_end: usize,
     /// Where device code addresses physical SRAM offset zero.
     sram_base: usize,
-    /// How many ordered owners [`Allocations::owner`] has handed out.
+    /// How many ordered owners [`Allocator::owner`] has handed out.
     owners: AtomicU64,
-    /// How many allocations these allocations made, which numbers the next.
+    /// How many allocations this allocator made, which numbers the next.
     made: AtomicU64,
 }
 
-impl Allocations {
+impl Allocator {
     /// Allocators for a host standing in for a device of `topology`, over fixed upper bounds of
     /// what such a device hands out: all the DRAM the driver offers its PEs, shared up to the
     /// peer windows' widest reach, and the whole SRAM window. A device hands out less, since its
@@ -56,10 +53,10 @@ impl Allocations {
         Self {
             topology,
             shared_end: ranges.shared_end / DRAM_ALIGNMENT * DRAM_ALIGNMENT,
-            dram: Mutex::new(Allocator::new(ranges.dram, DRAM_ALIGNMENT)),
+            dram: Mutex::new(Spans::new(ranges.dram, DRAM_ALIGNMENT)),
             sram_base: ranges.sram_base,
             sram: Mutex::new(Sram {
-                allocator: Allocator::new(ranges.sram, ranges.sram_alignment),
+                spans: Spans::new(ranges.sram, ranges.sram_alignment),
                 alignment: ranges.sram_alignment,
                 reserved: vec![None; IN_FLIGHT].into(),
             }),
@@ -102,7 +99,7 @@ impl Allocations {
                     .max(1)
                     .checked_next_multiple_of(sram.alignment)
                     .ok_or(full.clone())?;
-                let at = sram.allocator.top(len, sram.alignment).ok_or(full)?;
+                let at = sram.spans.top(len).ok_or(full)?;
                 let temporaries = sram.temporaries();
                 if at < temporaries {
                     return Err(Error::SramOverlap {
@@ -110,7 +107,7 @@ impl Allocations {
                         temporaries,
                     });
                 }
-                sram.allocator.live.insert(at, len);
+                sram.spans.live.insert(at, len);
                 at
             }
         };
@@ -121,7 +118,7 @@ impl Allocations {
                 at,
                 generation: self.made.fetch_add(1, Ordering::Relaxed),
                 kind,
-                allocations: Arc::clone(self),
+                allocator: Arc::clone(self),
                 active: Mutex::default(),
             }),
         })
@@ -135,7 +132,7 @@ impl Allocations {
                 let range = self.dram().range.clone();
                 range.end.min(self.shared_end).saturating_sub(range.start)
             }
-            Kind::Sram => self.sram().allocator.range.len(),
+            Kind::Sram => self.sram().spans.range.len(),
         }
     }
 
@@ -159,7 +156,7 @@ impl Allocations {
             Kind::Sram => {
                 let sram = self.sram();
                 let floor = sram.temporaries().next_multiple_of(sram.alignment);
-                usage(&mut sram.allocator.gaps().map(|gap| gap.start.max(floor)..gap.end))
+                usage(&mut sram.spans.gaps().map(|gap| gap.start.max(floor)..gap.end))
             }
         }
     }
@@ -172,7 +169,7 @@ impl Allocations {
     /// Holds SRAM below `end` for a launch's temporaries until the reservation drops.
     pub(crate) fn reserve(self: &Arc<Self>, end: usize) -> Result<Reservation> {
         let mut sram = self.sram();
-        let start = sram.allocator.start();
+        let start = sram.spans.start();
         if end > start {
             return Err(Error::SramOverlap {
                 resident: start,
@@ -188,7 +185,7 @@ impl Allocations {
             .expect("a reservation slot per admitted launch");
         sram.reserved[slot] = Some(end);
         Ok(Reservation {
-            allocations: Arc::clone(self),
+            allocator: Arc::clone(self),
             slot,
         })
     }
@@ -204,7 +201,7 @@ impl Allocations {
 
     pub(super) fn release(&self, kind: Kind, at: usize) {
         match kind {
-            Kind::Sram => self.sram().allocator.live.remove(&at),
+            Kind::Sram => self.sram().spans.live.remove(&at),
             Kind::Dram | Kind::DramShared => self.dram().live.remove(&at),
         };
     }
@@ -216,7 +213,7 @@ impl Allocations {
 
     // Every update under these locks is one map or slot write, so a lock a panic poisoned still
     // guards whole state.
-    fn dram(&self) -> MutexGuard<'_, Allocator> {
+    fn dram(&self) -> MutexGuard<'_, Spans> {
         self.dram.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -225,10 +222,10 @@ impl Allocations {
     }
 }
 
-impl std::fmt::Debug for Allocations {
+impl std::fmt::Debug for Allocator {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("Allocations")
+            .debug_struct("Allocator")
             .field("topology", &self.topology)
             .finish_non_exhaustive()
     }
@@ -236,13 +233,13 @@ impl std::fmt::Debug for Allocations {
 
 /// A temporary SRAM prefix, retained until its device work finishes.
 pub(crate) struct Reservation {
-    allocations: Arc<Allocations>,
+    allocator: Arc<Allocator>,
     slot: usize,
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        self.allocations.sram().reserved[self.slot] = None;
+        self.allocator.sram().reserved[self.slot] = None;
     }
 }
 
@@ -272,12 +269,12 @@ impl Ranges {
     }
 }
 
-struct Allocator {
+struct Spans {
     range: Range<usize>,
     live: BTreeMap<usize, usize>,
 }
 
-impl Allocator {
+impl Spans {
     /// Hands out `range`, narrowed to whole aligned units.
     fn new(range: Range<usize>, alignment: usize) -> Self {
         let start = range.start.next_multiple_of(alignment);
@@ -304,27 +301,22 @@ impl Allocator {
         self.live.first_key_value().map_or(self.range.end, |(&at, _)| at)
     }
 
-    fn top(&self, len: usize, alignment: usize) -> Option<usize> {
+    fn top(&self, len: usize) -> Option<usize> {
         self.gaps()
-            .filter_map(|gap| {
-                let at = gap.end.checked_sub(len)? / alignment * alignment;
-                (at >= gap.start).then_some(at)
-            })
+            .filter(|gap| gap.len() >= len)
             .last()
+            .map(|gap| gap.end - len)
     }
 
-    /// The lowest aligned start of `len` free bytes among those that put the fewest of them below
-    /// `floor`.
+    /// The lowest `alignment`-aligned start of `len` free bytes among those that put the fewest of
+    /// them below `floor`.
     fn above(&self, floor: usize, len: usize, alignment: usize) -> Option<usize> {
         self.gaps()
             .filter_map(|gap| {
                 let low = gap.start.checked_next_multiple_of(alignment)?;
                 let last = gap.end.checked_sub(len)? / alignment * alignment;
                 (low <= last).then(|| {
-                    let high = floor
-                        .checked_next_multiple_of(alignment)
-                        .unwrap_or(last)
-                        .clamp(low, last);
+                    let high = floor.next_multiple_of(alignment).clamp(low, last);
                     if high + len > floor { high } else { low }
                 })
             })
@@ -333,7 +325,7 @@ impl Allocator {
 }
 
 struct Sram {
-    allocator: Allocator,
+    spans: Spans,
     alignment: usize,
     /// Where each admitted launch's temporaries end, one slot per launch the device admits at once.
     reserved: Box<[Option<usize>]>,
@@ -348,26 +340,37 @@ impl Sram {
 
 // PDMA P2P loses bandwidth when source and destination differ modulo 512.
 const DRAM_ALIGNMENT: usize = 512;
+// Kernels place their DRAM tensors on 4-KiB units of a buffer, so a buffer of a unit or more starts
+// on one: a buffer that straddles the device's units costs a kernel time that depends on where
+// earlier allocations left it.
+const DRAM_UNIT: usize = 4096;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::arch::rngd::sram;
 
-    /// Large DRAM buffers start on 4-KiB units while smaller buffers keep their allocation grain.
+    /// DRAM buffers of 4 KiB or more start on a 4-KiB unit, behind a smaller buffer too, while
+    /// smaller buffers keep the 512-byte grain.
     #[test]
     fn aligns_large_dram_after_small_allocations() {
         for kind in [Kind::Dram, Kind::DramShared] {
             for requested in [4095_usize, 4096, 4097, 8192] {
-                let allocations = crate::test::allocations(0..16384, 16384);
-                let first = allocations.alloc(kind, 512).unwrap();
-                let large = allocations.alloc(kind, requested).unwrap();
-                let last = allocations.alloc(kind, 512).unwrap();
-                assert!(large.addr().is_multiple_of(4096));
-                assert_eq!(
-                    allocations.usage(kind).available,
-                    16384 - requested.next_multiple_of(512) - 1024
+                let allocator = crate::test::allocator(0..16384, 16384);
+                let first = allocator.alloc(kind, 512).unwrap();
+                let large = allocator.alloc(kind, requested).unwrap();
+                let last = allocator.alloc(kind, 512).unwrap();
+                let unit = if requested.next_multiple_of(DRAM_ALIGNMENT) >= DRAM_UNIT {
+                    DRAM_UNIT
+                } else {
+                    DRAM_ALIGNMENT
+                };
+                assert!(
+                    large.addr().is_multiple_of(unit),
+                    "{kind:?} {requested}: {}",
+                    large.addr()
                 );
+                assert!(last.addr().is_multiple_of(DRAM_ALIGNMENT));
                 drop((first, large, last));
             }
         }
@@ -376,11 +379,11 @@ mod tests {
     /// A peer aperture ending before free DRAM admits no shared allocation.
     #[test]
     fn refuses_empty_peer_apertures() {
-        let allocations = crate::test::allocations(512..4096, 0);
-        assert_eq!(allocations.capacity(Kind::DramShared), 0);
-        assert_eq!(allocations.usage(Kind::DramShared).available, 0);
+        let allocator = crate::test::allocator(512..4096, 0);
+        assert_eq!(allocator.capacity(Kind::DramShared), 0);
+        assert_eq!(allocator.usage(Kind::DramShared).available, 0);
         assert!(matches!(
-            allocations.alloc(Kind::DramShared, 1),
+            allocator.alloc(Kind::DramShared, 1),
             Err(Error::OutOfMemory { .. })
         ));
     }
@@ -390,90 +393,84 @@ mod tests {
     #[test]
     fn shares_dram_capacity() {
         for end in [1024, 3072] {
-            let allocations = crate::test::allocations(0..4096, end);
-            let weights = allocations.alloc(Kind::Dram, 3072).unwrap();
-            let shared = allocations.alloc(Kind::DramShared, 1024).unwrap();
+            let allocator = crate::test::allocator(0..4096, end);
+            let weights = allocator.alloc(Kind::Dram, 3072).unwrap();
+            let shared = allocator.alloc(Kind::DramShared, 1024).unwrap();
             assert!(shared.addr() + shared.len() <= end);
-            assert!(allocations.alloc(Kind::DramShared, 1).is_err());
+            assert!(allocator.alloc(Kind::DramShared, 1).is_err());
             drop(weights);
-            assert_eq!(allocations.alloc(Kind::DramShared, 1).is_ok(), end > 1024);
+            assert_eq!(allocator.alloc(Kind::DramShared, 1).is_ok(), end > 1024);
             drop(shared);
-            assert!(allocations.alloc(Kind::DramShared, 1024).is_ok());
+            assert!(allocator.alloc(Kind::DramShared, 1024).is_ok());
         }
         // Its capacity and free spans end at the aperture, as its allocations do.
-        let allocations = crate::test::allocations(0..4096, 1024);
-        let capacity = [Kind::Dram, Kind::DramShared].map(|kind| allocations.capacity(kind));
+        let allocator = crate::test::allocator(0..4096, 1024);
+        let capacity = [Kind::Dram, Kind::DramShared].map(|kind| allocator.capacity(kind));
         assert_eq!(capacity, [4096, 1024]);
-        let usage = allocations.usage(Kind::DramShared);
+        let usage = allocator.usage(Kind::DramShared);
         assert_eq!((usage.available, usage.largest), (1024, 1024));
-        assert!(allocations.alloc(Kind::DramShared, usage.largest + 1).is_err());
-        let _shared = allocations.alloc(Kind::DramShared, usage.largest).unwrap();
-        assert_eq!(allocations.usage(Kind::DramShared).largest, 0);
-        assert_eq!(allocations.usage(Kind::Dram).available, 3072);
+        assert!(allocator.alloc(Kind::DramShared, usage.largest + 1).is_err());
+        let _shared = allocator.alloc(Kind::DramShared, usage.largest).unwrap();
+        assert_eq!(allocator.usage(Kind::DramShared).largest, 0);
+        assert_eq!(allocator.usage(Kind::Dram).available, 3072);
     }
 
     /// A device reports its capacity, and its free bytes and largest free span as they change.
     #[test]
     fn reports_free_spans() {
-        let allocations = crate::test::allocations(1000..5121, 5121);
+        let allocator = crate::test::allocator(1000..5121, 5121);
         let spans = || {
-            let usage = allocations.usage(Kind::Dram);
+            let usage = allocator.usage(Kind::Dram);
             (usage.available, usage.largest)
         };
-        assert_eq!(allocations.capacity(Kind::Dram), 4096);
+        assert_eq!(allocator.capacity(Kind::Dram), 4096);
         assert_eq!(spans(), (4096, 4096));
-        let first = allocations.alloc(Kind::Dram, 1024).unwrap();
-        let second = allocations.alloc(Kind::Dram, 1024).unwrap();
+        let first = allocator.alloc(Kind::Dram, 1024).unwrap();
+        let second = allocator.alloc(Kind::Dram, 1024).unwrap();
         drop(first);
         assert_eq!(spans(), (3072, 2048));
-        assert!(allocations.alloc(Kind::Dram, 2049).is_err());
-        let tail = allocations.alloc(Kind::Dram, 2048).unwrap();
-        let head = allocations.alloc(Kind::Dram, 1024).unwrap();
+        assert!(allocator.alloc(Kind::Dram, 2049).is_err());
+        let tail = allocator.alloc(Kind::Dram, 2048).unwrap();
+        let head = allocator.alloc(Kind::Dram, 1024).unwrap();
         assert_eq!(spans(), (0, 0));
         drop((head, second, tail));
-        assert_eq!(allocations.capacity(Kind::Dram), 4096);
+        assert_eq!(allocator.capacity(Kind::Dram), 4096);
         assert_eq!(spans(), (4096, 4096));
     }
 
     /// An oversized request is `OutOfMemory` with the length asked for, even at `usize::MAX`.
     #[test]
     fn rejects_oversized_requests() {
-        let allocations = crate::test::allocations(0..4096, 4096);
-        let _live = allocations.alloc(Kind::Sram, 1).unwrap();
+        let allocator = crate::test::allocator(0..4096, 4096);
+        let _live = allocator.alloc(Kind::Sram, 1).unwrap();
         for requested in [sram::WINDOW.end as usize + 1, usize::MAX] {
             assert!(
-                matches!(allocations.alloc(Kind::Sram, requested), Err(Error::OutOfMemory { requested: value, .. }) if value == requested)
+                matches!(allocator.alloc(Kind::Sram, requested), Err(Error::OutOfMemory { requested: value, .. }) if value == requested)
             );
         }
-        assert!(allocations.alloc(Kind::Sram, 1).is_ok());
+        assert!(allocator.alloc(Kind::Sram, 1).is_ok());
     }
 
     /// A launch's SRAM temporaries never reach a resident, whichever is placed first.
     #[test]
     fn separates_launch_temporaries_from_residents() {
-        let allocations = crate::test::allocations(0..4096, 4096);
+        let allocator = crate::test::allocator(0..4096, 4096);
         let end = sram::WINDOW.end as usize;
-        let lower = allocations.reserve(end - 512).unwrap();
-        let first = allocations.reserve(end).unwrap();
-        let second = allocations.reserve(end).unwrap();
+        let lower = allocator.reserve(end - 512).unwrap();
+        let first = allocator.reserve(end).unwrap();
+        let second = allocator.reserve(end).unwrap();
         drop(first);
-        assert!(matches!(
-            allocations.alloc(Kind::Sram, 1),
-            Err(Error::SramOverlap { .. })
-        ));
+        assert!(matches!(allocator.alloc(Kind::Sram, 1), Err(Error::SramOverlap { .. })));
         drop(second);
-        assert_eq!(allocations.usage(Kind::Sram).largest, 512);
-        let live = allocations.alloc(Kind::Sram, 512).unwrap();
-        assert!(matches!(
-            allocations.alloc(Kind::Sram, 1),
-            Err(Error::SramOverlap { .. })
-        ));
+        assert_eq!(allocator.usage(Kind::Sram).largest, 512);
+        let live = allocator.alloc(Kind::Sram, 512).unwrap();
+        assert!(matches!(allocator.alloc(Kind::Sram, 1), Err(Error::SramOverlap { .. })));
         drop(lower);
-        assert!(allocations.alloc(Kind::Sram, 1).is_ok());
+        assert!(allocator.alloc(Kind::Sram, 1).is_ok());
         let start = live.addr() - sram::Physical::START.virtual_addr() as usize;
-        assert!(allocations.reserve(start).is_ok());
+        assert!(allocator.reserve(start).is_ok());
         assert!(
-            matches!(allocations.reserve(start + 1), Err(Error::SramOverlap { resident, temporaries }) if resident == start && temporaries == start + 1)
+            matches!(allocator.reserve(start + 1), Err(Error::SramOverlap { resident, temporaries }) if resident == start && temporaries == start + 1)
         );
     }
 }

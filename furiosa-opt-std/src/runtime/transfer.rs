@@ -3,8 +3,8 @@
 use std::future::Future;
 
 use super::{
-    HbmBuffer, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Issued, Kind,
-    Prepared, Submitted, Work,
+    HbmBuffer, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Kind, Prepared,
+    Submitted, Work,
 };
 use crate::Error;
 use crate::backend::Backend;
@@ -16,19 +16,70 @@ impl<B: Backend> DmaContext<{ Dma::Pcie }, B> {
     pub fn to_hbm<'a>(
         &'a mut self,
         pairs: impl IntoIterator<Item = (impl Into<HostBufferSlice<'a>>, impl Into<HbmBufferSliceMut<'a, B>>)>,
-    ) -> Prepared<impl Future<Output = Result<(), Error>>> {
-        let pairs = pairs
-            .into_iter()
-            .map(|(host, to)| (host.into(), to.into()))
-            .collect::<Vec<_>>();
-        Prepared::new(async move {
-            if pairs
-                .iter()
-                .any(|(host, to)| host.0.bytes().len() != to.region.host_len())
-            {
-                return Err(Error::Invalid("the host bytes do not match the memory on its chips"));
-            }
-            B::write(self.device(), pairs).await
+    ) -> Prepared<Write<'a, B>> {
+        Prepared::new(Write {
+            device: self.device(),
+            pairs: pairs.into_iter().map(|(host, to)| (host.into(), to.into())).collect(),
+        })
+    }
+
+    /// Copies existing HBM slices into host bytes in one runtime read, in pair order.
+    /// A length mismatch in any pair refuses the whole batch before copying.
+    pub fn to_host<'a>(
+        &'a mut self,
+        pairs: impl IntoIterator<Item = (impl Into<HbmBufferSlice<'a, B>>, impl Into<HostBufferSliceMut<'a>>)>,
+    ) -> Prepared<Read<'a, B>> {
+        Prepared::new(Read {
+            device: self.device(),
+            pairs: pairs
+                .into_iter()
+                .map(|(from, host)| (from.into(), host.into()))
+                .collect(),
+        })
+    }
+}
+
+/// A batch of host-to-HBM copies, as a [`Prepared`] holds it; see [`DmaContext::to_hbm`].
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct Write<'a, B: Backend> {
+    device: &'a B::Device,
+    pairs: Vec<(HostBufferSlice<'a>, HbmBufferSliceMut<'a, B>)>,
+}
+
+impl<B: Backend> Work for Write<'_, B> {
+    type Output = ();
+    type Future = impl Future<Output = Result<(), Error>> + Send + 'static;
+
+    fn submit(self) -> Submitted<Self::Future> {
+        let matched = (self.pairs.iter()).all(|(host, to)| host.0.len() == to.region.host_len());
+        let written = matched.then(|| B::write(self.device, self.pairs));
+        Submitted(async move {
+            written
+                .ok_or(Error::Invalid("the host bytes do not match the memory on its chips"))?
+                .await
+        })
+    }
+}
+
+/// A batch of HBM-to-host copies, as a [`Prepared`] holds it; see [`DmaContext::to_host`].
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct Read<'a, B: Backend> {
+    device: &'a B::Device,
+    pairs: Vec<(HbmBufferSlice<'a, B>, HostBufferSliceMut<'a>)>,
+}
+
+impl<B: Backend> Work for Read<'_, B> {
+    type Output = ();
+    type Future = impl Future<Output = Result<(), Error>> + Send + 'static;
+
+    fn submit(self) -> Submitted<Self::Future> {
+        let matched = (self.pairs.iter()).all(|(from, host)| host.0.len() == from.region.host_len());
+        let read = matched.then(|| B::read(self.device, self.pairs));
+        Submitted(async move {
+            read.ok_or(Error::Invalid("the host bytes do not match the memory on its chips"))?
+                .await
         })
     }
 }
@@ -74,35 +125,35 @@ pub struct ToHbm<'t, B: Backend> {
     dma: &'t mut DmaContext<{ Dma::Pcie }, B>,
 }
 
-impl<B: Backend> ToHbm<'_, B> {
-    async fn write(self, to: HbmBufferSliceMut<'_, B>) -> Result<(), Error> {
-        self.dma.to_hbm([(self.from, to)]).await
-    }
-}
-
-impl<'t, B: Backend> Work for ToHbm<'t, B> {
+impl<B: Backend> Work for ToHbm<'_, B> {
     type Output = HbmBuffer<B>;
-    type Future = Issued<impl Future<Output = Result<HbmBuffer<B>, Error>>>;
+    type Future = impl Future<Output = Result<HbmBuffer<B>, Error>> + Send + 'static;
 
     fn submit(self) -> Submitted<Self::Future> {
-        async move {
-            let chips = usize::from(B::topology(self.dma.device()).chips);
-            let len = self.from.0.bytes().len();
-            if !len.is_multiple_of(chips) {
-                return Err(Error::Invalid("the host bytes do not split evenly across the chips"));
-            }
-            let mut buffer = HbmBuffer::new(B::alloc(self.dma.device(), Kind::Dram, len / chips)?);
-            self.write(HbmBufferSliceMut::from(&mut buffer)).await?;
+        let device = self.dma.device();
+        let chips = usize::from(B::topology(device).chips);
+        let len = self.from.0.len();
+        let written = if len.is_multiple_of(chips) {
+            B::alloc(device, Kind::Dram, len / chips).map(|buffer| {
+                let mut buffer = HbmBuffer::new(buffer);
+                (B::write(device, vec![(self.from, (&mut buffer).into())]), buffer)
+            })
+        } else {
+            Err(Error::Invalid("the host bytes do not split evenly across the chips"))
+        };
+        Submitted(async move {
+            let (written, buffer) = written?;
+            written.await?;
             Ok(buffer)
-        }
-        .submit()
+        })
     }
 }
 
 impl<'t, B: Backend> Prepared<ToHbm<'t, B>> {
     /// Copies into `to`, a buffer or a [`HbmBuffer::slice_mut`] of one, instead of a fresh buffer.
-    pub fn output(self, to: impl Into<HbmBufferSliceMut<'t, B>>) -> Prepared<impl Future<Output = Result<(), Error>>> {
-        Prepared::new(self.into_work().write(to.into()))
+    pub fn output(self, to: impl Into<HbmBufferSliceMut<'t, B>>) -> Prepared<Write<'t, B>> {
+        let ToHbm { from, dma } = self.into_work();
+        dma.to_hbm([(from, to.into())])
     }
 }
 
@@ -114,32 +165,24 @@ pub struct ToHost<'t, B: Backend> {
     dma: &'t mut DmaContext<{ Dma::Pcie }, B>,
 }
 
-impl<B: Backend> ToHost<'_, B> {
-    async fn read(self, to: HostBufferSliceMut<'_>) -> Result<(), Error> {
-        if to.0.len() != self.from.region.host_len() {
-            return Err(Error::Invalid("the host bytes do not match the memory on its chips"));
-        }
-        B::read(self.dma.device(), self.from, to).await
-    }
-}
-
-impl<'t, B: Backend> Work for ToHost<'t, B> {
+impl<B: Backend> Work for ToHost<'_, B> {
     type Output = HostBuffer;
-    type Future = Issued<impl Future<Output = Result<HostBuffer, Error>>>;
+    type Future = impl Future<Output = Result<HostBuffer, Error>> + Send + 'static;
 
     fn submit(self) -> Submitted<Self::Future> {
-        async move {
-            let mut host = HostBuffer::zero(self.from.region.host_len());
-            self.read(HostBufferSliceMut::from(&mut host)).await?;
+        let mut host = HostBuffer::zero(self.from.region.host_len());
+        let read = B::read(self.dma.device(), vec![(self.from, (&mut host).into())]);
+        Submitted(async move {
+            read.await?;
             Ok(host)
-        }
-        .submit()
+        })
     }
 }
 
 impl<'t, B: Backend> Prepared<ToHost<'t, B>> {
     /// Copies into `to`, host bytes or a [`HostBuffer`], instead of a fresh [`HostBuffer`].
-    pub fn output(self, to: impl Into<HostBufferSliceMut<'t>>) -> Prepared<impl Future<Output = Result<(), Error>>> {
-        Prepared::new(self.into_work().read(to.into()))
+    pub fn output(self, to: impl Into<HostBufferSliceMut<'t>>) -> Prepared<Read<'t, B>> {
+        let ToHost { from, dma } = self.into_work();
+        dma.to_host([(from, to.into())])
     }
 }

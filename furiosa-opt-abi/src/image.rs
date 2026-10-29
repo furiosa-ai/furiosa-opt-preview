@@ -1,38 +1,40 @@
-//! The compiler image: device code, memory bindings and source metadata, in the format the driver
-//! writes and [`Entry::load`](super::Entry::load) reads.
+//! The compiler image: device code, memory bindings and source metadata, in the format the
+//! compiler writes into a registry [`Entry`](crate::registry::Entry) and the runtime loads.
 //!
 //! - The driver encodes images with its own build of this module, and the SDK of the same release parses
-//!   them, so the format carries no version.
+//!   them; the magic names the format, so an image of another format is refused, not misread.
 //! - [`Level`] and [`MARKER_IDS`] are the profile contract with the compiler's device code.
 
-use bincode::Options;
-use furiosa_opt_abi::arch::rngd::{self, sram};
-use furiosa_opt_abi::executable::Executable;
-use serde::{Deserialize, Serialize};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::ops::Deref;
 
-use super::Level;
+use bincode::{BorrowDecode, Decode, Encode};
+
+use crate::arch::rngd::{self, sram};
+use crate::executable::Executable;
 use crate::{Topology, memory};
 
 /// A compiler image whose contents passed every rule a load relies on. It is read through
 /// [`Parts`] and made only from parts that pass, so no other image exists.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-#[serde(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Image<'a>(Parts<'a>);
 
 impl<'a> Image<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, String> {
-        let body = bytes.strip_prefix(MAGIC).ok_or("not a compiler image")?;
-        let parts: Parts<'a> = bincode::options()
-            .deserialize(body)
-            .map_err(|error| error.to_string())?;
+        let body = bytes.strip_prefix(MAGIC).ok_or("not a compiler image of this format")?;
+        let (parts, read): (Parts<'a>, _) =
+            bincode::borrow_decode_from_slice(body, CONFIG).map_err(|error| error.to_string())?;
+        if read != body.len() {
+            return Err("trailing bytes after the compiler image".into());
+        }
         parts.try_into()
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         let mut bytes = MAGIC.to_vec();
-        bincode::options()
-            .serialize_into(&mut bytes, self)
-            .map_err(|error| error.to_string())?;
+        bytes.extend(bincode::encode_to_vec(&self.0, CONFIG).map_err(|error| error.to_string())?);
         Ok(bytes)
     }
 
@@ -46,7 +48,7 @@ impl<'a> TryFrom<Parts<'a>> for Image<'a> {
 
     fn try_from(parts: Parts<'a>) -> Result<Self, String> {
         let Topology { chips, pes } = parts.topology;
-        if chips == 0 || !(1..=rngd::PES).contains(&pes) {
+        if !(1..=rngd::MAX_CHIPS).contains(&chips) || !(1..=rngd::PES).contains(&pes) {
             return Err(format!("topology {chips}x{pes} is not an RNGD device"));
         }
         let columns = parts.topology.clusters();
@@ -84,7 +86,7 @@ impl<'a> TryFrom<Parts<'a>> for Image<'a> {
     }
 }
 
-impl<'a> std::ops::Deref for Image<'a> {
+impl<'a> Deref for Image<'a> {
     type Target = Parts<'a>;
 
     fn deref(&self) -> &Parts<'a> {
@@ -93,12 +95,15 @@ impl<'a> std::ops::Deref for Image<'a> {
 }
 
 /// An image's contents before their rules are checked; an [`Image`] holds only contents that pass.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+///
+/// Device code reads its operands from a table in a fixed order, the compiler's `enum dram_kind`:
+/// the weight, a reserved operand, the two stacks (local, then inter-chip; an empty stack has no
+/// buffer), then `slots` in signature order. A launch binds `inputs` first, then the `outputs` not
+/// already among them; outputs are memory the caller provides.
+#[derive(Encode, BorrowDecode, Clone, Debug, PartialEq, Eq)]
 pub struct Parts<'a> {
     pub topology: Topology,
-    #[serde(borrow)]
     pub executable: Executable<'a>,
-    #[serde(borrow)]
     pub weight: Option<Weight<'a>>,
     pub stacks: [Stack; 2],
     pub slots: Vec<Slot>,
@@ -108,7 +113,7 @@ pub struct Parts<'a> {
     pub sram_end: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Encode, BorrowDecode, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Weight<'a> {
     pub kind: DramKind,
     /// Every chip's shard in chip order; never empty.
@@ -116,7 +121,7 @@ pub struct Weight<'a> {
 }
 
 /// The DRAM a compiler static lives in: statics never live in SRAM.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Encode, Decode, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DramKind {
     Dram,
     DramShared,
@@ -132,19 +137,19 @@ impl From<DramKind> for memory::Kind {
 }
 
 /// One of the compiler's stacks.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Encode, Decode, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stack {
     pub kind: DramKind,
     pub size: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Encode, Decode, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot {
     pub kind: memory::Kind,
     pub size: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Encode, Decode, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Profile {
     /// The most hits one chunk records at each of [`Level::ALL`].
     pub depth: [u32; 3],
@@ -158,8 +163,20 @@ impl Profile {
     }
 }
 
+/// Profile levels retain the compiler's `ProfileLevel` and libpe's `tuc_profile_level` values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Info = 3,
+    Debug = 4,
+    Trace = 5,
+}
+
+impl Level {
+    pub const ALL: [Self; 3] = [Self::Info, Self::Debug, Self::Trace];
+}
+
 /// A span the device brackets with two markers, in one chunk of one cluster column.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Encode, Decode, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Span {
     pub chunk: u32,
     /// The cluster column across all chips.
@@ -179,10 +196,14 @@ pub struct Span {
 /// the ids it assigns below this.
 pub const MARKER_IDS: u16 = 1 << 14;
 
-const MAGIC: &[u8; 4] = b"FOPT";
+/// `FOPT` named the format earlier releases wrote.
+const MAGIC: &[u8; 4] = b"FOP2";
+const CONFIG: bincode::config::Configuration = bincode::config::standard();
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     fn parts() -> Parts<'static> {
@@ -220,7 +241,8 @@ mod tests {
         }
     }
 
-    /// An image parses back to itself; a truncated, extended or foreign one is refused.
+    /// An image parses back to itself; a truncated, extended, foreign or earlier-format one is
+    /// refused.
     #[test]
     fn round_trips_only_complete_images() {
         let image = Image::try_from(parts()).unwrap();
@@ -233,6 +255,8 @@ mod tests {
         bytes.push(0);
         assert!(Image::parse(&bytes).is_err());
         bytes.pop();
+        bytes[..4].copy_from_slice(b"FOPT");
+        assert!(Image::parse(&bytes).is_err());
         bytes[0] = b'X';
         assert!(Image::parse(&bytes).is_err());
     }
@@ -242,14 +266,14 @@ mod tests {
     fn executable_codec_preserves_bytes() {
         let bytes = Executable::encode(&[vec![b"code"; 4]]).unwrap();
         let executable = Executable::parse(&bytes).unwrap();
-        let encoded = bincode::options().serialize(&executable).unwrap();
-        assert_eq!(encoded, bincode::options().serialize(&bytes.as_slice()).unwrap());
-        let decoded: Executable<'_> = bincode::options().deserialize(&encoded).unwrap();
+        let encoded = bincode::encode_to_vec(executable, CONFIG).unwrap();
+        assert_eq!(encoded, bincode::encode_to_vec(bytes.as_slice(), CONFIG).unwrap());
+        let (decoded, _): (Executable<'_>, _) = bincode::borrow_decode_from_slice(&encoded, CONFIG).unwrap();
         assert_eq!(decoded.bytes(), bytes.as_slice());
         let mut invalid = bytes;
         invalid[0] = b'X';
-        let encoded = bincode::options().serialize(&invalid.as_slice()).unwrap();
-        assert!(bincode::options().deserialize::<Executable<'_>>(&encoded).is_err());
+        let encoded = bincode::encode_to_vec(invalid.as_slice(), CONFIG).unwrap();
+        assert!(bincode::borrow_decode_from_slice::<Executable<'_>, _>(&encoded, CONFIG).is_err());
     }
 
     /// No image holds slots outside the signature, spans naming no cluster or marker, or empty

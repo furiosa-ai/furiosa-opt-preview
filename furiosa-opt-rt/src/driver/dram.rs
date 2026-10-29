@@ -15,8 +15,8 @@ pub(crate) struct Dram {
     /// The offsets of the window the allocator may hand out: the share below the staged image and
     /// the firmware's DMA descriptors.
     pub(crate) free: Range<usize>,
-    /// Where a cluster sees this window, once a boot found the image in it.
-    pub(crate) at: Option<u64>,
+    /// Whether the chip's first boot wrote the firmware image at `offset`.
+    pub(crate) staged: bool,
 }
 
 impl Dram {
@@ -48,7 +48,7 @@ impl Dram {
             chip,
             offset,
             free: share.start..offset - rngd::PDMA_DESCRIPTORS,
-            at: None,
+            staged: false,
         })
     }
 }

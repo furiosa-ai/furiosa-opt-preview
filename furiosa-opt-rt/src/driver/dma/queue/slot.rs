@@ -67,19 +67,24 @@ impl DmaQueue {
             return None;
         }
         *received |= bit;
-        // The command is done, so what it holds goes now, not when its slot ends.
-        slot.entries[offset as usize] = None;
-        if let Err(error) = result {
-            failure.get_or_insert(error);
+        // A command done is released now, not when its slot ends; a failed one stays for the
+        // slot's failure to poison.
+        match result {
+            Ok(()) => slot.entries[offset as usize] = None,
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
         }
         if received.count_ones() as usize != count {
             return None;
         }
-        let result = failure.take().map_or(Ok(()), Err);
-        if let Err(error) = &result {
-            self.poison.set(error.clone());
-        }
-        let observer = slot.release(State::Complete(result));
+        let observer = match failure.take() {
+            Some(error) => {
+                self.poison.set(error.clone());
+                slot.fail(error)
+            }
+            None => slot.release(State::Complete(Ok(()))),
+        };
         let waiters = self.waiters.lock().unwrap().take();
         waiters.wake();
         observer
@@ -89,8 +94,8 @@ impl DmaQueue {
 pub(super) struct Slot {
     pub(super) state: State,
     pub(super) waker: Option<Waker>,
-    /// Each command until its engine reports it done: a command stays at its address while in
-    /// flight, since the kernel driver reads its descriptor in place.
+    /// Each command until its engine reports it done, a failed one until the slot ends: a command
+    /// stays at its address while in flight, since the kernel driver reads its descriptor in place.
     pub(super) entries: ArrayVec<Option<Route>, { DEPTH as usize }>,
     /// Whether a command moves host bytes the slot does not lease, which must not be freed before
     /// the slot ends.
@@ -107,6 +112,12 @@ impl Slot {
         self.borrowed = false;
         self.state = state;
         self.waker.take()
+    }
+
+    /// Releases quiescent work with `error`, poisoning the host and device regions held for Write.
+    pub(super) fn fail(&mut self, error: Error) -> Option<Waker> {
+        self.access.poison();
+        self.release(State::Complete(Err(error)))
     }
 }
 
@@ -146,7 +157,7 @@ impl Slots {
                     waker: None,
                     entries: ArrayVec::new(),
                     borrowed: false,
-                    access: Lease::new(DEPTH as usize),
+                    access: Lease::new(DEPTH as usize * 2),
                     sequence: 0,
                 })
             })

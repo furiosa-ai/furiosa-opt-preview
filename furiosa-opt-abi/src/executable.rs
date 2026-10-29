@@ -1,12 +1,22 @@
-//! Device entry ranges, independent of compiler arguments and metadata.
+//! A device executable: a header, a table with one entry per chunk and cluster, then each entry's
+//! code, all little-endian and independent of compiler arguments and metadata.
+//!
+//! ```text
+//! 0            magic "FOE1" | table: u16 | stride: u16 | chunks: u32 | clusters: u32
+//! table        entry[0][0]: offset: u64 | len: u32 | entry: u32
+//! + stride     entry[0][1], ... entry[chunk][cluster], chunk-major, `stride` bytes apart
+//! entry.offset code, `len` bytes, then padding to the next ALIGNMENT, in table order
+//! ```
+//!
+//! A chunk's `entry` is the byte its cluster starts at, inside the chunk's code.
 
 use core::ops::Range;
 
 use zerocopy::byteorder::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-/// A device executable [`Executable::parse`] checked: each chunk's code lies aligned and in
-/// order inside its bytes, and its entry inside that code.
+/// A device executable [`Executable::parse`] checked: each chunk's code, through its padding,
+/// lies aligned and in order inside its bytes, and its entry inside that code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Executable<'a> {
     bytes: &'a [u8],
@@ -41,9 +51,10 @@ impl<'a> Executable<'a> {
             .ok_or(Error)?;
         for index in 0..count {
             let chunk = executable.at(index);
+            let padded = chunk.code.end.checked_next_multiple_of(ALIGNMENT);
             if chunk.code.start < end
                 || !chunk.code.start.is_multiple_of(ALIGNMENT)
-                || chunk.code.end > bytes.len()
+                || !padded.is_some_and(|padded| padded <= bytes.len())
                 || chunk.entry >= chunk.code.len()
                 || !chunk.entry.is_multiple_of(4)
             {
@@ -138,27 +149,32 @@ pub struct Chunk {
 #[error("invalid device executable")]
 pub struct Error;
 
-/// Every chunk's code starts on this boundary, and the bytes up to the next one are padding.
+/// Every chunk's code starts on this boundary, and the bytes up to the next one are padding, which
+/// the firmware copies with the code.
 pub const ALIGNMENT: usize = 256;
 
 /// Preferred chunk budget; an indivisible instruction may use the full reserved code region.
 pub const CHUNK_LIMIT: usize = 1 << 20;
 
-#[cfg(feature = "serde")]
+#[cfg(feature = "bincode")]
 mod codec {
-    use super::Executable;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+    use bincode::de::BorrowDecoder;
+    use bincode::enc::Encoder;
+    use bincode::error::{DecodeError, EncodeError};
+    use bincode::{BorrowDecode, Encode};
 
-    impl Serialize for Executable<'_> {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            self.bytes.serialize(serializer)
+    use super::Executable;
+
+    impl Encode for Executable<'_> {
+        fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
+            self.bytes.encode(encoder)
         }
     }
 
-    impl<'de: 'a, 'a> Deserialize<'de> for Executable<'a> {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            let bytes = <&[u8]>::deserialize(deserializer)?;
-            Self::parse(bytes).map_err(de::Error::custom)
+    impl<'de: 'a, 'a, Context> BorrowDecode<'de, Context> for Executable<'a> {
+        fn borrow_decode<D: BorrowDecoder<'de, Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
+            let bytes = <&'de [u8]>::borrow_decode(decoder)?;
+            Self::parse(bytes).map_err(|_| DecodeError::Other("malformed executable"))
         }
     }
 }
@@ -194,7 +210,8 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    /// FOE1 gives each cluster its chunks and entries in run order, and refuses malformed tables.
+    /// FOE1 gives each cluster its chunks and entries in run order, and refuses malformed tables
+    /// and images that end before a chunk's padding does.
     #[test]
     fn preserves_each_clusters_chunks() {
         let chunks = vec![vec![&b"abcd"[..], &b"efghijkl"[..]], vec![&b"mnop"[..], &b"qrst"[..]]];
@@ -222,8 +239,8 @@ mod tests {
             entry(&mut invalid, 1).offset = U64::new(offset);
             assert!(Executable::parse(&invalid).is_err());
         }
-        for len in 0..bytes.len() - ALIGNMENT {
-            assert!(Executable::parse(&bytes[..len]).is_err());
+        for len in 0..bytes.len() {
+            assert!(Executable::parse(&bytes[..len]).is_err(), "{len} bytes");
         }
     }
 }

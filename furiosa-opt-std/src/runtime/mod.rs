@@ -12,9 +12,7 @@ pub(crate) use buffer::Region;
 pub use buffer::{
     Chips, HbmBuffer, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Memory,
 };
-pub use launch::{
-    Issued, Kernel, Launch, Launched, Loadable, Prepared, Prepend, Returned, Returns, Submitted, Work, launch,
-};
+pub use launch::{Kernel, Launch, Launched, Loadable, Prepared, Prepend, Returned, Returns, Submitted, Work, launch};
 
 use std::fmt::{self, Debug};
 
@@ -218,6 +216,19 @@ mod tests {
             }
         }
         assert!(matches!(Device::<Cpu>::new(Empty), Err(Error::Invalid(_))));
+    }
+
+    /// A CPU device opens only a topology a device can have: one to eight chips of one to eight PEs.
+    #[test]
+    fn rejects_unsupported_topologies() {
+        for (chips, pes) in [(0, 8), (9, 8), (17, 8), (255, 8), (1, 0), (1, 9)] {
+            let opened = Device::<Cpu>::new(Topology { chips, pes });
+            assert!(
+                matches!(opened, Err(Error::Invalid(_))),
+                "{chips} chips, {pes} PEs: {opened:?}"
+            );
+        }
+        assert!(Device::<Cpu>::new(Topology { chips: 8, pes: 8 }).is_ok());
     }
 
     #[test]

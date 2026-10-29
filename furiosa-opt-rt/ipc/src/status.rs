@@ -1,4 +1,6 @@
-/// Request failures and task exit codes; zero is success and retired wire values stay reserved.
+/// Why a request failed or a task exited unsuccessfully. Zero is not a status: an [`Answer`](crate::Answer)
+/// encodes success as zero, and a task exits with zero when it succeeds. Retired wire values stay
+/// reserved.
 #[derive(thiserror::Error, Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum Status {

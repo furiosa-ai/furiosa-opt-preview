@@ -177,3 +177,47 @@ fn execution_has_launch_ancestry() -> Result<(), Error> {
     assert_eq!(events.load(Ordering::Relaxed), 2);
     Ok(())
 }
+
+/// A submitted host transfer borrows neither the DMA context nor the bytes it moves from, so the
+/// device launches on other memory while it runs, and it yields its result when awaited later.
+#[tokio::test]
+async fn launches_beside_submitted_transfers() -> Result<(), Error> {
+    let mut device = Device::new(step.topology())?;
+    let model = HbmTensor::<f32, m![1], m![A]>::alloc(&device)?;
+    let mut target = HbmBuffer::alloc(&device, 32)?;
+    let mut back = HostTensor::<i32, m![A]>::zero();
+    let written = HostBuffer::from(&[7; 32])
+        .to_hbm(&mut device.pdma)
+        .output(&mut target)
+        .submit();
+    let staged = HostTensor::<i32, m![A]>::from_vec(vec![9; 8])
+        .to_hbm::<m![1], m![A]>(&mut device.pdma)
+        .submit();
+    device.launch(step, (&model,)).await?;
+    written.await?;
+    let staged = staged.await?;
+    let read = target.to_host(&mut device.pdma).submit();
+    let copied = staged.to_host(&mut device.pdma).output(&mut back).submit();
+    device.launch(step, (&model,)).await?;
+    assert_eq!(read.await?[..], [7; 32]);
+    copied.await?;
+    assert_eq!(back.into_vec(), [9; 8]);
+    Ok(())
+}
+
+/// A launch whose body moves memory completes under any executor, a blocking one included.
+#[test]
+fn launches_under_a_blocking_executor() -> Result<(), Error> {
+    futures_executor::block_on(async {
+        let mut device = Device::new(replace.topology())?;
+        let mut block = HostTensor::<i32, m![A]>::from_vec(vec![7; 8])
+            .to_hbm::<m![1], m![A]>(&mut device.pdma)
+            .await?;
+        let source = HostTensor::<i32, m![A]>::from_vec(vec![9; 8])
+            .to_hbm::<m![1], m![A]>(&mut device.pdma)
+            .await?;
+        launch(replace, (&mut device, &mut block, &source)).await?;
+        assert_eq!(block.to_host::<m![A]>(&mut device.pdma).await?.into_vec(), [9; 8]);
+        Ok(())
+    })
+}

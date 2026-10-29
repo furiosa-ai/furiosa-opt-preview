@@ -64,8 +64,12 @@ impl DmaQueue {
     pub(crate) fn complete(&self) -> bool {
         let mut wakers = Vec::new();
         let mut done = |tag, result| wakers.extend(self.finish(tag, result));
-        self.transport.lock().unwrap().complete(&mut done);
-        self.copies().complete(&mut done);
+        let transport = self.transport.lock().unwrap().complete(&mut done);
+        let copies = self.copies().complete(&mut done);
+        // An engine that can no longer answer refuses later transfers; what it took still answers.
+        if let Err(error) = transport.and(copies) {
+            self.poison.set(error);
+        }
         wakers.into_iter().for_each(Waker::wake);
         // Waiting slots publish in submission order until one finds no room.
         let mut waiting = self.waiting.lock().unwrap();
@@ -79,23 +83,20 @@ impl DmaQueue {
         (self.slots.created()).all(|slot| !matches!(slot.lock().unwrap().state, State::Active { .. }))
     }
 
-    /// Each submitted transfer's slot and generation, as [`Self::ended`] takes them.
-    pub(crate) fn submitted(&self) -> Vec<(usize, u64)> {
-        (self.slots.created().enumerate())
-            .filter_map(|(index, slot)| {
-                let slot = slot.lock().unwrap();
-                matches!(slot.state, State::Submitted | State::Active { .. }).then_some((index, slot.sequence))
-            })
-            .collect()
+    /// Each submitted slot, by index and generation, as [`Self::ended`] takes them.
+    pub(crate) fn submitted(&self) -> impl Iterator<Item = (usize, u64)> {
+        (self.slots.created().enumerate()).filter_map(|(index, slot)| {
+            let slot = slot.lock().unwrap();
+            matches!(slot.state, State::Submitted | State::Active { .. }).then_some((index, slot.sequence))
+        })
     }
 
-    /// Whether every transfer of `submitted` ended; `waker` is woken at the next end otherwise.
-    pub(crate) fn ended(&self, submitted: &[(usize, u64)], waker: &Waker) -> bool {
+    /// Whether generation `sequence` of slot `index` ended; `waker` is woken at the next end
+    /// otherwise.
+    pub(crate) fn ended(&self, index: usize, sequence: u64, waker: &Waker) -> bool {
         let ended = || {
-            submitted.iter().all(|&(index, sequence)| {
-                let slot = self.slots[index].lock().unwrap();
-                slot.sequence != sequence || !matches!(slot.state, State::Submitted | State::Active { .. })
-            })
+            let slot = self.slots[index].lock().unwrap();
+            slot.sequence != sequence || !matches!(slot.state, State::Submitted | State::Active { .. })
         };
         ended() || {
             self.waiters.lock().unwrap().register(waker);
@@ -126,7 +127,15 @@ impl DmaQueue {
             let failure = match transport.submit(commands) {
                 Ok(taken) if taken < channels.count_ones() as usize => return false,
                 Ok(_) => None,
-                Err(error) => Some(self.poison.set(error).clone()),
+                Err(error) => {
+                    let observer = slot.fail(self.poison.set(error).clone());
+                    drop(slot);
+                    self.waiters.lock().unwrap().take().wake();
+                    if let Some(observer) = observer {
+                        observer.wake();
+                    }
+                    return true;
+                }
             };
             slot.state = State::Active {
                 published: channels,
@@ -135,7 +144,7 @@ impl DmaQueue {
             };
         }
         let Slot { entries, state, .. } = &mut *slot;
-        let State::Active { published, failure, .. } = state else {
+        let State::Active { published, .. } = state else {
             return true;
         };
         let pending = (entries.iter().enumerate())
@@ -144,17 +153,32 @@ impl DmaQueue {
                 _ => None,
             })
             .collect::<ArrayVec<_, { DEPTH as usize }>>();
-        let taken = match copies.submit(pending.iter().map(|&(offset, copy)| (first + offset as u64, copy))) {
-            Ok(taken) => taken,
-            Err(error) => {
-                failure.get_or_insert(self.poison.set(error).clone());
-                0
-            }
+        let commands = pending.iter().map(|&(offset, copy)| (first + offset as u64, copy));
+        let (taken, refused) = match copies.submit(commands) {
+            Ok(taken) => (taken, None),
+            Err(error) => (0, Some(self.poison.set(error).clone())),
         };
-        pending[..taken]
+        let offsets = pending
             .iter()
-            .for_each(|&(offset, _)| *published |= 1 << offset);
-        taken == pending.len()
+            .map(|&(offset, _)| offset as u64)
+            .collect::<ArrayVec<_, { DEPTH as usize }>>();
+        drop(pending);
+        offsets[..taken].iter().for_each(|offset| *published |= 1 << offset);
+        let Some(error) = refused else {
+            return taken == offsets.len();
+        };
+        // Copies no cluster took never run, so they answer now; what other engines took still
+        // answers, and the slot ends with the last answer.
+        let mut observers = ArrayVec::<Waker, { DEPTH as usize }>::new();
+        for &offset in &offsets[taken..] {
+            if let State::Active { published, .. } = &mut slot.state {
+                *published |= 1 << offset;
+            }
+            observers.extend(self.receive(&mut slot, offset, Err(error.clone())));
+        }
+        drop(slot);
+        observers.into_iter().for_each(Waker::wake);
+        true
     }
 
     fn copies(&self) -> Copies<'_> {
@@ -198,16 +222,53 @@ pub(crate) mod fixture {
     use crate::driver::dma::{Direction, Host};
     use crate::{Access, Error};
 
+    pub(crate) fn transport(queue: &DmaQueue) -> crate::driver::dma::fake::Fake {
+        let transport = queue.transport.lock().unwrap();
+        match &*transport {
+            Transport::Fake(fake) => fake.clone(),
+            Transport::Driver { .. } => panic!("fake queue required"),
+        }
+    }
+
     /// Adds a one-byte read of `buffer` to `transfer`, into `host` when given, else into
     /// borrowed host bytes.
     pub(crate) fn push(transfer: &mut Transfer<'_>, buffer: &crate::Buffer, host: Option<&crate::Pinned>) {
         let host = match host {
-            Some(host) => Host::Owned(host.slice(..).backing.unwrap().retain(), 0),
+            Some(host) => {
+                let backing = host.slice(..).pinned.unwrap();
+                transfer
+                    .access(crate::buffer::Region::host(backing, 1, Access::Write))
+                    .unwrap();
+                Host::Owned(Arc::clone(backing.dmabuf), 0)
+            }
             None => Host::Borrowed(0),
         };
         let command = Command::new(0, Direction::Read, host, 0, 1);
-        transfer.access(buffer.slice(..).unwrap(), Access::Read).unwrap();
+        transfer.access((buffer.slice(..).unwrap(), Access::Read)).unwrap();
         transfer.push(Route::Channel(command));
+    }
+
+    /// A command's segments, each as its `(src, dst, len)`.
+    pub(crate) type Segments = Vec<(u64, u64, u64)>;
+
+    /// Each driver command the queue's slots hold: its chip and its segments.
+    pub(crate) fn commands(queue: &DmaQueue) -> Vec<(u8, Segments)> {
+        (queue.slots.created())
+            .flat_map(|slot| {
+                let slot = slot.lock().unwrap();
+                (slot.entries.iter())
+                    .filter_map(|entry| match entry {
+                        Some(Route::Channel(command)) => Some((
+                            command.chip(),
+                            (command.segments().iter())
+                                .map(|segment| (segment.src, segment.dst, segment.len))
+                                .collect(),
+                        )),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// The tag of `transfer`'s first command.

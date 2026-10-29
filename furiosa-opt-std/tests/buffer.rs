@@ -53,6 +53,17 @@ async fn rejects_storage_the_type_does_not_fit() -> Result<(), Error> {
     Ok(())
 }
 
+/// A tensor allocates only on a device whose chips its chip extent names, as a buffer becomes one.
+#[test]
+fn refuses_allocations_the_device_does_not_fit() -> Result<(), Error> {
+    let device = Device::new(Topology { chips: 2, pes: 8 })?;
+    assert!(invalid(Word::alloc(&device)));
+    assert_eq!(HbmTensor::<i32, m![2], m![A]>::alloc(&device)?.into_buffer().size(), 64);
+    let device = Device::new(Topology { chips: 1, pes: 8 })?;
+    assert!(invalid(HbmTensor::<i32, m![2], m![A]>::alloc(&device)));
+    Ok(())
+}
+
 /// A slice moves its byte range on its chips only, chip after chip in rank order, and leaves the
 /// rest of the buffer as it was; a range, chip or length outside the buffer is `Error::Invalid`.
 #[tokio::test]
@@ -160,6 +171,40 @@ async fn batches_preserve_unselected_bytes() -> Result<(), Error> {
         second.to_host(&mut device.pdma).await?[..],
         [5, 6, 8, 8, 8, 8, 7, 8, 8, 8, 8, 8]
     );
+    Ok(())
+}
+
+/// A batch reads every source's selected chips into its host bytes, in pair order, and a length
+/// mismatch anywhere refuses every read.
+#[tokio::test]
+async fn batches_read_selected_chips() -> Result<(), Error> {
+    let mut device = Device::<Cpu>::new(Topology { chips: 2, pes: 8 })?;
+    let first = HostBufferSlice::from(&(1..=12).collect::<Vec<u8>>())
+        .to_hbm(&mut device.pdma)
+        .await?;
+    let second = HostBufferSlice::from(&(21..=32).collect::<Vec<u8>>())
+        .to_hbm(&mut device.pdma)
+        .await?;
+    let mut host = HostBuffer::zero(8);
+    let (head, rest) = host.slice_mut(..)?.split_at(2)?;
+    let (middle, tail) = rest.split_at(2)?;
+    device
+        .pdma
+        .to_host([
+            (first.slice(0, 1..3)?, head),
+            (first.slice(1, 3..5)?, middle),
+            (second.slice(.., ..2)?, tail),
+        ])
+        .await?;
+    assert_eq!(host[..], [2, 3, 10, 11, 21, 22, 27, 28]);
+    let (head, short) = host.slice_mut(..5)?.split_at(2)?;
+    let result = device
+        .pdma
+        .to_host([(first.slice(0, 4..)?, head), (second.slice(.., ..2)?, short)])
+        .await;
+    assert!(invalid(result));
+    assert_eq!(host[..2], [2, 3]);
+    assert!(invalid(host.slice_mut(..2)?.split_at(3)));
     Ok(())
 }
 

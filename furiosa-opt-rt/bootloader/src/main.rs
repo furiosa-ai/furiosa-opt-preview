@@ -12,11 +12,11 @@ use core::future::poll_fn;
 use core::ptr;
 
 use furiosa_opt_abi::arch::rngd::{self, COMPLETION};
-use furiosa_opt_abi::bootloader::{Code, FIRMWARE_BASE, Request};
+use furiosa_opt_abi::bootloader::{Code, FIRMWARE_BASE};
 use furiosa_opt_abi::doorbell::Doorbells;
 use furiosa_opt_abi::mmio::Fixed;
-use furiosa_opt_abi::ring::{Completion, Consumer, Producer, Ring, header};
-use furiosa_opt_bootloader::Image;
+use furiosa_opt_abi::ring::{Completion, Consumer, Producer, Ring};
+use furiosa_opt_bootloader::{Image, receive};
 
 global_asm!(
     r#"
@@ -72,9 +72,10 @@ exception_halt:
 
 #[unsafe(no_mangle)]
 extern "C" fn boot_main() -> ! {
-    // SAFETY: the standalone memory map places this core's doorbells at zero.
-    let memory = unsafe { Fixed::new(ptr::null_mut(), rngd::DOORBELLS.extent()) };
-    let doorbells = Doorbells::new(memory, &rngd::DOORBELLS);
+    let doorbells = rngd::DOORBELLS.extent().and_then(|extent| {
+        // SAFETY: the standalone memory map places this core's doorbells at zero.
+        Doorbells::new(unsafe { Fixed::new(ptr::null_mut(), extent) }, &rngd::DOORBELLS)
+    });
     loop {
         if let Ok(doorbells) = &doorbells {
             let status = doorbells.status();
@@ -91,21 +92,9 @@ fn serve(doorbells: &Doorbells<Fixed>, slot: u8) {
     let Ok(doorbell) = doorbells.ring(slot).and_then(Consumer::new) else {
         return;
     };
-    let mut frame = [0; _];
-    let (Ok(available), Ok(())) = (doorbell.available(), doorbell.copy(0, &mut frame[..1])) else {
+    let Some((id, request)) = receive(&doorbell) else {
         return;
     };
-    // A word that is no frame header is dropped, so the next word can open a frame.
-    let Some((id, words)) = header::unpack(frame[0]) else {
-        let _ = doorbell.consume(1);
-        return;
-    };
-    // The rest of the frame has not arrived yet.
-    if available <= usize::from(words) {
-        return;
-    }
-    let request = doorbell.copy(1, &mut frame[1..]).ok().and(Request::decode(frame));
-    let _ = doorbell.consume(1 + usize::from(words));
     let code = match request.map(|request| (request.addr, Image::try_from(request))) {
         None => Code::NotBoot,
         Some((_, Err(code))) => code,

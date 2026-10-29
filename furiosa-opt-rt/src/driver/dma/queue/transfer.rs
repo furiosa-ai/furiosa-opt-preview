@@ -3,7 +3,8 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use super::{DmaQueue, Route, State};
-use crate::{Access, BufferSlice, Result};
+use crate::Result;
+use crate::buffer::{Lease, Region};
 
 /// A slot held by one caller; dropping it before submission releases its access.
 pub(crate) struct Transfer<'a> {
@@ -14,9 +15,13 @@ pub(crate) struct Transfer<'a> {
 
 impl Transfer<'_> {
     /// Holds `view` for this transfer's commands.
-    pub(crate) fn access(&mut self, view: BufferSlice<'_>, access: Access) -> Result<()> {
+    pub(crate) fn access(&mut self, region: impl Into<Region>) -> Result<()> {
         let mut slot = self.queue.slots[self.index].lock().unwrap();
-        slot.access.extend([(view, access)])
+        slot.access.extend([region.into()])
+    }
+
+    pub(crate) fn hold(&mut self, access: Lease) {
+        self.queue.slots[self.index].lock().unwrap().access = access;
     }
 
     pub(crate) fn push(&mut self, route: Route) {
@@ -84,7 +89,8 @@ impl Drop for Transfer<'_> {
     /// for, so a panic unwinding through its poll cannot free bytes the device still copies.
     fn drop(&mut self) {
         loop {
-            let mut slot = self.queue.slots[self.index].lock().unwrap();
+            // A panic that poisoned the slot leaves its state whole, and this drop may run in its unwind.
+            let mut slot = (self.queue.slots[self.index].lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
             if slot.sequence != self.sequence {
                 return;
             }
@@ -112,11 +118,199 @@ mod tests {
     use super::*;
     use crate::driver::dma::{Transport, fake::Fake};
 
+    /// Copies a mailbox had no room for still end, with an error, once a mailbox failure stopped
+    /// every cluster's mailbox.
+    #[tokio::test]
+    async fn ends_unsent_copies_after_mailboxes_stop() {
+        let device = crate::test::device(&[0], 8);
+        let host = crate::test::mapped(&device, vec![0], 4096);
+        let registration = Arc::clone(host.registration().unwrap());
+        let (mailbox, file) = crate::test::mailbox();
+        let queue = DmaQueue::new(
+            Transport::Fake(Fake::default()),
+            Arc::new(std::sync::Mutex::new(vec![mailbox])),
+            Waker::noop().clone(),
+        );
+        let mut transfer = queue.acquire().await.unwrap();
+        for _ in 0..17 {
+            let copy = crate::driver::dma::Copy::new(
+                0,
+                crate::driver::dma::Direction::Read,
+                Arc::clone(&registration),
+                0,
+                0,
+                0,
+                1,
+            );
+            transfer.push(Route::Cluster(copy));
+        }
+        let mut submitted = Box::pin(transfer.submit());
+        assert!(
+            submitted
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        crate::test::respond(&file, &[(999, furiosa_opt_ipc::Answer(Ok(())))]);
+        queue.complete();
+        assert!(matches!(
+            submitted.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Err(crate::Error::Device(_)))
+        ));
+        assert!(queue.complete());
+    }
+
+    /// Failed submission finishes its observer rather than leaving work permanently active.
+    #[tokio::test]
+    async fn completes_failed_submission() {
+        let fake = Fake::default();
+        fake.fail(crate::Error::Device("submission failed".into()));
+        let queue = DmaQueue::new(Transport::Fake(fake), Arc::default(), Waker::noop().clone());
+        let buffer = crate::test::allocator(0..512, 512)
+            .alloc(crate::memory::Kind::Dram, 1)
+            .unwrap();
+        let host = crate::test::pinned();
+        let mut transfer = queue.acquire().await.unwrap();
+        push(&mut transfer, &buffer, Some(&host));
+        let mut submitted = Box::pin(transfer.submit());
+        assert!(matches!(
+            submitted.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Err(crate::Error::Device(_))),
+        ));
+        assert!(queue.complete());
+    }
+
+    /// A failed host read makes its destination inaccessible after completion.
+    #[tokio::test]
+    async fn poisons_failed_destination() {
+        let fake = Fake::default();
+        let queue = DmaQueue::new(Transport::Fake(fake.clone()), Arc::default(), Waker::noop().clone());
+        let buffer = crate::test::allocator(0..512, 512)
+            .alloc(crate::memory::Kind::Dram, 1)
+            .unwrap();
+        let host = crate::test::pinned();
+        let mut transfer = queue.acquire().await.unwrap();
+        push(&mut transfer, &buffer, Some(&host));
+        let tag = tag(&transfer);
+        let mut submitted = Box::pin(transfer.submit());
+        assert!(
+            submitted
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        fake.respond(tag, Err(std::io::Error::other("DMA failed")));
+        queue.complete();
+        assert!(std::panic::catch_unwind(|| host[0]).is_err());
+    }
+
+    /// A failed host read does not modify or poison its device source.
+    #[tokio::test]
+    async fn preserves_failed_source() {
+        let fake = Fake::default();
+        let queue = DmaQueue::new(Transport::Fake(fake.clone()), Arc::default(), Waker::noop().clone());
+        let buffer = crate::test::allocator(0..512, 512)
+            .alloc(crate::memory::Kind::Dram, 1)
+            .unwrap();
+        let host = crate::test::pinned();
+        let mut transfer = queue.acquire().await.unwrap();
+        push(&mut transfer, &buffer, Some(&host));
+        let tag = tag(&transfer);
+        let mut submitted = Box::pin(transfer.submit());
+        assert!(
+            submitted
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        fake.respond(tag, Err(std::io::Error::other("DMA failed")));
+        queue.complete();
+        assert_eq!(buffer.slice(..).unwrap().ready(crate::Access::Read).await, Ok(()));
+    }
+
+    /// A failed host write makes its device destination inaccessible after completion.
+    #[tokio::test]
+    async fn poisons_device_destination() {
+        let fake = Fake::default();
+        let queue = DmaQueue::new(Transport::Fake(fake.clone()), Arc::default(), Waker::noop().clone());
+        let buffer = crate::test::allocator(0..512, 512)
+            .alloc(crate::memory::Kind::Dram, 1)
+            .unwrap();
+        let host = crate::test::pinned();
+        let mut transfer = queue.acquire().await.unwrap();
+        transfer
+            .access((buffer.slice(..).unwrap(), crate::Access::Write))
+            .unwrap();
+        transfer.push(crate::driver::dma::Route::Channel(crate::driver::dma::Command::new(
+            0,
+            crate::driver::dma::Direction::Write,
+            crate::driver::dma::Host::Owned(Arc::clone(host.dmabuf()), 0),
+            0,
+            1,
+        )));
+        let tag = tag(&transfer);
+        let mut submitted = Box::pin(transfer.submit());
+        assert!(
+            submitted
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        fake.respond(tag, Err(std::io::Error::other("DMA failed")));
+        queue.complete();
+        assert_eq!(
+            buffer.slice(..).unwrap().ready(crate::Access::Read).await,
+            Err(crate::Error::Poisoned)
+        );
+        assert_eq!(host[0], 0);
+    }
+
+    /// A split read excludes host readers until its last DMA command completes.
+    #[tokio::test]
+    async fn excludes_reads_until_last_completion() {
+        let fake = Fake::default();
+        let queue = DmaQueue::new(Transport::Fake(fake.clone()), Arc::default(), Waker::noop().clone());
+        let host = crate::test::pinned();
+        let backing = host.slice(..).pinned.unwrap();
+        let mut transfer = queue.acquire().await.unwrap();
+        transfer.access(Region::host(backing, 2, crate::Access::Write)).unwrap();
+        for offset in 0..2 {
+            transfer.push(crate::driver::dma::Route::Channel(crate::driver::dma::Command::new(
+                0,
+                crate::driver::dma::Direction::Read,
+                crate::driver::dma::Host::Owned(Arc::clone(backing.dmabuf), offset),
+                0,
+                1,
+            )));
+        }
+        let tag = tag(&transfer);
+        let mut submitted = Box::pin(transfer.submit());
+        assert!(
+            submitted
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        fake.respond(tag, Ok(1));
+        queue.complete();
+        assert!(matches!(
+            Lease::new(1).extend([Region::host(backing, 2, crate::Access::Read)]),
+            Err(crate::Error::Busy)
+        ));
+        fake.respond(tag + 1, Ok(1));
+        queue.complete();
+        assert!(
+            Lease::new(1)
+                .extend([Region::host(backing, 2, crate::Access::Read)])
+                .is_ok()
+        );
+    }
+
     /// A transfer of borrowed host bytes completes before its first poll returns, and dropping it
     /// submitted, as a panic unwinding through its poll does, returns only once the device answered.
     #[tokio::test]
     async fn completes_borrowed_slices_before_returning() {
-        let buffer = crate::test::allocations(0..512, 512)
+        let buffer = crate::test::allocator(0..512, 512)
             .alloc(crate::memory::Kind::Dram, 1)
             .unwrap();
         let queue = DmaQueue::new(Transport::Fake(Fake::default()), Arc::default(), Waker::noop().clone());
@@ -142,7 +336,7 @@ mod tests {
 
         // Dropping the submitted transfer waits for the device's answer.
         {
-            let buffer = crate::test::allocations(0..512, 512)
+            let buffer = crate::test::allocator(0..512, 512)
                 .alloc(crate::memory::Kind::Dram, 1)
                 .unwrap();
             let queue = DmaQueue::new(Transport::Fake(Fake::default()), Arc::default(), Waker::noop().clone());

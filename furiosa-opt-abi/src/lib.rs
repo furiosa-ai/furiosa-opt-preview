@@ -11,8 +11,11 @@ extern crate thiserror_core as thiserror;
 pub mod bootloader;
 pub mod doorbell;
 pub mod executable;
+#[cfg(all(feature = "alloc", feature = "bincode"))]
+pub mod image;
 pub mod memory;
 pub mod mmio;
+pub mod registry;
 pub mod ring;
 
 /// Chip-specific layouts and limits.
@@ -22,7 +25,7 @@ pub mod arch {
 
 /// Number of chips and processing elements per chip in a compiled program or opened device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 pub struct Topology {
     pub chips: u8,
     pub pes: u8,

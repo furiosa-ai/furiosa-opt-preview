@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::task::{Poll, Waker};
 
 use crate::arch::rngd;
-use crate::buffer::{Allocations, Buffer};
+use crate::buffer::{Allocator, Buffer};
 use crate::driver::Driver;
 use crate::function::Launches;
 use crate::memory::{Kind, Usage};
@@ -12,6 +12,8 @@ use crate::{Error, Pinned, Placement, Result, ToPlacements, Topology};
 
 mod transfer;
 mod worker;
+pub use transfer::Transfer;
+pub(crate) use transfer::Transfers;
 pub(crate) use worker::Worker;
 
 /// The chips a process opened: functions load and launch through it, and it carries every
@@ -22,9 +24,11 @@ pub struct Device {
     /// Every function's launch slots, so launches nobody polls still complete and run their
     /// epilogues.
     pub(crate) launches: Arc<Launches>,
+    /// The transfers of pinned memory, so those nobody polls still complete.
+    pub(crate) transfers: Arc<Transfers>,
     pub(crate) driver: Arc<Driver>,
     /// Which device bytes each Buffer owns; outlives the device through its Buffers.
-    pub(crate) allocations: Arc<Allocations>,
+    pub(crate) allocator: Arc<Allocator>,
     pub(crate) placement: Placement,
 }
 
@@ -42,18 +46,21 @@ impl Device {
                 }
                 opened => opened?,
             };
-            let allocations = Arc::new(Allocations::over(driver.topology, driver.allocatable.clone()));
+            let allocator = Arc::new(Allocator::over(driver.topology, driver.allocatable.clone()));
             let driver = Arc::new(driver);
             let launches = Arc::<Launches>::default();
+            let transfers = Arc::new(Transfers::new(waker.clone()));
             let work = Work {
                 launches: Arc::clone(&launches),
+                transfers: Arc::clone(&transfers),
                 driver: Arc::clone(&driver),
             };
             return Ok(Self {
                 worker: Worker::spawn(work, unpark),
                 launches,
+                transfers,
                 driver,
-                allocations,
+                allocator,
                 placement,
             });
         }
@@ -61,8 +68,17 @@ impl Device {
     }
 
     /// Allocates `len` bytes of `kind` memory at one address on every chip.
+    ///
+    /// - `Dram` takes, among the free spans that fit, the lowest one that puts the fewest bytes in
+    ///   the peer window at the bottom of DRAM; `DramShared` takes the lowest one inside it.
+    /// - SRAM residents fill down from the top, while each admitted launch's temporaries take the
+    ///   SRAM below its image's `sram_end`. A resident that would start below those temporaries
+    ///   fails with [`Error::SramOverlap`], as a launch does whose temporaries would reach the lowest
+    ///   resident.
+    /// - Dropped bytes are free again once their last owner, a running launch or transfer included,
+    ///   lets go of them; [`Error::OutOfMemory`] when no free span fits.
     pub fn alloc(&self, kind: Kind, len: usize) -> Result<Buffer> {
-        self.allocations.alloc(kind, len)
+        self.allocator.alloc(kind, len)
     }
 
     /// Registers pinned host memory for firmware-issued DMA on every cluster.
@@ -74,8 +90,9 @@ impl Device {
     /// reserves no PDMA channels for the firmware; `write` and `read` then move the memory on the driver's.
     pub async fn map(&self, pinned: &mut Pinned) -> Result<()> {
         self.driver.pdma()?;
-        if let Some(registration) = &pinned.registration()
-            && registration.buffer.belongs_to(&self.allocations)
+        if pinned
+            .registration()
+            .is_some_and(|registration| registration.belongs_to(&self.allocator))
         {
             return Ok(());
         }
@@ -84,7 +101,7 @@ impl Device {
         let invalid = || Error::Device("the driver's DMA mapping does not cover the host allocation".into());
         let tables = self
             .driver
-            .register(pinned.allocation().fd().as_raw_fd())?
+            .register(pinned.dmabuf().fd().as_raw_fd())?
             .into_iter()
             .map(|segments| rngd::dma::SegmentTable::encode(len.into(), segments).ok_or_else(invalid))
             .collect::<Result<Vec<_>>>()?;
@@ -109,10 +126,7 @@ impl Device {
             let view = table.slice_mut(at..at + bytes.len())?.on(cluster / clusters)?;
             self.write([(bytes.as_slice().into(), view)]).await?;
         }
-        pinned.set_registration(Some(Arc::new(Registration {
-            buffer: table,
-            tables: offsets,
-        })));
+        pinned.set_registration(Some(Arc::new(Registration { tables: table, offsets })));
         Ok(())
     }
 
@@ -132,7 +146,7 @@ impl Device {
 
     /// The chip count and processing elements per chip held by this device.
     pub fn topology(&self) -> Topology {
-        self.allocations.topology()
+        self.allocator.topology()
     }
 
     /// The physical chips and PEs this device opened.
@@ -143,18 +157,19 @@ impl Device {
     /// Bytes per chip that `kind` allocations can occupy, live or free: what the driver and firmware
     /// leave, rounded down to whole allocation units.
     pub fn capacity(&self, kind: Kind) -> usize {
-        self.allocations.capacity(kind)
+        self.allocator.capacity(kind)
     }
 
     /// Free `kind` memory per chip now, as [`Device::alloc`] of that kind can take it.
     pub fn usage(&self, kind: Kind) -> Usage {
-        self.allocations.usage(kind)
+        self.allocator.usage(kind)
     }
 
     /// The launches and transfers this device admitted.
     pub(crate) fn work(&self) -> Work {
         Work {
             launches: Arc::clone(&self.launches),
+            transfers: Arc::clone(&self.transfers),
             driver: Arc::clone(&self.driver),
         }
     }
@@ -191,7 +206,7 @@ impl Clock<'_> {
             Ok(time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64)
         };
         let mut mailboxes = self.device.driver.mailboxes.lock().unwrap();
-        let mailbox = &mut mailboxes[self.cluster];
+        let mailbox = (mailboxes.get_mut(self.cluster)).ok_or_else(crate::driver::dma::stopped)?;
         if !mailbox.idle() {
             return Ok(None);
         }
@@ -223,29 +238,44 @@ pub(crate) enum Contention {
 /// The launches and transfers a device admitted.
 pub(crate) struct Work {
     launches: Arc<Launches>,
+    transfers: Arc<Transfers>,
     driver: Arc<Driver>,
 }
 
 impl Work {
-    /// Collects the launches and transfers the hardware finished, running their epilogues; true
-    /// when none is in flight. A failed device finishes no launch any more, so its launches count
-    /// as done.
+    /// Advances the admitted transfers, then [`Self::collect`]s; true when none of either is in
+    /// flight.
     pub(crate) fn complete(&self, contention: Contention) -> bool {
+        self.transfers.poll() & self.collect(contention)
+    }
+
+    /// Collects the launches and DMA the hardware finished, running their epilogues; true when
+    /// none is in flight. A failed device finishes no launch any more, so its launches count as
+    /// done. A transfer waits with this, never [`Self::complete`], so no transfer runs inside
+    /// another.
+    pub(crate) fn collect(&self, contention: Contention) -> bool {
         let launches = self.launches.complete(contention) || self.driver.poison.get().is_some();
-        self.driver.transfers.complete() && launches
+        self.driver.dma.complete() && launches
     }
 
     /// Ends once every launch and transfer admitted before this call ended, epilogues included;
     /// fails with the device's first failure once it failed.
     fn drained(&self) -> impl Future<Output = Result<()>> + Send + use<> {
         let launched = self.launches.launched();
-        let submitted = self.driver.transfers.submitted();
-        let driver = Arc::clone(&self.driver);
+        // Jobs first: a slot a job submits after this is covered by the job's end.
+        let jobs = self.transfers.submitted().into_iter().map(Pending::Job);
+        let slots = (self.driver.dma.submitted()).map(|(index, sequence)| Pending::Slot { index, sequence });
+        let submitted = jobs.chain(slots).collect::<Vec<_>>();
+        let (transfers, driver) = (Arc::clone(&self.transfers), Arc::clone(&self.driver));
         std::future::poll_fn(move |context| {
             if let Some(error) = driver.poison.get() {
                 return Poll::Ready(Err(error.clone()));
             }
-            if launched.ended(context.waker()) && driver.transfers.ended(&submitted, context.waker()) {
+            let ended = |pending: &Pending| match *pending {
+                Pending::Job(sequence) => transfers.ended(sequence, context.waker()),
+                Pending::Slot { index, sequence } => driver.dma.ended(index, sequence, context.waker()),
+            };
+            if launched.ended(context.waker()) && submitted.iter().all(ended) {
                 Poll::Ready(Ok(()))
             } else {
                 Poll::Pending
@@ -257,6 +287,14 @@ impl Work {
     fn stop(&self) {
         self.driver.stop();
     }
+}
+
+/// A transfer admitted before a [`Device::synchronize`], which waits for its end.
+enum Pending {
+    /// A job of [`Transfers`], by admission number.
+    Job(u64),
+    /// A submitted DMA queue slot, by index and generation.
+    Slot { index: usize, sequence: u64 },
 }
 
 /// Where a cluster's host descriptor table may start: `rngd::dma::Operand` stores the table

@@ -1,7 +1,7 @@
 //! One ring of words with two index registers, as the driver lays every queue out.
 //!
 //! - A ring owns the [`Memory`] it lies in, so it cannot outlive it, and checks once that its
-//!   entries and index registers lie inside it.
+//!   entries and index registers lie inside it, each on its alignment.
 //! - One slot stays empty so full and empty differ.
 //! - [`Producer`] and [`Consumer`] each remember their own index and read the other side's register
 //!   only when they must: across PCIe that read is the expensive step.
@@ -11,6 +11,7 @@
 
 use core::cell::Cell;
 use core::mem::offset_of;
+use core::ops::Range;
 use core::task::Poll;
 
 use crate::mmio::{Memory, Register};
@@ -28,25 +29,24 @@ pub struct Ring<M> {
 
 impl<M: Memory> Ring<M> {
     /// The ring whose `capacity` entries start at byte offset `entries` of `memory`, with its
-    /// index registers at `producer` and `consumer`. A ring keeps one slot empty, so it holds two
-    /// entries at least.
+    /// index registers at `producer` and `consumer`, none overlapping another. A ring keeps one
+    /// slot empty, so it holds two entries at least, and its `u32` registers index every entry.
     pub fn new(memory: M, entries: usize, producer: usize, consumer: usize, capacity: usize) -> Result<Self, Error> {
-        let mapped = memory.mapped();
-        let within = |offset: usize, len: usize| {
-            offset >= mapped.start && offset.checked_add(len).is_some_and(|end| end <= mapped.end)
-        };
-        let fits = capacity >= 2
-            && within(entries, capacity * size_of::<u64>())
-            && within(producer, size_of::<u32>())
-            && within(consumer, size_of::<u32>());
-        fits.then_some(Self {
+        if !(2..=u32::MAX as usize + 1).contains(&capacity) {
+            return Err(Error::Capacity);
+        }
+        disjoint(&[
+            holds::<u64>(&memory, entries, capacity)?,
+            holds::<u32>(&memory, producer, 1)?,
+            holds::<u32>(&memory, consumer, 1)?,
+        ])?;
+        Ok(Self {
             memory,
             entries,
             producer,
             consumer,
             capacity,
         })
-        .ok_or(Error::Unmapped)
     }
 
     /// The completion ring a page holds: its producer and consumer indices, then `capacity` entries.
@@ -77,7 +77,7 @@ impl<M: Memory> Ring<M> {
     }
 
     fn register<T: Copy>(&self, offset: usize) -> Register<T> {
-        // SAFETY: `new` checked the offset lies in the memory, which this ring owns.
+        // SAFETY: `new` checked the offset lies aligned in the memory, which this ring owns.
         unsafe { Register::new(self.memory.origin().wrapping_add(offset).cast()) }
     }
 
@@ -124,7 +124,7 @@ impl<M: Memory> Producer<M> {
     }
 
     /// Writes every word and moves the index once; pending, with the ring unchanged, while they
-    /// do not fit.
+    /// do not fit, and [`Error::Words`] for more than an empty ring holds.
     pub fn write_all(&self, words: &[u64]) -> Poll<Result<(), Error>> {
         self.write(words)
             .map(|result| result.map(|index| self.publish(index, words.len())))
@@ -165,8 +165,11 @@ impl<M: Memory> Producer<M> {
     }
 
     /// Whether `words` fit, reading the consumer's register only when the remembered space says
-    /// they do not.
+    /// they do not; more than an empty ring holds would wait forever, so they are refused.
     fn fits(&self, words: usize) -> Result<bool, Error> {
+        if words >= self.ring.capacity {
+            return Err(Error::Words);
+        }
         Ok(words <= self.space.get() || words <= self.space()?)
     }
 
@@ -314,6 +317,18 @@ pub enum Error {
     /// A ring's entries or index registers lie outside the memory that holds it.
     #[error("a ring lies outside its memory")]
     Unmapped,
+    /// A ring's entries or index registers do not lie on their own alignment.
+    #[error("a ring's entries or index registers are misaligned")]
+    Misaligned,
+    /// Two of the registers that rings and doorbells lie in share a byte.
+    #[error("registers overlap")]
+    Overlap,
+    /// A ring holds fewer than two entries, or more than its `u32` index registers count.
+    #[error("a ring's capacity is outside 2..=2^32")]
+    Capacity,
+    /// A doorbell layout has more slots than its status word has bits.
+    #[error("a doorbell layout has more slots than status bits")]
+    Slots,
 }
 
 const COMPLETION_WORDS: usize = 3;
@@ -324,6 +339,37 @@ pub(crate) struct CompletionPage {
     pub(crate) producer: u32,
     pub(crate) consumer: u32,
     pub(crate) entries: [u64; 0],
+}
+
+/// The bytes of `count` registers of `T` from byte `offset`, once `memory` holds them, each on
+/// `T`'s alignment.
+pub(crate) fn holds<T>(memory: &impl Memory, offset: usize, count: usize) -> Result<Range<usize>, Error> {
+    let mapped = memory.mapped();
+    let bytes = span(offset, count, size_of::<T>())?;
+    if !(mapped.start <= bytes.start && bytes.end <= mapped.end) {
+        return Err(Error::Unmapped);
+    }
+    if !memory.origin().wrapping_add(offset).cast::<T>().is_aligned() {
+        return Err(Error::Misaligned);
+    }
+    Ok(bytes)
+}
+
+/// The bytes of `count` items of `width` bytes from byte `offset`; an end past `usize` reaches
+/// past any memory.
+pub(crate) fn span(offset: usize, count: usize, width: usize) -> Result<Range<usize>, Error> {
+    let end = count.checked_mul(width).and_then(|len| offset.checked_add(len));
+    end.map(|end| offset..end).ok_or(Error::Unmapped)
+}
+
+/// Refuses `regions` of which two share a byte.
+pub(crate) fn disjoint(regions: &[Range<usize>]) -> Result<(), Error> {
+    let overlap =
+        |(index, a): (usize, &Range<usize>)| regions[index + 1..].iter().any(|b| a.start < b.end && b.start < a.end);
+    if regions.iter().enumerate().any(overlap) {
+        return Err(Error::Overlap);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -386,6 +432,8 @@ mod tests {
         assert_eq!(writer.write_all(&[7, 8, 9]), Poll::Ready(Ok(())));
         assert_eq!(writer.write_all(&[10]), Poll::Pending);
         assert_eq!(reader.available(), Ok(3));
+        // More words than an empty ring holds can never fit, so they are refused, not awaited.
+        assert_eq!(writer.write_all(&[0; 4]), Poll::Ready(Err(Error::Words)));
         let mut words = [0; 2];
         reader.copy(1, &mut words).unwrap();
         assert_eq!(words, [8, 9]);
@@ -436,6 +484,50 @@ mod tests {
         let page = Page::new(0, 0);
         assert_eq!(Ring::completion(View(&page), 5).err(), Some(Error::Unmapped));
         assert_eq!(Ring::new(View(&page), 8, 40, 4, 4).err(), Some(Error::Unmapped));
-        assert_eq!(Ring::completion(View(&page), 1).err(), Some(Error::Unmapped));
+        // Entries whose end overflows `usize` reach past any memory.
+        assert_eq!(
+            Ring::new(View(&page), usize::MAX - 7, 0, 4, 2).err(),
+            Some(Error::Unmapped)
+        );
+    }
+
+    /// A ring whose entries and index registers share a byte, or whose capacity its `u32` index
+    /// registers cannot count, is refused.
+    #[test]
+    fn refuses_overlapping_or_unindexable_rings() {
+        let page = Page::new(0, 0);
+        assert_eq!(Ring::new(View(&page), 0, 0, 4, 2).err(), Some(Error::Overlap));
+        assert_eq!(Ring::new(View(&page), 8, 0, 0, 2).err(), Some(Error::Overlap));
+        assert_eq!(Ring::completion(View(&page), 1).err(), Some(Error::Capacity));
+        assert_eq!(
+            Ring::new(View(&page), 8, 0, 4, u32::MAX as usize + 2).err(),
+            Some(Error::Capacity)
+        );
+    }
+
+    /// The page from its second byte on, so an offset's alignment differs from its address's.
+    struct Shifted<'a>(&'a Page);
+
+    // SAFETY: the page lives for `'a`, and every offset maps one of its bytes.
+    unsafe impl Memory for Shifted<'_> {
+        fn origin(&self) -> *mut u8 {
+            self.0.0.get().cast::<u8>().wrapping_add(1)
+        }
+
+        fn mapped(&self) -> core::ops::Range<usize> {
+            0..size_of::<[u64; 5]>() - 1
+        }
+    }
+
+    /// A ring whose entries or index registers do not lie on their alignment in memory is refused.
+    #[test]
+    fn refuses_misaligned_rings() {
+        let page = Page::new(0, 0);
+        assert_eq!(Ring::new(View(&page), 9, 0, 4, 2).err(), Some(Error::Misaligned));
+        assert_eq!(Ring::new(View(&page), 8, 2, 4, 2).err(), Some(Error::Misaligned));
+        assert_eq!(Ring::new(View(&page), 8, 0, 6, 2).err(), Some(Error::Misaligned));
+        // Alignment is the address's: offset 7 of the shifted page is its eighth byte.
+        assert!(Ring::new(Shifted(&page), 7, 23, 27, 2).is_ok());
+        assert_eq!(Ring::new(Shifted(&page), 8, 23, 27, 2).err(), Some(Error::Misaligned));
     }
 }

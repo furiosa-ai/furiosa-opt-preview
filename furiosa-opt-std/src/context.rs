@@ -66,15 +66,24 @@ impl<const DMA: Dma, B: Runtime> DmaContext<DMA, B> {
 impl<const DMA: Dma, B: Backend> DmaContext<DMA, B> {
     pub(crate) fn load<D: Scalar>(&self, memory: HbmBufferSlice<'_, B>) -> B::Storage<D> {
         let mut host = HostBuffer::from_vec(vec![0; memory.region.host_len()]);
-        futures_executor::block_on(B::read(&self.device, memory, (&mut host).into()))
+        now(B::read(&self.device, vec![(memory, (&mut host).into())]))
             .expect("device-body DMA reads admitted memory into an equally sized host buffer");
         host.into()
     }
 
     pub(crate) fn store<D: Scalar>(&self, memory: HbmBufferSliceMut<'_, B>, value: &B::Storage<D>) {
         let host: HostBuffer = value.clone().into();
-        futures_executor::block_on(B::write(&self.device, vec![((&host).into(), memory)]))
+        now(B::write(&self.device, vec![((&host).into(), memory)]))
             .expect("device-body DMA writes an equally sized value into admitted memory");
+    }
+}
+
+/// The output of a device-body transfer, which finishes on its first poll: only the CPU backend
+/// runs a device body, and its transfers wait for nothing. Entering no executor, it runs under any.
+fn now<T>(transfer: impl Future<Output = T>) -> T {
+    match std::pin::pin!(transfer).poll(&mut std::task::Context::from_waker(std::task::Waker::noop())) {
+        std::task::Poll::Ready(output) => output,
+        std::task::Poll::Pending => unreachable!("a device-body transfer finishes on its first poll"),
     }
 }
 

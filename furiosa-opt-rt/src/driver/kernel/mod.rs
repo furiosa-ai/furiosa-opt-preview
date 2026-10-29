@@ -17,7 +17,9 @@ pub(crate) const PE_WINDOW: u64 = 512 << 20;
 pub(crate) const BAR2_LEN: usize = (DOORBELL + 0x1000) as usize - DOORBELLS.entries;
 pub(crate) const CQ_REGION: i64 = 1 << 16;
 pub(crate) const CQ_LEN: usize = 4096;
-/// DRAM's offset in BAR4.
+/// DRAM's offset in BAR4: the SoC shared region a PF build of the kernel driver skips
+/// (`NPU_DRAM_BASE` in its `npu_address_map.h`). A VF build skips nothing, which this runtime does
+/// not support.
 pub(crate) const BAR4_DRAM: u64 = 256 << 20;
 
 pub(crate) const WINDOW_DRAM: u8 = 0;

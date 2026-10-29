@@ -1,19 +1,19 @@
 [package]
 name = "furiosa-opt-abi"
-version = "0.9.0+g6433dbcf"
+version = "0.9.0+g54a495ba"
 edition = "2024"
 license = "Apache-2.0"
 description = "ABI contracts shared by the Furiosa Opt host and device runtimes."
+publish = { workspace = true }
 
 [features]
 default = ["alloc"]
 alloc = []
+# With `alloc`, also the compiler image format.
 bincode = ["dep:bincode2"]
-serde = ["dep:serde"]
 
 [dependencies]
 bincode2 = { workspace = true, optional = true }
-serde = { version = "1.0.175", default-features = false, features = ["derive"], optional = true }
 thiserror-core = { workspace = true }
 zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
 

@@ -3,11 +3,11 @@
 use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, Mutex};
 
-mod access;
+pub(crate) mod access;
 mod allocator;
-pub use access::Lease;
-pub(crate) use access::{Owner, Waiters};
-pub use allocator::Allocations;
+pub(crate) use access::{Active, Admission, Owner, Region, Waiters};
+pub use access::{Blocks, Hold, Lease};
+pub use allocator::Allocator;
 pub(crate) use allocator::{Ranges, Reservation};
 
 use crate::memory::Kind;
@@ -69,8 +69,8 @@ impl Buffer {
 
     /// Whether `allocations` placed this buffer; a device refuses any other as
     /// [`Error::ForeignBuffer`].
-    pub fn belongs_to(&self, allocations: &Arc<Allocations>) -> bool {
-        Arc::ptr_eq(&self.allocation.allocations, allocations)
+    pub fn belongs_to(&self, allocator: &Arc<Allocator>) -> bool {
+        Arc::ptr_eq(&self.allocation.allocator, allocator)
     }
 
     /// The memory kind the buffer was allocated from.
@@ -80,7 +80,7 @@ impl Buffer {
 
     /// The chips the buffer spans, one range on each.
     pub fn topology(&self) -> Topology {
-        self.allocation.allocations.topology()
+        self.allocation.allocator.topology()
     }
 
     /// Bytes the buffer owns on each chip.
@@ -97,7 +97,7 @@ impl Buffer {
     pub fn addr(&self) -> usize {
         let base = match self.kind() {
             Kind::Dram | Kind::DramShared => 0,
-            Kind::Sram => self.allocation.allocations.sram_base(),
+            Kind::Sram => self.allocation.allocator.sram_base(),
         };
         base + self.allocation.at + self.offset
     }
@@ -265,13 +265,13 @@ struct Allocation {
     /// address.
     generation: u64,
     kind: Kind,
-    allocations: Arc<Allocations>,
+    allocator: Arc<Allocator>,
     active: Mutex<access::Active>,
 }
 
 impl Drop for Allocation {
     fn drop(&mut self) {
-        self.allocations.release(self.kind, self.at);
+        self.allocator.release(self.kind, self.at);
     }
 }
 
@@ -283,8 +283,8 @@ mod tests {
     #[test]
     fn slices_stay_inside_their_buffer() {
         let outside = Some(Error::Invalid("buffer range is outside its owner".into()));
-        let allocations = crate::test::allocations(0..1024, 1024);
-        let buffer = allocations.alloc(Kind::Dram, 256).unwrap();
+        let allocator = crate::test::allocator(0..1024, 1024);
+        let buffer = allocator.alloc(Kind::Dram, 256).unwrap();
         assert_eq!(buffer.slice(0..257).err(), outside);
         assert_eq!(buffer.slice((Bound::Included(1), Bound::Excluded(0))).err(), outside);
         assert_eq!(buffer.slice(..=usize::MAX).err(), outside);

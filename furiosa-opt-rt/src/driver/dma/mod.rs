@@ -8,7 +8,7 @@ mod transport;
 mod uring;
 use command::Channel;
 pub(crate) use command::{Command, Direction, Host};
-pub(crate) use engine::Copy;
+pub(crate) use engine::{Copy, stopped};
 #[cfg(test)]
 pub(crate) use queue::fixture;
 pub(crate) use queue::{DmaQueue, Route};

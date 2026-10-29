@@ -56,15 +56,18 @@ impl Engine for Transport {
                 ring.submit(entries.iter().map(|(tag, entry)| (*tag, entry)))
             }
             #[cfg(test)]
-            Self::Fake(fake) => Ok(fake.submit(commands.map(|(tag, _)| tag))),
+            Self::Fake(fake) => fake.submit(commands.map(|(tag, _)| tag)),
         }
     }
 
-    fn complete(&mut self, done: impl FnMut(u64, Result<()>)) {
+    fn complete(&mut self, done: impl FnMut(u64, Result<()>)) -> Result<()> {
         match self {
             Self::Driver { ring, .. } => ring.complete(done),
             #[cfg(test)]
-            Self::Fake(fake) => fake.complete(done),
+            Self::Fake(fake) => {
+                fake.complete(done);
+                Ok(())
+            }
         }
     }
 }
@@ -98,17 +101,29 @@ pub(crate) mod fake {
     struct State {
         pending: BTreeSet<u64>,
         answers: VecDeque<(u64, io::Result<i32>)>,
+        failure: Option<Error>,
     }
 
     impl Fake {
-        pub(super) fn submit(&mut self, tags: impl Iterator<Item = u64>) -> usize {
+        pub(super) fn submit(&mut self, tags: impl Iterator<Item = u64>) -> Result<usize> {
             let mut state = self.0.lock().unwrap();
+            if let Some(error) = state.failure.take() {
+                return Err(error);
+            }
             let mut count = 0;
             for tag in tags {
                 assert!(state.pending.insert(tag), "a DMA command is published once");
                 count += 1;
             }
-            count
+            Ok(count)
+        }
+
+        pub(crate) fn fail(&self, error: Error) {
+            self.0.lock().unwrap().failure = Some(error);
+        }
+
+        pub(crate) fn pending(&self) -> Vec<u64> {
+            self.0.lock().unwrap().pending.iter().copied().collect()
         }
 
         pub(crate) fn respond(&self, tag: u64, result: io::Result<i32>) {

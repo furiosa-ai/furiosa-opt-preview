@@ -16,8 +16,9 @@ use crate::runtime::{
 
 mod buffer;
 use buffer::{Buffer, Bytes};
+use furiosa_opt_abi::arch::rngd::{MAX_CHIPS, PES};
 use furiosa_opt_rt::Lease;
-use furiosa_opt_rt::memory::{Allocations, Kind};
+use furiosa_opt_rt::memory::{Allocator, Kind};
 use std::sync::Arc;
 
 /// Host backend: interprets device functions on the host, over host memory that stands in for
@@ -30,7 +31,7 @@ pub struct Cpu;
 pub struct Host {
     topology: Topology,
     placement: Placement,
-    allocations: Arc<Allocations>,
+    allocator: Arc<Allocator>,
 }
 
 impl Runtime for Cpu {
@@ -42,7 +43,7 @@ impl Runtime for Cpu {
     type Buffer = Buffer;
 
     /// The host's memory is placed by a device's allocators, over fixed upper bounds of the ranges
-    /// a device learns when it boots: see [`Allocations::new`].
+    /// a device learns when it boots: see [`Allocator::new`].
     fn open(placements: Vec<Placement>) -> Result<Host, Error> {
         let placement = placements
             .into_iter()
@@ -52,10 +53,13 @@ impl Runtime for Cpu {
             chips: u8::try_from(placement.chips.len()).map_err(|_| Error::Invalid("too many placement chips"))?,
             pes: u8::try_from(placement.pes.len()).map_err(|_| Error::Invalid("too many placement PEs"))?,
         };
+        if !(1..=MAX_CHIPS).contains(&topology.chips) || !(1..=PES).contains(&topology.pes) {
+            return Err(Error::Invalid("a device must span 1 to 8 chips of 1 to 8 PEs each"));
+        }
         Ok(Host {
             topology,
             placement,
-            allocations: Arc::new(Allocations::new(topology)),
+            allocator: Arc::new(Allocator::new(topology)),
         })
     }
 
@@ -68,34 +72,43 @@ impl Runtime for Cpu {
     }
 
     fn capacity(device: &Host) -> usize {
-        device.allocations.capacity(Kind::Dram)
+        device.allocator.capacity(Kind::Dram)
     }
 
     fn usage(device: &Host) -> Usage {
-        device.allocations.usage(Kind::Dram)
+        device.allocator.usage(Kind::Dram)
     }
 
     fn alloc(device: &Host, kind: Kind, bytes: usize) -> Result<Buffer, Error> {
-        Ok(Buffer::alloc(&device.allocations, kind, bytes)?)
+        Ok(Buffer::alloc(&device.allocator, kind, bytes)?)
     }
 
-    async fn write<'a>(
+    fn write<'a>(
         device: &Host,
         pairs: Vec<(HostBufferSlice<'a>, HbmBufferSliceMut<'a, Self>)>,
-    ) -> Result<(), Error> {
-        for (_, to) in &pairs {
-            to.buffer.check_device(&device.allocations)?;
-        }
-        for (host, to) in pairs {
-            to.buffer.store(&to.region, &host.0.bytes().to_vec().into());
-        }
-        Ok(())
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<> {
+        let checked = pairs
+            .iter()
+            .try_for_each(|(_, to)| to.buffer.check_device(&device.allocator));
+        std::future::ready(checked.map(|()| {
+            for (host, to) in pairs {
+                to.buffer.store(&to.region, &host.0.bytes().to_vec().into());
+            }
+        }))
     }
 
-    async fn read(device: &Host, from: HbmBufferSlice<'_, Self>, host: HostBufferSliceMut<'_>) -> Result<(), Error> {
-        from.buffer.check_device(&device.allocations)?;
-        host.0.into_bytes().copy_from_slice(&from.buffer.load(&from.region));
-        Ok(())
+    fn read<'a>(
+        device: &Host,
+        pairs: Vec<(HbmBufferSlice<'a, Self>, HostBufferSliceMut<'a>)>,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<> {
+        let checked = pairs
+            .iter()
+            .try_for_each(|(from, _)| from.buffer.check_device(&device.allocator));
+        std::future::ready(checked.map(|()| {
+            for (from, host) in pairs {
+                host.0.into_bytes().copy_from_slice(&from.buffer.load(&from.region));
+            }
+        }))
     }
 
     /// A host launch finishes before it returns, and so does a host transfer.
@@ -104,7 +117,7 @@ impl Runtime for Cpu {
     }
 
     /// The host backend runs the function's Rust body and loads nothing.
-    fn load(_: &Host, _: &'static str, _: furiosa_opt_rt::registry::Key<'_>) -> Result<(), Error> {
+    fn load(_: &Host, _: &'static str, _: furiosa_opt_rt::registry::Key<'static>) -> Result<(), Error> {
         Ok(())
     }
 
@@ -121,7 +134,7 @@ impl Runtime for Cpu {
         Submitted::launched((|| {
             args.prepare(device.pdma.device())?;
             output.prepare(device.pdma.device())?;
-            let allocations = &device.pdma.device().allocations;
+            let allocator = &device.pdma.device().allocator;
             let mut uses = Vec::new();
             launch_memory(&args, output, &mut |slice, access| {
                 uses.push((slice.buffer, slice.region, access));
@@ -131,7 +144,7 @@ impl Runtime for Cpu {
                 Ok(())
             })?;
             for (memory, _, _) in &uses {
-                memory.check_device(allocations)?;
+                memory.check_device(allocator)?;
             }
             let _held = Lease::acquire(
                 uses.iter()
@@ -199,7 +212,7 @@ impl internal::Backend for Cpu {
             });
         }
         let bytes = D::size_in_bytes_from_length(Element::SIZE);
-        let buffer = Buffer::alloc(&group.allocations, Kind::Sram, bytes)?;
+        let buffer = Buffer::alloc(&group.allocator, Kind::Sram, bytes)?;
         let mut tensor = DmTensor::from_parts(Tensor::zeroed());
         tensor.own(buffer);
         Ok(tensor)

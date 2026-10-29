@@ -59,6 +59,9 @@ How entries are written:
   and its first chunk can be prefetched while the current launch runs.
 - A function's profile is fixed when it first loads on a device: set `FURIOSA_OPT_PROFILE` and
   install the `span::npu` subscriber before its first launch.
+- A launch may run until one second before the kernel driver's IPC deadline (`pe_ipc_timeout_ms`,
+  60 s by default) instead of 5 s; past it, it fails with `Status::TimedOut`. Raise the driver's
+  deadline to allow longer launches.
 - A submitted launch runs to completion even when its Future is dropped or forgotten, and its
   memory stays in use until the device finishes. Why: the runtime, not the Future, owns the work.
   Compiled launches reuse chip-local memory in submission order; multi-chip peer memory and
@@ -103,6 +106,24 @@ How entries are written:
 - A kernel whose PCIe DMA copy is first read after a runtime guard or loop compiles; it stopped with
   an internal compiler error (`called Option::unwrap() on a None value`).
 - `HbmTensor::size()` is a `const fn`, so a constant can hold the byte size of an HBM tensor type.
+- A host transfer through the kernel driver moves its pieces between one chip and one host
+  allocation, or pageable memory, as one request of up to 4 GiB, so a fragmented copy takes a
+  request per chip and allocation instead of one per fragment.
+- A host transfer's wait for earlier work no longer compares the transfer's fragments with each
+  other: F fragments in an allocation where other work holds M regions cost O(F·M + F log F)
+  instead of O(F² + F·M).
+- `furiosa-opt-rt`'s `Function::launch_holding` takes `&[Hold]`, and `Lease::acquire` takes holds.
+  Migrate: a `(BufferSlice, Access)` pair converts with `.into()` into a hold of every byte.
+- A launch on bytes that a host transfer submitted before it moves waits for that transfer instead
+  of failing with `DeviceError::Busy`, and a transfer submitted after the launch waits for it in
+  turn. A launch still fails with `Busy` on bytes another launch or a lease holds, and when two of
+  its own arguments conflict.
+- A submitted host transfer borrows neither its DMA context nor the host bytes it copies from:
+  `.submit()` hands pinned bytes to the runtime, which keeps them leased until the copy ends, and
+  copies other bytes before it returns. Launches and other transfers may follow at once; a typed
+  read relaid out into an existing host tensor keeps only that tensor borrowed until it ends.
+  `furiosa-opt-rt`'s `Device::write` and `read` submit when called, not at their first poll, and
+  return a `Transfer` that owns what the copy still needs.
 
 ### Added
 
@@ -131,6 +152,14 @@ How entries are written:
 - `Device` implements `AsMut<DmaContext<{ Dma::Tensor }>>` and `AsMut<DmaContext<{ Dma::Pcie }>>`,
   so an operation generic over `const DMA: Dma` bounds `Device: AsMut<DmaContext<DMA>>` and
   transfers on `device.as_mut()`, in device code as on the host.
+- `device.pdma.to_host(pairs)` copies a batch of HBM slices into host bytes in one runtime read, on
+  the terms of `to_hbm(pairs)`; `HostBufferSliceMut::split_at` divides one host buffer among its
+  pairs.
+- `furiosa-opt-rt`'s `Hold::blocks(view, access, &blocks)` holds only some equal blocks of a view,
+  which `Blocks::new(size, count, runs)` names by runs; `Blocks::difference` removes one set from
+  another. A lease, or a launch through `launch_holding`, then excludes only the work that reaches
+  those blocks, by each one's access, so a transfer into another block of the allocation neither
+  waits for it nor is refused. Two holds of blocks of one size on one grid compare 64 blocks a word.
 
 ### Fixed
 
@@ -385,7 +414,6 @@ How entries are written:
   crate; `runtime::Kind` names the memory an `OutOfMemory` ran out of.
 - `Error::Invalid` reports a request the memory cannot take: a range or chips outside a buffer, a
   host length that does not match its slice, or a buffer a tensor type does not fit.
-- `Topology` and `runtime::Kind` implement serde's `Serialize` and `Deserialize`.
 
 ### Removed
 

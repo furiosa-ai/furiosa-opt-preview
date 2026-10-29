@@ -22,6 +22,9 @@ impl Profile {
     /// Chunks one reply carries the hits of.
     pub const CHUNKS: u32 = 256;
 
+    /// A profile at `level` keeping `depth` hits per chunk, or `None` outside the ranges the
+    /// firmware knows. A valid profile can still exceed one reply for a given executable; check
+    /// [`Self::fits`] with its chunk count, or the firmware refuses the launch with `BadArgs`.
     pub fn new(level: u8, depth: u32) -> Option<Self> {
         ((3..=5).contains(&level) && (1..=Self::QUEUE).contains(&depth)).then_some(Self { level, depth })
     }

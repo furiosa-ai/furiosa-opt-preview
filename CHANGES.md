@@ -6,95 +6,98 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [v0.10.0]
+
 ### Changed
 
-- `PaddingKind::Bottom` (`#{!}`) padding is readable, holding arbitrary values; only writes are forbidden.
 - `Device::new` takes a `Topology`, which opens the first free placement of that shape, or a
-  `Placement`, which opens exactly there; `device.placement()` tells where it opened.
-- `cargo furiosa-opt` writes a new compiler image format. Recompile programs with this SDK.
-- Linking a binary no longer compiles code for its kernels: the binary carries each kernel's
-  image as data, and `furiosa-opt-rt`'s `registry` loads it.
-- Switching kernels avoids the code copy at launch when the next launch is already submitted
-  and its first chunk can be prefetched while the current launch runs.
-- A function's profile is fixed when it first loads on a device: set `FURIOSA_OPT_PROFILE` and
-  install the `span::npu` subscriber before its first launch.
-- A kernel's PCIe DMA copy that waits for a free DMA channel starts as soon as one frees, while
-  the kernel keeps running; it started only when the kernel next waited for a copy, usually at its
-  first reader.
-- A launch may run until one second before the kernel driver's IPC deadline (`pe_ipc_timeout_ms`,
-  60 s by default) instead of 5 s; past it, it fails with `Status::TimedOut`. Raise the driver's
-  deadline to allow longer launches.
-- A submitted launch runs to completion even when its Future is dropped or forgotten, and its
-  memory stays in use until the device finishes. Why: the runtime, not the Future, owns the work.
-  Compiled launches reuse chip-local memory in submission order; multi-chip peer memory and
-  generic tasks stay exclusive. A host transfer waits for the launches and transfers submitted
-  before it on its bytes.
-  Exhausted launch identities fail with `Error::Device(DeviceError::Capacity)` rather than wrapping.
-- A hand-written `DeviceSend` implements `arguments(&self, access)` instead of `bind`, yielding
-  `(HbmBufferSlice, Access)` pairs in declaration order. `#[derive(DeviceSend)]` needs no change.
-- `Device::memory()` returns `Memory` on both backends: `capacity()` is the DRAM bytes per chip it
-  can allocate and `usage()` a snapshot of what is free. Migrate: use `memory().usage().available`.
-  CPU memory is placed by the NPU runtime's allocator, so addresses, alignment, fragmentation
-  (`usage().largest`), `OutOfMemory` and the chip-local / shared split match a device's. It starts
-  from fixed upper bounds of the ranges a device of the topology learns when it boots.
-- CPU HBM tensors and views share their buffer's bytes instead of copying them. Launch writes
-  reach every alias; conflicts and foreign buffers fail as they do on the NPU.
-- `HbmTensor::new()` is for device functions. Allocate host-side tensors with `HbmTensor::alloc(&device)`.
-- `HbmBuffer::alloc` and `HbmTensor::alloc` place chip-local DRAM, all of each chip, and `memory()`
-  counts all of it. Why: a chip sees its peers' DRAM through (16 - chips) / chips windows of 4 GiB,
-  28 GiB of each chip at two chips, and every allocation used to sit in that window. A function
-  writing a caller's buffer from another chip declares that argument peer-written, and binding
-  chip-local memory there is refused. Migrate: allocate such a buffer with `HbmBuffer::alloc_shared`;
-  a launch's own returns are already shared. Chip-local DRAM fills upward from the window's end, as
-  shared DRAM fills the window, so buffers allocated back to back stay in ascending order.
+  `Placement`, which opens exactly there; `device.placement()` and `device.topology()` tell what it
+  opened. On the CPU it refuses a topology outside 1 to 8 chips of 1 to 8 PEs.
+- `Kernel<F>` becomes `Kernel<F, Args>`: a kernel launches only with the arguments it was loaded
+  for, and other arguments are a compile error.
+- A hand-written `DeviceSend` implements `arguments(&self, access, bind)` instead of
+  `bind(&self, buffers)`, handing each `(HbmBufferSlice, Access)` to `bind` in declaration order.
+  `#[derive(DeviceSend)]` needs no change.
+- `HbmTensor::new()` is for device functions; allocate host-side tensors with
+  `HbmTensor::alloc(&device)`.
+- `HbmBuffer::alloc` and `HbmTensor::alloc` place chip-local DRAM. A buffer another chip writes
+  must come from `HbmBuffer::alloc_shared`; binding chip-local memory to a peer-written argument is
+  refused.
+- `Device::memory()` returns `Memory` on both backends, with `capacity()` and `usage()`. Migrate:
+  use `memory().usage().available`.
 - Replace `scalar.write(value, dma)` with `HbmScalar::from_host(value, dma).output(&mut scalar)`.
-- The prelude exports runtime API items rather than every runtime and backend item.
-  Import plumbing types explicitly from `furiosa_opt_std::runtime` or `furiosa_opt_std::backend`.
-- `Kernel<F>` becomes `Kernel<F, Args>`: a kernel launches only with the arguments `Args` it was
-  loaded for, and another instantiation's arguments are a compile error, not an `Error::Invalid`
-  launch. Instantiations whose axes differ in type but not in size are separate kernels: load each.
-- `chip_tile` on an HBM view returns `HbmTensorView<.., SomeChips>` (or the `Mut` form): device DMA
-  takes it, and a launch refuses it at compile time, since a launch binds every chip of an argument.
+- The prelude exports the runtime API only; import plumbing types from `furiosa_opt_std::runtime`
+  or `furiosa_opt_std::backend`.
+- `chip_tile` on an HBM view returns `HbmTensorView<.., SomeChips>`: device DMA takes it, a launch
+  refuses it at compile time.
+- A main-context `to_trf` takes the sub context: write `.to_trf(&mut device.sub)`, as `to_vrf` does.
+- The Tensor Unit's contraction stages and `commit_cast` / `commit_cast_relu` exist on the main
+  context only, and `commit_valid_count_pack` on the sub context only; a call from the other
+  context is a compile error.
+- A `for` loop that reassigns a scalar declared before it is refused with `cannot carry a scalar
+  across iterations`; carry the value in a tensor.
+- `PaddingKind::Bottom` (`#{!}`) padding is readable, holding arbitrary values.
+- A submitted launch runs to completion even when its Future is dropped, and its memory stays in
+  use until the device finishes.
+- A device task that panics makes the code awaiting its launch panic with the task's message, as
+  on the CPU.
+- A launch may run until one second before the kernel driver's deadline (`pe_ipc_timeout_ms`, 60 s
+  by default) instead of 5 s; past it, it fails with `Error::Device`.
+- Device code that moves host or peer memory needs a kernel driver that reserves PDMA channels
+  (`NPU_PDMA_CAPS_RESERVE`); without one such a launch fails with `DeviceError::Unsupported`.
+- `DeviceError` names what failed (`Busy`, `Capacity`, `Invalid`, `Unsupported`, `Panicked`,
+  `OutOfMemory`, `SramOverlap`, ...) instead of the stage that failed.
+- A function's profile is fixed when it first loads: set `FURIOSA_OPT_PROFILE` and install the
+  `span::npu` subscriber before its first launch.
+- `cargo furiosa-opt` writes a new image format; recompile programs with this release.
 
 ### Added
 
-- `HbmBuffer::alloc(&device, bytes)` allocates untyped memory on both backends.
-  `to_hbm` / `to_host` transfer it, with `.output` for existing destinations.
-  `HbmTensor::try_from(buffer)` and `into_buffer` convert without copying.
-  Divide ownership with `split_at` or share it with `alias`. Compiled launches reuse chip-local
-  memory in submission order and transfers wait for earlier device work on their bytes;
-  multi-chip peer memory fails with `DeviceError::Busy`.
-- `buffer.slice(chips, bytes)` / `slice_mut` select chips and a byte range.
-  Host transfer bytes are ordered by chip rank; typed views use `HbmTensorView::try_from`.
-- `HostBuffer` holds transfer bytes and is page-locked where supported (`is_pinned()`).
-  Pinned transfers overlap host work; pageable transfers complete before `.submit()` returns.
-  `HostTensor::try_from(host_buffer)` and `into_buffer` convert without copying.
-- Launches and transfers are `Prepared` until `.await` or `.submit()`; `.submit()` starts the
-  work immediately and returns `Submitted`, a Future to await later.
-  `Submitted::accepted()` returns a launch's refusal at submission.
-- `HbmBuffer::ready()` and `HbmTensor::ready()` resolve once the device work submitted before them
-  that writes their bytes ended, and `Device::synchronize()` once every earlier launch and transfer
-  did, without copying.
-- `device.pdma.to_hbm(pairs)` copies a batch into existing HBM slices in one runtime write.
-  A length mismatch or foreign buffer refuses the whole batch before copying.
-- `function.load(&device)?` returns a `Kernel` that launches without repeating registry lookup.
-  Generic functions select their instantiation with `Loadable::<Args>::load`.
-- `runtime::DeviceError` exposes runtime failures through `Error::Device`.
+- `HbmBuffer::alloc(&device, bytes)` allocates untyped memory, which `to_hbm` / `to_host`
+  transfer; `HbmTensor::try_from(buffer)` and `into_buffer` convert without copying, `split_at`
+  divides it and `alias` shares it. `buffer.slice(chips, bytes)` / `slice_mut` select chips and a
+  byte range.
+- `HostBuffer` holds transfer bytes, page-locked where supported (`is_pinned()`), and converts to
+  and from `HostTensor` without copying.
+- Launches and transfers are `Prepared` until `.await` or `.submit()`, which starts the work and
+  returns a `Submitted` Future.
+- `HbmBuffer::ready()`, `HbmTensor::ready()` and `Device::synchronize()` wait for earlier device
+  work without copying.
+- `device.pdma.to_hbm(pairs)` copies a batch into existing HBM slices in one write.
+- `function.load(&device)?` returns a `Kernel` that launches without repeating the lookup; a
+  generic function selects its instantiation with `Loadable::<Args>::load`.
+- `runtime::DeviceError` and `Error::Invalid` report runtime failures and requests outside a
+  buffer or tensor.
+- Device functions call closures, and a closure reads what it captures.
+- A runtime `if` yields a scalar, so a run-time value selects an array element:
+  `inputs[if pick == 0 { 0 } else { 1 }]`.
+- An `if` whose condition is known at compile time compiles only the arm it takes.
+- A DMA moves a tile whose width does not divide its axis, such as width 3 of an axis of 8.
+- `Mapping::abstract_limits` and `abstract_limits_upperbound`.
 
 ### Removed
 
 - `DeviceFn::execute` and `execute_into`; use `launch(f, args)` and `.output(&mut out)`.
 - NPU `HbmTensor::into_vec`, `to_vec` and `to_buf`; use `to_host(&mut device.pdma).await?.into_vec()`.
-- `runtime::Buffers`, `TupleApply` and `backend::npu`; bind with `DeviceSend::arguments` and
-  launch with `launch` or a loaded `Kernel`.
-- `Error::Chips` and `Error::Poisoned`; match `Error::Device` and its `DeviceError` instead.
+- `runtime::Buffers`, `TupleApply` and `backend::npu`.
+- `Error::Chips` and `Error::Poisoned`; match `Error::Device`.
+- `Address` (write `u64`) and `DpeTensor`.
 - The `furiosa-opt-rt` command-line runner.
 
 ### Fixed
 
-- NPU tensor transfers rearrange bytes on the host when host and HBM layouts differ.
-- A launch of many short Tensor Unit operations no longer runs past its time limit while one
-  cluster waits for the other; profiling at `info` or `debug` made this likely.
+- NPU tensor transfers between differing host and HBM layouts.
+- A launch of many short Tensor Unit operations, or many cluster syncs in a row, no longer times
+  out or hangs.
+- Host transfers of 4 GiB or more, and many transfers in flight at once, complete.
+- On the CPU, a `tile` whose window runs past its axis panics, and a tile of a reshaped view
+  selects cells by the new axes.
+- Instantiations of a generic function whose axes have equal sizes but differ in type no longer
+  share one kernel.
+- Kernels that the compiler wrongly refused now compile: a scalar `!=`, `to_vrf` straight after
+  `collect`, a sub-context fetch with Vector Engine arithmetic, a `to_dm_view` into a resident
+  `DmTensor`, 4-bit transposes of up to 16 rows, and full-width `i4` contractions.
+- A gather's `to_dm` with an unaligned tail is refused, as a direct `to_dm` is.
 
 ## [v0.9.0]
 

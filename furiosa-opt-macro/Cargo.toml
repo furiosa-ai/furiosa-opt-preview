@@ -1,9 +1,9 @@
 [package]
 name = "furiosa-opt-macro"
-version = "0.9.0+g23b9e1ba"
+version = "0.10.0+g277a0d78"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/furiosa-ai/furiosa-opt"
+repository = "https://github.com/furiosa-ai/furiosa-opt-preview"
 description = "Procedural macros for the Furiosa NPU optimizer toolchain."
 
 [lib]

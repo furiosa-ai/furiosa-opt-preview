@@ -130,6 +130,10 @@ How entries are written:
 - `HbmTensor::to_host(..).output(host)` takes a `HostTensorViewMut`, which `&mut HostTensor`
   converts into. A read relaid out into a host tensor now writes the tensor's own memory instead of
   replacing it, so a pinned tensor stays pinned.
+- A tensor DMA between two data-memory tensors whose slices are padded alike, such as a
+  `chip_shuffle` or `cluster_swap` redistribution or a `to_dm_view` copy, moves only the live
+  slices: the PE where the live slices end moves its live part, and a PE holding only padding
+  issues nothing. It moved the whole padded extent, so 160 live slices of 256 cost as much as 256.
 
 ### Added
 

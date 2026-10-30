@@ -1,0 +1,15 @@
+[package]
+name = "furiosa-opt-macro"
+version = "0.9.0+g9deb6a50"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/furiosa-ai/furiosa-opt-preview"
+description = "Procedural macros for the Furiosa NPU optimizer toolchain."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["visit-mut"] }

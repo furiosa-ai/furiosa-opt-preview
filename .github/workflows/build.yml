@@ -1,0 +1,64 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  CARGO_INCREMENTAL: 0
+  FURIOSA_OPT_GITHUB_REPO: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-05-01
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Download Released Libraries
+        id: download
+        uses: ./.github/actions/download-released-libraries
+
+      - name: Set Prebuilt Library Paths
+        shell: bash
+        run: |
+          TARGET=x86_64-unknown-linux-gnu
+          VERSION=${{ steps.download.outputs.version }}
+          PREBUILT_DIR=${{ steps.download.outputs.prebuilt_dir }}
+          echo "FURIOSA_MAPPING_IMPL_LOCAL_PREBUILT=${PREBUILT_DIR}/libfuriosa_mapping_impl-${VERSION}-${TARGET}.a" >> $GITHUB_ENV
+          echo "FURIOSA_OPT_LOWER_IMPL_LOCAL_PREBUILT=${PREBUILT_DIR}/libfuriosa_opt_lower_impl-${VERSION}-${TARGET}.a" >> $GITHUB_ENV
+
+      - name: Check
+        run: make check
+
+      - name: Fmt
+        run: make fmt
+
+      - name: Clippy
+        run: make clippy
+
+      - name: Check Unused Dependencies
+        run: |
+          cargo install cargo-machete
+          cargo machete
+
+      - name: Test
+        run: make test

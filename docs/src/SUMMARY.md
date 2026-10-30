@@ -1,0 +1,57 @@
+# Summary
+
+- [Introduction](./introduction.md)
+- [Quick Start](./quick-start.md)
+  + [Setup and Tooling](./quick-start/setup-and-tooling.md)
+  + [Tensor and Contraction](./quick-start/tensor-and-contraction.md)
+  + [Kernel Design](./quick-start/kernel-design.md)
+  + [Kernel Validation](./quick-start/kernel-validation.md)
+- [Mapping Tensors](./mapping-tensors/index.md)
+  + [Mapping Expressions](./mapping-tensors/mapping-expressions.md)
+  + [Spatial and Temporal Dimensions](./mapping-tensors/spatial-temporal-dimensions.md)
+  + [Tensor Semantics](./mapping-tensors/tensor-semantics.md)
+
+
+- [Moving Tensors](./moving-tensors/index.md)
+  + [Sequencer](./moving-tensors/sequencer.md)
+  + [Fetch Engine](./moving-tensors/fetch-engine.md)
+  + [Commit Engine](./moving-tensors/commit-engine.md)
+  + [Case Study: Tensor Unit I/O](./moving-tensors/tensor-unit-io.md)
+  + [DMA Engine](./moving-tensors/dma-engine.md)
+  + [Memory Performance](./moving-tensors/memory-performance.md)
+- [Computing Tensors](./computing-tensors/index.md)
+  + [Fetch Adapter](./computing-tensors/fetch-adapter.md)
+  + [Switch Engine](./computing-tensors/switch-engine.md)
+  + [Collect Engine](./computing-tensors/collect-engine.md)
+  + [Register Files](./computing-tensors/register-files.md)
+  + [Contraction Engine](./computing-tensors/contraction-engine/index.md)
+    * [Outer](./computing-tensors/contraction-engine/outer.md)
+    * [Packet Reducer](./computing-tensors/contraction-engine/packet-reducer.md)
+    * [Time Reducer](./computing-tensors/contraction-engine/time-reducer.md)
+    * [Lane Folder](./computing-tensors/contraction-engine/lane-folder.md)
+  + [Vector Engine](./computing-tensors/vector-engine/index.md)
+    * [Intra-Slice Chain](./computing-tensors/vector-engine/intra-slice-chain.md)
+      + [Intra-Slice Reduce](./computing-tensors/vector-engine/intra-slice-reduce.md)
+      + [Valid Count Generator](./computing-tensors/vector-engine/vcg.md)
+    * [Inter-Slice Reducer](./computing-tensors/vector-engine/inter-slice-reducer.md)
+  + [Cast Engine](./computing-tensors/cast-engine.md)
+  + [Transpose Engine](./computing-tensors/transpose-engine.md)
+  + [Commit Adapter](./computing-tensors/commit-adapter.md)
+
+
+  + [Case Study: Chip/Cluster Reduction](./kernel-examples/chip-cluster-reduce.md)
+
+- [End-to-End Cases](./kernel-examples/index.md)
+  + [Case Study: Transformer](./kernel-examples/transformer.md)
+
+
+  + [Case Study: Skip Loop Bodies at Runtime](./kernel-examples/skip-loop-bodies-at-runtime.md)
+
+- [Scheduling and Tuning](./scheduling/index.md)
+  + [Schedule](./scheduling/schedule.md)
+  + [Diagnosis](./scheduling/diagnosis.md)
+  + [Tuning](./scheduling/tuning.md)
+- [Tools](./tools/index.md)
+  + [Kernel Optimizer](./tools/kernel-optimizer.md)
+  + [Language Server](./tools/language-server.md)
+  + [Schedule Viewer](./tools/schedule-viewer.md)

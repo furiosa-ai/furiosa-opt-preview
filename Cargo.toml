@@ -1,0 +1,75 @@
+[workspace]
+members = [
+    "cargo-furiosa-opt",
+    "furiosa-mapping",
+    "furiosa-mapping-macro",
+    "furiosa-mapping-types",
+    "furiosa-opt-abi",
+    "furiosa-opt-common-ir",
+    "furiosa-opt-examples",
+    "furiosa-opt-lower",
+    "furiosa-opt-lower-types",
+    "furiosa-opt-macro",
+    "furiosa-opt-rt",
+    "furiosa-opt-rt/ipc",
+    "furiosa-opt-std",
+]
+exclude = ["furiosa-opt-rt/bootloader"]
+resolver = "3"
+
+[workspace.package]
+publish = true
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(backend, values("npu"))', 'cfg(furiosa_opt)'] }
+
+[workspace.dependencies]
+abi_stable = "0.11"
+arrayvec = { version = "0.7.6", features = ["serde"] }
+bincode = "1.3.3"
+bincode2 = { package = "bincode", version = "2", default-features = false, features = ["alloc", "derive"] }
+bytemuck = "1"
+cfg-if = "1"
+criterion = "0.8.1"
+env_logger = "0.11"
+eyre = "0.6.8"
+# furiosa-opt-ipc inherits this entry and builds in the root, public and firmware workspaces,
+# so each of them declares the crate.
+furiosa-opt-abi = { path = "furiosa-opt-abi", version = "0.9.0", default-features = false }
+futures-executor = "0.3.28"
+half = { version = "2.3.1", features = ["num-traits"] }
+io-uring = "0.6.4"
+itertools = "0.14.0"
+lalrpop = "0.22.2"
+lalrpop-util = "0.22.2"
+lasso = { version = "0.7", features = ["multi-threaded"] }
+log = "0.4"
+ndarray = { version = "0.15.6", features = ["approx", "rayon", "serde"] }
+nix = { version = "0.29.0", default-features = false }
+num-traits = "0.2.16"
+proc-macro2 = "1.0.66"
+quote = "1.0"
+rand = { version = "0.9.0", features = ["small_rng", "alloc"] }
+rayon = "1.7.0"
+safetensors = "0.4"
+serde = { version = "1.0.175", features = ["derive", "rc"] }
+serde-lite = { version = "0.5", features = ["derive", "preserve-order"] }
+serde_json = { version = "1.0.103", features = ["float_roundtrip"] }
+smallvec = "1.15.0"
+smart-default = "0.7.1"
+stats_alloc = "0.1.10"
+syn = { version = "2.0", features = ["full"] }
+tempfile = "3.7.0"
+thiserror = "2.0.17"
+thiserror-core = { package = "thiserror", version = "2.0.17", default-features = false }
+tokio = { version = "1.29.1", features = ["full"] }
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.17", features = [
+    "fmt",
+    "std",
+    "env-filter",
+    "json",
+] }
+
+[patch.crates-io]
+serde-lite = { git = "https://github.com/furiosa-ai/serde-lite", rev = "88136e4" }

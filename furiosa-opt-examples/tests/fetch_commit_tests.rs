@@ -1,0 +1,33 @@
+use furiosa_opt_examples::fetch_commit::fetch_commit_simple;
+use furiosa_opt_std::prelude::*;
+
+#[tokio::test]
+async fn test_fetch_commit_simple_host() -> eyre::Result<()> {
+    use furiosa_opt_examples::fetch_commit::{A, B};
+
+    let mut device = Device::new(fetch_commit_simple.topology())?;
+
+    // Create input tensor with shape (A=4096)(B=8).
+    let input = HostTensor::<i8, m![A, B]>::from_vec((0..32768).map(|x| x as i8).collect::<Vec<_>>())
+        .to_hbm::<m![1], m![A, B]>(&mut device.pdma)
+        .await?;
+
+    // Call the device function.
+    let output = launch(fetch_commit_simple, (&mut device, &input)).await?;
+
+    let mut expected = vec![0i32; 4096 * 8];
+    let mut idx = 0;
+    for b in 0..8 {
+        for a in 0..4096 {
+            expected[idx] = ((a * 8 + b) as i8) as i32;
+            idx += 1;
+        }
+    }
+
+    assert_eq!(
+        output.to_host::<m![B, A]>(&mut device.pdma).await?.into_inner(),
+        Tensor::<_, m![B, A], CurrentBackend>::from_vec(expected)
+    );
+
+    Ok(())
+}

@@ -111,6 +111,57 @@ mod slices {
     }
 
     #[device(chip = 1)]
+    fn gather_selected(device: &mut Device, pools: &[Pool; 2], index: &Index, outputs: &mut [Output; 2]) {
+        for layer in 0..2 {
+            let values: BlockValues = pools[layer]
+                .gather::<m![1], m![Block, Width]>()
+                .by_byte_offsets(index)
+                .to_dm(&mut device.tdma);
+            values.view().to_hbm_view(&mut device.tdma, outputs[layer].view_mut());
+        }
+    }
+
+    #[cfg(backend = "npu")]
+    async fn filled(device: &mut Device, value: f32) -> eyre::Result<BlockTensor> {
+        Ok(
+            HostTensor::<bf16, m![Block, Width]>::from_vec(vec![bf16::from_f32(value); Block::SIZE * Width::SIZE])
+                .to_hbm(&mut device.pdma)
+                .await?,
+        )
+    }
+
+    /// A rolled loop that selects a slice from an array reads the slice as the host last wrote it,
+    /// also after its membership changed between launches.
+    #[cfg(backend = "npu")]
+    #[tokio::test]
+    async fn selected_slices_follow_changed_membership() -> eyre::Result<()> {
+        let mut device = Device::new(gather_selected.topology())?;
+        let mut pools = [
+            Slice::from(vec![filled(&mut device, 1.0).await?, filled(&mut device, 2.0).await?]),
+            Slice::from(vec![filled(&mut device, 3.0).await?, filled(&mut device, 4.0).await?]),
+        ];
+        let index = HostTensor::<i32, m![Count]>::from_vec(vec![0; Count::SIZE])
+            .to_hbm(&mut device.pdma)
+            .await?;
+        let mut outputs = [Output::alloc(&device)?, Output::alloc(&device)?];
+        for firsts in [[1.0, 3.0], [2.0, 4.0]] {
+            launch(gather_selected, (&mut device, &pools, &index, &mut outputs)).await?;
+            for (output, first) in outputs.iter().zip(firsts) {
+                let values = output
+                    .to_host::<m![Count, Block, Width]>(&mut device.pdma)
+                    .await?
+                    .into_vec();
+                assert!(
+                    values.into_iter().all(|value| value == bf16::from_f32(first)),
+                    "expected {first}"
+                );
+            }
+            pools.iter_mut().for_each(|pool| pool.swap(0, 1));
+        }
+        Ok(())
+    }
+
+    #[device(chip = 1)]
     fn scatter(
         device: &mut Device,
         blocks: &mut Pool,

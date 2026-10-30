@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-opt-examples"
-version = "0.9.0+g9deb6a50"
+version = "0.10.0+gc7c86160"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
@@ -8,14 +8,14 @@ publish = false
 [package.metadata.furiosa-opt]
 
 [dependencies]
-furiosa-opt-std = { path = "../furiosa-opt-std", version = "0.9" }
+furiosa-opt-std = { path = "../furiosa-opt-std", version = "0.10" }
 
 [dev-dependencies]
 criterion = { workspace = true }
 env_logger = { workspace = true }
 eyre = { workspace = true }
 futures-executor = { workspace = true }
-furiosa-opt-ipc = { path = "../furiosa-opt-rt/ipc", version = "0.9" }
+furiosa-opt-ipc = { path = "../furiosa-opt-rt/ipc", version = "0.10" }
 rand = { workspace = true }
 safetensors = { workspace = true }
 serde_json = { workspace = true }

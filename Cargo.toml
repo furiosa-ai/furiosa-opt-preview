@@ -35,7 +35,7 @@ env_logger = "0.11"
 eyre = "0.6.8"
 # furiosa-opt-ipc inherits this entry and builds in the root, public and firmware workspaces,
 # so each of them declares the crate.
-furiosa-opt-abi = { path = "furiosa-opt-abi", version = "0.9.0", default-features = false }
+furiosa-opt-abi = { path = "furiosa-opt-abi", version = "0.10.0", default-features = false }
 futures-executor = "0.3.28"
 half = { version = "2.3.1", features = ["num-traits"] }
 io-uring = "0.6.4"

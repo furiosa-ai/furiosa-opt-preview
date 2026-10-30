@@ -46,7 +46,9 @@ pub(crate) fn assert_dm_dma_layout<
     );
 }
 
-fn check_dma_tail<D: Scalar>(src_element: &Mapping, dst_element: &Mapping, min_align: usize) -> usize {
+/// Checks that the destination tail a transfer reaches ends on a `min_align` boundary.
+/// Returns that end in elements, which is where the stride check starts looking.
+pub(super) fn check_dma_tail<D: Scalar>(src_element: &Mapping, dst_element: &Mapping, min_align: usize) -> usize {
     let reachable_end = reachable_end(src_element, dst_element);
     let reachable_end_bytes = D::size_in_bytes_from_length(reachable_end);
 

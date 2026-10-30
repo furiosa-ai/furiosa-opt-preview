@@ -1,8 +1,41 @@
 //! Builds deferred HBM scatters by declaring the indexed axis, payload, and index domain.
+//!
+//! A `ScatterPlan` carries its stage in a type parameter, the same shape as [`super::gather`].
+//! Each block below lists every outgoing edge from that stage. The set is normative: it must equal
+//! the `ScatterPlan<.., Stage, ..>` impl targets below.
+//!
+//! # Stage graph
+//!
+//! ```text
+//! HbmTensorViewMut
+//!     └── scatter::<IndexedAxis, Payload>  →  Begin
+//!
+//! Begin
+//!     ├── by_byte_offsets::<Domain>        →  WithByteOffsets   (index in HBM)
+//!     └── by_positions::<Domain>           →  WithPositions     (index in SPM)
+//!
+//! WithByteOffsets, WithPositions           (every IndexedScatter stage)
+//!     ├── from_dm                          →  runs the scatter, consuming the DM tensor
+//!     └── from_dm_view                     →  runs the scatter from a DM view
+//! ```
+//!
+//! `Begin` is [`super::gather`]'s: an index is supplied once, and nothing returns to that stage.
+//! A scatter has no prefix step. It reads DM and writes HBM, and takes no DM destination, so
+//! [`super::layout`]'s DM write rule does not apply to it.
 
 use super::gather::{Begin, IndexSource};
-use super::*;
+use std::marker::PhantomData;
+
+use furiosa_mapping::*;
+use furiosa_opt_macro::primitive;
+
+use crate::backend::Backend;
+use crate::context::*;
+use crate::scalar::*;
+use crate::tensor::*;
+
 use crate::backend::indirect::IndexUnit;
+use crate::tensor::memory::*;
 use furiosa_opt_lower::{
     DmPlacement, IndexMapping, ScatterPayload, SpmPlacement, scatter_payload, validate_index_chip,
     validate_scatter_payload, validate_scatter_updates, validate_spm_indirect_index,
@@ -308,4 +341,41 @@ fn indexed_axis_stride<D: Scalar>(payload: &ScatterPayload) -> NonZeroUsize {
         .indexed_axis_stride_bytes(D::BITS)
         .unwrap_or_else(|error| panic!("{error}"));
     NonZeroUsize::new(stride).expect("a destination stride spans at least one byte")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::backend::{Allocation, Cpu};
+    use crate::runtime::{Device, Topology};
+
+    /// A deferred scatter reads aliased HBM indices when its DMA executes.
+    #[test]
+    fn scatters_current_indices() {
+        axes![W = 256, V = 2, K = 128];
+        let mut device = Device::<Cpu>::new(Topology { chips: 1, pes: 8 }).unwrap();
+        let mut table = HbmTensor::<i32, m![1], m![W, V], Cpu>::from_value(
+            &device.tdma,
+            &Tensor::from_vec(std::iter::repeat_n(-1, W::SIZE * V::SIZE)),
+        );
+        let index = HbmTensor::<i32, m![1], m![K], Cpu>::from_value(
+            &device.tdma,
+            &Tensor::from_vec(std::iter::repeat_n(0, K::SIZE)),
+        );
+        let mut alias =
+            HbmTensor::<i32, m![1], m![K], Cpu>::try_from(crate::HbmBuffer(index.buffer.alias(..).unwrap())).unwrap();
+        let updates = DmTensor::<i32, m![1], m![1], m![K / 2], m![K % 2, V], Cpu>::from_parts(Tensor::from_vec(0..256));
+        let plan = table
+            .view_mut()
+            .scatter::<m![W], m![V]>()
+            .by_byte_offsets::<m![K]>(index.view());
+        alias.store(&device.tdma, &Tensor::from_vec((1..=128).map(|row| row * 8)));
+
+        plan.from_dm(&mut device.tdma, updates);
+
+        let mut expected = vec![-1; W::SIZE * V::SIZE];
+        expected[2..258].copy_from_slice(&(0..256).collect::<Vec<_>>());
+        assert_eq!(table.load().into_vec(), expected);
+    }
 }

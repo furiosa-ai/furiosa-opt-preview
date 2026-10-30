@@ -263,7 +263,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cargo-furiosa-opt"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 
 [[package]]
 name = "cast"
@@ -588,7 +588,7 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "furiosa-mapping"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "abi_stable",
  "eyre",
@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-mapping-macro"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "lalrpop",
  "lalrpop-util",
@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-mapping-types"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "abi_stable",
  "furiosa-mapping-macro",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-abi"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "bincode",
  "thiserror",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-common-ir"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "furiosa-opt-macro",
  "serde",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-examples"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "criterion",
  "env_logger",
@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-ipc"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-lower"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "abi_stable",
  "furiosa-mapping",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-lower-types"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "abi_stable",
  "furiosa-mapping-types",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-macro"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-rt"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "arrayvec",
  "bytemuck",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "furiosa-opt-std"
-version = "0.9.0+ga9e0966b"
+version = "0.9.0+g23b9e1ba"
 dependencies = [
  "abi_stable",
  "arrayvec",

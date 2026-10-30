@@ -8,6 +8,23 @@ use crate::backend::{Backend, internal};
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 
+/// Checks a tile over one level of a placement: `LEN` cells of `Source` from a compile-time start
+/// must spell `Target`.
+///
+/// `hole_fill` is what the cells outside the tile become. A read source leaves them accessible
+/// ([`PaddingKind::Top`]); a write destination forbids them ([`PaddingKind::Bottom`]) so the commit
+/// sequencer never writes them.
+pub(crate) fn assert_tile<Index: M, Source: M, Target: M, const LEN: usize>(hole_fill: PaddingKind) {
+    config_tile(TileInput {
+        index: Index::to_value(),
+        element: Source::to_value(),
+        expected: Target::to_value(),
+        len: LEN,
+        hole_fill,
+    })
+    .unwrap_or_else(|error| panic!("{error}"));
+}
+
 /// A tile mapping derived from its source mapping instead of supplied by an API caller.
 #[derive(Debug, Clone)]
 pub(crate) struct Tiled<Index, Element, const LEN: usize, const HOLE_FILL: PaddingKind>(PhantomData<(Index, Element)>);
@@ -220,14 +237,7 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
     /// the tile must be down padding ([`PaddingKind::Bottom`]) so the commit
     /// sequencer never writes them.
     pub fn tile<I: M, E2: M, const LEN: usize>(self, start: usize) -> TensorViewMut<'l, D, E2, B> {
-        config_tile(TileInput {
-            index: I::to_value(),
-            element: E::to_value(),
-            expected: E2::to_value(),
-            len: LEN,
-            hole_fill: PaddingKind::Bottom,
-        })
-        .unwrap_or_else(|e| panic!("{e}"));
+        assert_tile::<I, E, E2, LEN>(PaddingKind::Bottom);
         self.retile::<I, E2>(start, LEN)
     }
 
@@ -317,14 +327,7 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
     /// Splits the tensor view by tiling. As a read source, the cells outside the
     /// tile stay accessible ([`PaddingKind::Top`]).
     pub fn tile<I: M, E2: M, const LEN: usize>(&self, start: usize) -> TensorView<'l, D, E2, B> {
-        config_tile(TileInput {
-            index: I::to_value(),
-            element: E::to_value(),
-            expected: E2::to_value(),
-            len: LEN,
-            hole_fill: PaddingKind::Top,
-        })
-        .unwrap_or_else(|e| panic!("{e}"));
+        assert_tile::<I, E, E2, LEN>(PaddingKind::Top);
         self.retile::<I, E2>(start, LEN)
     }
 

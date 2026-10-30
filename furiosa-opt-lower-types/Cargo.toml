@@ -1,9 +1,9 @@
 [package]
 name = "furiosa-opt-lower-types"
-version = "0.9.0+gd4620c5d"
+version = "0.9.0+gcc921070"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/furiosa-ai/furiosa-opt"
+repository = "https://github.com/furiosa-ai/furiosa-opt-preview"
 description = "Shared StableAbi types for the furiosa-opt lowering engines, crossing the verifier FFI boundary."
 
 [dependencies]

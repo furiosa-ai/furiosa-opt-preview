@@ -1,9 +1,9 @@
 [package]
 name = "cargo-furiosa-opt"
-version = "0.9.0+gd4620c5d"
+version = "0.9.0+gcc921070"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/furiosa-ai/furiosa-opt"
+repository = "https://github.com/furiosa-ai/furiosa-opt-preview"
 description = "TCP Virtual ISA compiler for Furiosa NPU"
 
 [[bin]]

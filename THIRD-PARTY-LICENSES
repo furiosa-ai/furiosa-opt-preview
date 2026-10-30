@@ -2809,18 +2809,18 @@ limitations under the License.
 ---
 
 Apache License 2.0
-  - cargo-furiosa-opt 0.9.0+gd4620c5d
-  - furiosa-mapping 0.9.0+gd4620c5d
-  - furiosa-mapping-macro 0.9.0+gd4620c5d
-  - furiosa-mapping-types 0.9.0+gd4620c5d
-  - furiosa-opt-abi 0.9.0+gd4620c5d
-  - furiosa-opt-common-ir 0.9.0+gd4620c5d
-  - furiosa-opt-lower 0.9.0+gd4620c5d
-  - furiosa-opt-lower-types 0.9.0+gd4620c5d
-  - furiosa-opt-macro 0.9.0+gd4620c5d
-  - furiosa-opt-rt 0.9.0+gd4620c5d
-  - furiosa-opt-ipc 0.9.0+gd4620c5d
-  - furiosa-opt-std 0.9.0+gd4620c5d
+  - cargo-furiosa-opt 0.9.0+gcc921070
+  - furiosa-mapping 0.9.0+gcc921070
+  - furiosa-mapping-macro 0.9.0+gcc921070
+  - furiosa-mapping-types 0.9.0+gcc921070
+  - furiosa-opt-abi 0.9.0+gcc921070
+  - furiosa-opt-common-ir 0.9.0+gcc921070
+  - furiosa-opt-lower 0.9.0+gcc921070
+  - furiosa-opt-lower-types 0.9.0+gcc921070
+  - furiosa-opt-macro 0.9.0+gcc921070
+  - furiosa-opt-rt 0.9.0+gcc921070
+  - furiosa-opt-ipc 0.9.0+gcc921070
+  - furiosa-opt-std 0.9.0+gcc921070
   - abi_stable 0.11.3
   - abi_stable_derive 0.11.3
   - abi_stable_shared 0.11.0

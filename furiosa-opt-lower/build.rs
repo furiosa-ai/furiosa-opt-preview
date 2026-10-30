@@ -26,8 +26,8 @@ fn link_furiosa_opt_lower_impl() {
         std::fs::copy(prebuilt, &lib).expect("failed to copy the implementation archive");
     } else {
         // Public (crates.io) builds fetch a prebuilt
-        // libfuriosa_opt_lower_impl.a from the furiosa-ai/furiosa-opt
-        // release matching this crate's version, verify SHA256SUMS, and
+        // libfuriosa_opt_lower_impl.a from the release matching this
+        // crate's version, verify SHA256SUMS, and
         // link. SHA256SUMS catches corruption but is not provenance.
         // Set FURIOSA_OPT_LOWER_IMPL_VERIFY_ATTESTATION=1 to additionally
         // check the sigstore attestation via `gh attestation verify`.
@@ -37,15 +37,18 @@ fn link_furiosa_opt_lower_impl() {
         // to pin past a yanked release.
         let version = std::env::var("FURIOSA_OPT_LOWER_IMPL_VERSION")
             .unwrap_or_else(|_| format!("v{}", std::env::var("CARGO_PKG_VERSION").unwrap()));
-        // Snapshot versions carry the source sha: v0.5.1+gbfabe686 was released as snapshot-bfabe686.
-        let tag = match version.split_once("+g") {
-            Some((_, sha)) => format!("snapshot-{sha}"),
-            None => version.clone(),
-        };
         let asset_name = format!("lib{lib_name}-{version}-{target}.a");
         let licenses_name = format!("lib{lib_name}-{version}-{target}.LICENSES.txt");
-        let repo = std::env::var("FURIOSA_OPT_GITHUB_REPO").unwrap_or("furiosa-ai/furiosa-opt".to_string());
-        let base = format!("https://github.com/{repo}/releases/download/{tag}");
+        // A release is tagged with its version in the repository its manifests name: a public
+        // release in furiosa-ai/furiosa-opt, a snapshot (v0.10.0+g<sha8>) in furiosa-opt-preview.
+        let repo = std::env::var("FURIOSA_OPT_GITHUB_REPO").unwrap_or_else(|_| {
+            let repository = env!("CARGO_PKG_REPOSITORY");
+            repository
+                .strip_prefix("https://github.com/")
+                .unwrap_or(repository)
+                .to_string()
+        });
+        let base = format!("https://github.com/{repo}/releases/download/{version}");
         let asset_url = format!("{base}/{asset_name}");
         let licenses_url = format!("{base}/{licenses_name}");
         let sums_url = format!("{base}/SHA256SUMS");

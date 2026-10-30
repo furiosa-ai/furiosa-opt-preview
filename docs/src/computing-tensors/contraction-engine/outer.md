@@ -82,10 +82,10 @@ The example below exercises both operations: Packing absorbs the innermost size-
 # use furiosa_opt_std::prelude::*;
 axes![M = 32, N = 8, K = 16, L = 2, B = 5];
 
-fn stream_adapter_example<'l, const T: Tu>(
-    input: CollectTensor<'l, { T }, bf16, m![1], m![1 # 2], m![1 # 256], m![M, L], m![K]>,
+fn stream_adapter_example<'l>(
+    input: CollectTensor<'l, { Tu::Main }, bf16, m![1], m![1 # 2], m![1 # 256], m![M, L], m![K]>,
     trf: &TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![B, L, K]>,
-) -> ContractOuterTensor<'l, { T }, f32, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![M, B], m![L, K]> {
+) -> ContractOuterTensor<'l, { Tu::Main }, f32, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![M, B], m![L, K]> {
     // Packing (PackSize = 2):
     //   L = 2 (innermost Time) absorbed into Packet.
     //   PackTime = [M = 32], PackPacket = [L = 2, K = 16] = 32 bf16 = 64B.
@@ -159,10 +159,10 @@ In this example, `ReadSize` covers all of `Element` in one 64 B read, so `Elemen
 # use furiosa_opt_std::prelude::*;
 axes![M = 32, N = 8, K = 32];
 
-fn trf_sequencer_full_read<'l, const T: Tu>(
-    input: CollectTensor<'l, T, bf16, m![1], m![1 # 2], m![1 # 256], m![M, K / 16], m![K % 16]>,
+fn trf_sequencer_full_read<'l>(
+    input: CollectTensor<'l, { Tu::Main }, bf16, m![1], m![1 # 2], m![1 # 256], m![M, K / 16], m![K % 16]>,
     trf: &TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![K]>,
-) -> ContractOuterTensor<'l, T, f32, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![M], m![K]> {
+) -> ContractOuterTensor<'l, { Tu::Main }, f32, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![M], m![K]> {
     // Element         = K
     // ReadSize        = 32
     // PacketBroadcast = 1
@@ -190,10 +190,10 @@ In this example, `ReadSize` covers only part of `Element`, so `Element / ReadSiz
 # use furiosa_opt_std::prelude::*;
 axes![M = 32, N = 8, K = 16, L = 2, O = 2];
 
-fn trf_sequencer_partial_read<'l, const T: Tu>(
-    input: CollectTensor<'l, T, bf16, m![1], m![1 # 2], m![1 # 256], m![O, M, L], m![K]>,
+fn trf_sequencer_partial_read<'l>(
+    input: CollectTensor<'l, { Tu::Main }, bf16, m![1], m![1 # 2], m![1 # 256], m![O, M, L], m![K]>,
     trf: &TrfTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![O, K]>,
-) -> ContractOuterTensor<'l, T, f32, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![O, M], m![L, K]> {
+) -> ContractOuterTensor<'l, { Tu::Main }, f32, bf16, m![1], m![1 # 2], m![1 # 256], m![N], m![O, M], m![L, K]> {
     // Element         = [O, K]
     // ReadSize        = 16
     // PacketBroadcast = L

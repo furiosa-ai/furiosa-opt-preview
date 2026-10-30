@@ -1,67 +1,64 @@
-//! The binary's device function registry.
-//!
-//! How it gets there: the driver rides the build as cargo's `RUSTC_WORKSPACE_WRAPPER`. While
-//! the binary compiles, the driver lowers every `#[device]` instantiation the binary launches
-//! and appends one object file to the binary's own link line (`link.rs` in npu-opt, the wire
-//! format's other end). That object's only content is a `furiosa_kernels` section holding the
-//! serialized entries. The linker keeps the section in the final binary and defines
-//! `__start_`/`__stop_` symbols at its bounds.
-//!
-//! What is in it: bincode of `Vec<(fn path, Key, image)>`, ordered by (fn path, key):
-//! - fn path: `crate::module::fn`, exactly what the macro derives at the launch site
-//!   (`module_path!()` plus the fn name)
-//! - [`Key`]: the instantiation's numeric generic arguments
-//! - image: the function's image ([`Bytes`]), parsed by `Function::load`
-//!
-//! How it is read: the first launch takes the section as one static slice (the linker-defined
-//! bound symbols: no file, no env, no I/O), deserializes it once, and each `#[device]` fn's
-//! [`entries`] filters by its own fn path. The launch then selects by key.
+//! The native registry's functions, loaded once per device.
 
 use std::sync::OnceLock;
 
-/// A launched instantiation's identity: the numeric generic arguments in declaration order, an
-/// `AxisName` type param's `SIZE` or a `usize` const param's value. A concrete fn's key is
-/// empty. Any other parameter kind fails to compile under `backend = "npu"` (the macro's key
-/// expression requires exactly these two).
-pub type Key = Vec<u64>;
+use furiosa_opt_rt as rt;
 
-/// A registry entry's image, parsed by `Function::load`.
-pub type Bytes = &'static [u8];
+use super::Npu;
+use crate::Error;
+use crate::backend::Runtime;
 
-/// This fn's registry entries: one `(key, image)` per launched instantiation.
-pub(crate) fn entries(path: &str) -> impl Iterator<Item = (&'static Key, Bytes)> {
-    static REGISTRY: OnceLock<Vec<(&str, Key, &[u8])>> = OnceLock::new();
-    REGISTRY
-        .get_or_init(|| {
-            std::hint::black_box(&raw const ANCHOR);
-            let start = &raw const START;
-            let stop = &raw const STOP;
-            // SAFETY: the linker-defined bounds delimit the loaded `furiosa_kernels` section.
-            match unsafe { std::slice::from_raw_parts(start, stop.addr() - start.addr()) } {
-                [] => Vec::new(),
-                bytes => bincode::deserialize(bytes).expect("malformed device function registry"),
-            }
-        })
-        .iter()
-        .filter(move |(entry, ..)| *entry == path)
-        .map(|(_, key, bytes)| (key, *bytes))
+pub(super) struct Registry {
+    functions: Box<[OnceLock<rt::Function>]>,
 }
 
-// NOTE: the section name, its `__start_`/`__stop_` bound symbols, and the bincode row format
-// are one wire contract with the driver's link pass (`link.rs` in npu-opt). The npu-opt
-// registry test reads a real binary end-to-end and fails on a drift on either side. The name
-// must be a valid C identifier (`__start_` synthesis requires it) and must keep the vendor
-// prefix: section names share one global namespace with every linked object, C libraries
-// included, and the linker concatenates same-named sections from all of them.
-unsafe extern "C" {
-    #[link_name = "__start_furiosa_kernels"]
-    static START: u8;
-    #[link_name = "__stop_furiosa_kernels"]
-    static STOP: u8;
+impl Default for Registry {
+    fn default() -> Self {
+        Self {
+            functions: rt::registry::entries().iter().map(|_| OnceLock::new()).collect(),
+        }
+    }
 }
 
-/// Keeps the section and its bound symbols present in a link the driver never saw (a plain
-/// `cargo build`, a doctest). Such a binary panics at launch, not at link.
-#[used]
-#[unsafe(link_section = "furiosa_kernels")]
-static ANCHOR: [u8; 0] = [];
+/// Where registry entry `path`/`key` sits.
+pub(super) fn index(path: &'static str, key: &[usize]) -> Result<usize, Error> {
+    rt::registry::find(path, key).ok_or_else(|| Error::Uncompiled {
+        path,
+        key: key.to_vec(),
+    })
+}
+
+/// Registry entry `index` on `device`, loaded on first use.
+pub(super) fn function(device: &<Npu as Runtime>::Device, index: usize) -> Result<&rt::Function, Error> {
+    device.registry.functions[index].get_or_try_init(|| {
+        // SAFETY: the link pass wrote every entry with the compiler's image of its function.
+        let load = unsafe {
+            rt::registry::load(
+                &rt::registry::entries()[index],
+                &device.device,
+                super::profile::requested(),
+            )
+        };
+        Ok(wait(load)?)
+    })
+}
+
+/// Runs `future` to its end on this thread, parking between polls. Unlike an executor's
+/// `block_on`, it enters no executor and consumes no task budget, so it may run inside a caller's
+/// executor; the device worker thread progresses a load, so parking here cannot stall it.
+fn wait<F: Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut std::task::Context::from_waker(&waker)) {
+            return output;
+        }
+        std::thread::park();
+    }
+}

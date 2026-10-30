@@ -1,19 +1,17 @@
 //! Device-function scalar-type coverage: one fixture per LIR-supported device scalar.
 //!
-//! Every scalar that `furiosa-opt-std` implements `Scalar` for and that has a matching LIR
-//! `ElementType` gets exactly one fixture here, so the per-type roster is visible at a glance and
-//! each type's mir -> vISA -> IR translation (`translate_ty_to_scalar` / `eval_scalar_type`) is
-//! pinned by a sibling test in `npu-visa-test/tests/scalar.rs`. Each fixture names its scalar in a
-//! tensor parameter, a DM staging, and the fetch cast, so it must translate through those two
-//! functions rather than be rejected as an "unsupported scalar primitive".
+//! Every scalar that `furiosa-opt-std` implements `Scalar` for gets exactly one fixture here, so
+//! the per-type roster is visible at a glance.
+//! Each fixture names its scalar in a tensor parameter, a DM staging, and the fetch cast, so it
+//! must translate rather than be rejected as an "unsupported scalar primitive".
 //!
 //! Fixture shape per type:
 //! - **at-width identity relayout** for `f32` / `i32` / `i16` / `i8` / `u8`: the element threads
 //!   through the parameter, the DM staging, the identity fetch cast, and the transposed output.
 //! - **widen** for the narrowing floats: `bf16 -> f32`, `f8e4m3 -> f32`.
 //!
-//! `i4` is a supported LIR scalar (`eval_scalar_type` maps it), but has no fixture here: it is
-//! sub-byte (`RawInt4` packs two per byte), so a host-buffer execute-compare is infeasible and the
+//! `i4` is a supported LIR scalar, but has no fixture here: it is
+//! sub-byte (two codes per byte), so a host-buffer execute-compare is infeasible and the
 //! `--device-function` build probe is the only available check. Omitted rather than carry a
 //! build-only outlier.
 //!
@@ -132,4 +130,4 @@ pub mod f32_commit_narrow {
 }
 
 // `i4 -> i32` has no fixture: `i4` is sub-byte, so a host-buffer execute-compare is infeasible (see
-// the module doc). `i4` translation is still covered by the `eval_scalar_type` match arm.
+// the module doc).

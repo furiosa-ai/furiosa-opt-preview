@@ -227,8 +227,7 @@ impl Mapping {
     }
 
     /// The cell count this mapping reads. Tolerates a ragged `Stride` / `Modulo` (one whose
-    /// divisor does not divide the inner size), which the matcher emits as a valid OUTPUT
-    /// even though it is not a valid `from_mapping` INPUT.
+    /// divisor does not divide the inner size), which the matcher emits as a valid OUTPUT.
     pub fn size(&self) -> usize {
         match self {
             Self::Symbol { size, .. } => *size,
@@ -394,6 +393,107 @@ impl Mapping {
         let mut out = Vec::new();
         self.collect_idents(&mut out);
         out.into()
+    }
+
+    /// Each symbol's declared size; repeated symbols must agree.
+    pub fn abstract_limits(&self) -> RSortedMap<Ident, usize> {
+        fn collect(mapping: &Mapping, out: &mut RSortedMap<Ident, usize>) {
+            match mapping {
+                Mapping::Symbol { symbol, size } => {
+                    assert_eq!(*out.get_or_insert(*symbol, *size), *size, "inconsistent {symbol} size");
+                }
+                Mapping::Broadcast { .. } => {}
+                Mapping::Stride { inner, .. }
+                | Mapping::Modulo { inner, .. }
+                | Mapping::Resize { inner, .. }
+                | Mapping::Padding { inner, .. } => collect(inner, out),
+                Mapping::Pair { left, right } => {
+                    collect(left, out);
+                    collect(right, out);
+                }
+            }
+        }
+        let mut out = RSortedMap::new();
+        collect(self, &mut out);
+        out
+    }
+
+    /// Each symbol's digit span, capped by its largest-stride digit's write reach (or its declared
+    /// size under `Modulo`). Only that digit grows into `Top`; inner digits contribute their live
+    /// positions. Prefixes through `Pair` must contain whole rows.
+    pub fn abstract_limits_upperbound(&self) -> RSortedMap<Ident, usize> {
+        // A resized inner digit need not contain `Modulo`; its larger-stride sibling owns the bound.
+        // Each entry holds the largest stride, optional outer bound, and span starting at coordinate 0.
+        fn strides(mapping: &Mapping, stride: usize, out: &mut RSortedMap<Ident, (usize, Option<usize>, usize)>) {
+            match mapping {
+                Mapping::Symbol { symbol, .. } => {
+                    let (s, _, _) = out.get_or_insert(*symbol, (stride, None, 1));
+                    *s = (*s).max(stride);
+                }
+                Mapping::Broadcast { .. } => {}
+                Mapping::Stride { inner, stride: s } => strides(inner, stride * s, out),
+                Mapping::Modulo { inner, .. } | Mapping::Resize { inner, .. } | Mapping::Padding { inner, .. } => {
+                    strides(inner, stride, out)
+                }
+                Mapping::Pair { left, right } => {
+                    // A stride outside a product addresses the product, not either symbol.
+                    strides(left, 1, out);
+                    strides(right, 1, out);
+                }
+            }
+        }
+        /// `live`/`write`: this level's live and writable prefix extents.
+        fn reach(
+            mapping: &Mapping,
+            live: usize,
+            write: usize,
+            stride: usize,
+            outer: bool,
+            out: &mut RSortedMap<Ident, (usize, Option<usize>, usize)>,
+        ) {
+            match mapping {
+                Mapping::Symbol { symbol, .. } => {
+                    let (outermost_stride, limit, span) = out.get_mut(symbol).unwrap();
+                    let size = if stride == *outermost_stride {
+                        live.max(write)
+                    } else {
+                        live
+                    };
+                    // Add the last digit position, not the end of its stride-sized interval.
+                    *span += size.saturating_sub(1) / stride * stride;
+                    if outer && stride == *outermost_stride {
+                        *limit = Some(limit.unwrap_or(0).max(size));
+                    }
+                }
+                Mapping::Broadcast { .. } => {}
+                Mapping::Modulo { inner, .. } => reach(inner, live, write, stride, false, out),
+                Mapping::Stride { inner, stride: s } => reach(inner, live * s, write * s, stride * s, outer, out),
+                Mapping::Resize { inner, .. } => reach(inner, live, write, stride, outer, out),
+                Mapping::Padding { inner, kind, .. } => {
+                    let write = if *kind == PaddingKind::Top {
+                        write
+                    } else {
+                        write.min(inner.size())
+                    };
+                    reach(inner, live.min(inner.size()), write, stride, outer, out)
+                }
+                Mapping::Pair { left, right } => {
+                    let r = right.size();
+                    assert!(live.is_multiple_of(r), "partial pair row");
+                    reach(left, live / r, write / r, 1, outer, out);
+                    reach(right, live.min(r), write.min(r), 1, outer, out);
+                }
+            }
+        }
+        let mut bounds = RSortedMap::new();
+        strides(self, 1, &mut bounds);
+        reach(self, self.size(), self.size(), 1, true, &mut bounds);
+        let mut out = self.abstract_limits();
+        for (symbol, (_, limit, span)) in bounds {
+            let n = out.get_mut(&symbol).unwrap();
+            *n = limit.unwrap_or(*n).min(span);
+        }
+        out
     }
 
     fn collect_idents(&self, out: &mut Vec<Ident>) {
@@ -601,7 +701,7 @@ impl serde_lite::Deserialize for Mapping {
     core::marker::ConstParamTy,
 )]
 pub enum PaddingKind {
-    /// Inaccessible padding; reads are undefined behavior.
+    /// Readable padding holding arbitrary values; writes are forbidden.
     Bottom,
     /// Accessible padding masked to a known constant zero.
     ///
@@ -825,9 +925,8 @@ pub enum SequencerMode {
     /// Stream writes to memory (each memory cell is written exactly once).
     Write,
     /// A read carve (`MappingExt::carve`) that also tolerates a `Bottom` pad in the stream (a
-    /// `view_mut` hole, read as a `Top` don't-care). TRANSIENT (PROG-480): a stopgap until the sequencer
-    /// can carve the broadcast from the memory leftover (see `read_carved_down_memory_keeps_broadcast_term`),
-    /// at which point this mode can be retired.
+    /// `view_mut` hole, read as a `Top` don't-care). TRANSIENT: a stopgap until the sequencer can carve
+    /// the broadcast from the memory leftover, at which point this mode can be retired.
     Carve,
     /// Locates where a partial stream reads: no coverage required, padding equal on both sides.
     Locate,
@@ -1674,6 +1773,246 @@ mod mapping_iter_tests {
             back.reverse();
             front.extend(back);
             assert_eq!(front, full, "front/back convergence mismatch in scenario {name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod abstract_limits_tests {
+    use super::*;
+
+    #[test]
+    fn abstract_limits_use_symbol_sizes() {
+        let (a, b) = (
+            Mapping::Symbol {
+                symbol: Ident::A,
+                size: 16,
+            },
+            Mapping::Symbol {
+                symbol: Ident::B,
+                size: 4,
+            },
+        );
+        for (mapping, expected) in [
+            (a.clone(), vec![(Ident::A, 16)]),
+            (a.clone().stride(8).pair(a.clone().modulo(4)), vec![(Ident::A, 16)]),
+            (a.clone().modulo(8).padding(16, PaddingKind::Top), vec![(Ident::A, 16)]),
+            (
+                a.clone().modulo(8).stride(4).pair(a.clone().modulo(4)),
+                vec![(Ident::A, 16)],
+            ),
+            (a.clone().pair(b.clone()).modulo(8), vec![(Ident::A, 16), (Ident::B, 4)]),
+            (b.pair(Mapping::Broadcast { size: 2 }), vec![(Ident::B, 4)]),
+        ] {
+            assert_eq!(
+                mapping.abstract_limits().into_iter().collect_vec(),
+                expected,
+                "{mapping}"
+            );
+        }
+    }
+
+    #[test]
+    fn abstract_limits_upperbound_extends_outermost_axis() {
+        let a = Mapping::Symbol {
+            symbol: Ident::A,
+            size: 16,
+        };
+        for (mapping, expected) in [
+            (a.clone().padding(32, PaddingKind::Top), 32),
+            (a.clone().padding(32, PaddingKind::Bottom), 16),
+            (a.clone().padding(32, PaddingKind::Zero), 16),
+            (a.clone().modulo(8).padding(32, PaddingKind::Top), 16),
+            // `Top` under an inner digit wraps too.
+            (a.clone().padding(24, PaddingKind::Top).modulo(8), 8),
+            (
+                a.clone().padding(24, PaddingKind::Top).padding(32, PaddingKind::Bottom),
+                24,
+            ),
+            (
+                a.clone().padding(24, PaddingKind::Bottom).padding(32, PaddingKind::Top),
+                16,
+            ),
+            (a.clone().stride(4).padding(8, PaddingKind::Top), 29),
+            (
+                a.clone()
+                    .padding(32, PaddingKind::Top)
+                    .stride(4)
+                    .pair(a.clone().modulo(4)),
+                32,
+            ),
+            (
+                a.clone()
+                    .modulo(8)
+                    .stride(4)
+                    .padding(4, PaddingKind::Bottom)
+                    .pair(a.clone().modulo(4).padding(16, PaddingKind::Top)),
+                8,
+            ),
+            (
+                a.clone()
+                    .stride(4)
+                    .pair(a.clone().modulo(4).padding(10000, PaddingKind::Top)),
+                16,
+            ),
+            (a.clone().resize(12), 12),
+            (a.clone().resize(12).padding(32, PaddingKind::Top), 32),
+            (a.clone().resize(12).padding(32, PaddingKind::Bottom), 12),
+            (
+                a.clone()
+                    .stride(4)
+                    .resize(3)
+                    .padding(4, PaddingKind::Bottom)
+                    .padding(64, PaddingKind::Top),
+                9,
+            ),
+            (
+                a.clone()
+                    .padding(24, PaddingKind::Top)
+                    .resize(20)
+                    .padding(32, PaddingKind::Bottom),
+                20,
+            ),
+        ] {
+            assert_eq!(
+                mapping.abstract_limits_upperbound().into_iter().collect_vec(),
+                vec![(Ident::A, expected)],
+                "{mapping}"
+            );
+        }
+        let b = Mapping::Symbol {
+            symbol: Ident::B,
+            size: 4,
+        };
+        for (mapping, expected) in [
+            (
+                a.clone().pair(b.clone()).padding(128, PaddingKind::Top),
+                vec![(Ident::A, 32), (Ident::B, 4)],
+            ),
+            (a.clone().pair(b).resize(20), vec![(Ident::A, 5), (Ident::B, 4)]),
+            (
+                Mapping::Broadcast { size: 2 }.pair(a).padding(64, PaddingKind::Top),
+                vec![(Ident::A, 16)],
+            ),
+        ] {
+            assert_eq!(
+                mapping.abstract_limits_upperbound().into_iter().collect_vec(),
+                expected,
+                "{mapping}"
+            );
+        }
+    }
+
+    #[test]
+    fn abstract_limits_upperbound_ignores_resized_inner_digits() {
+        let a = Mapping::Symbol {
+            symbol: Ident::A,
+            size: 16,
+        };
+        for (outer, expected) in [
+            (
+                a.clone()
+                    .stride(4)
+                    .resize(3)
+                    .padding(4, PaddingKind::Bottom)
+                    .padding(64, PaddingKind::Top),
+                11,
+            ),
+            (a.clone().stride(4).padding(8, PaddingKind::Top), 31),
+            (a.clone().modulo(8).stride(4), 7),
+        ] {
+            for inner in [a.clone(), a.clone().modulo(4)] {
+                let inner = inner.resize(3).padding(64, PaddingKind::Top);
+                for mapping in [outer.clone().pair(inner.clone()), inner.pair(outer.clone())] {
+                    assert_eq!(
+                        mapping.abstract_limits_upperbound().get(&Ident::A),
+                        Some(&expected),
+                        "{mapping}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn abstract_limits_upperbound_tightens_digit_span() {
+        let a = Mapping::Symbol {
+            symbol: Ident::A,
+            size: 16,
+        };
+        for (outer, expected) in [
+            (a.clone().stride(8), 12),
+            (a.clone().stride(8).padding(4, PaddingKind::Top), 28),
+        ] {
+            for inner in [a.clone().modulo(4), a.clone().modulo(4).padding(64, PaddingKind::Top)] {
+                for mapping in [outer.clone().pair(inner.clone()), inner.pair(outer.clone())] {
+                    assert_eq!(
+                        mapping.abstract_limits_upperbound().get(&Ident::A),
+                        Some(&expected),
+                        "{mapping}"
+                    );
+                }
+            }
+        }
+        let a = Mapping::Symbol {
+            symbol: Ident::A,
+            size: 64,
+        };
+        let mapping = a
+            .clone()
+            .stride(16)
+            .pair(a.clone().modulo(16).stride(4).resize(2))
+            .pair(a.modulo(2));
+        assert_eq!(mapping.abstract_limits_upperbound().get(&Ident::A), Some(&54));
+        // `(A3, B2) / 3` visits `(0, 0)` and `(1, 1)`: neither symbol has stride 3.
+        let mapping = Mapping::Symbol {
+            symbol: Ident::A,
+            size: 3,
+        }
+        .pair(Mapping::Symbol {
+            symbol: Ident::B,
+            size: 2,
+        })
+        .stride(3);
+        let limits = mapping.abstract_limits_upperbound();
+        assert!(
+            [Ident::A, Ident::B]
+                .iter()
+                .all(|symbol| *limits.get(symbol).unwrap() >= 2)
+        );
+    }
+
+    #[test]
+    fn abstract_limits_upperbound_rejects_partial_rows() {
+        let mapping = Mapping::Symbol {
+            symbol: Ident::A,
+            size: 16,
+        }
+        .pair(Mapping::Symbol {
+            symbol: Ident::B,
+            size: 4,
+        });
+        for n in [2, 18] {
+            let mapping = mapping.clone().resize(n).padding(64, PaddingKind::Bottom);
+            assert!(
+                std::panic::catch_unwind(|| mapping.abstract_limits_upperbound()).is_err(),
+                "{mapping}"
+            );
+        }
+    }
+
+    #[test]
+    fn abstract_limits_reject_inconsistent_symbol_sizes() {
+        let mapping = Mapping::Symbol {
+            symbol: Ident::A,
+            size: 16,
+        }
+        .pair(Mapping::Symbol {
+            symbol: Ident::A,
+            size: 8,
+        });
+        for limits in [Mapping::abstract_limits, Mapping::abstract_limits_upperbound] {
+            assert!(std::panic::catch_unwind(|| limits(&mapping)).is_err());
         }
     }
 }

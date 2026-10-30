@@ -3,7 +3,7 @@
 //! Every concrete kernel outside [`negative`] compiles end-to-end to an EDF; [`generic`]'s
 //! fns compile from a linked root's launches instead, and [`negative`] holds the rejection
 //! fixtures, which must fail. Legal programs the compiler cannot lower yet are not here
-//! at all: they live in the private `npu-opt-examples` crate under `unsupported`.
+//! at all.
 
 #![expect(clippy::type_complexity)] // Necessary for mapping expressions.
 #![feature(proc_macro_hygiene, stmt_expr_attributes)]
@@ -13,6 +13,7 @@
 pub mod bias_partition_broadcast;
 pub mod binary_add;
 pub mod chip_reduce;
+pub mod closure;
 pub mod cluster_chip_shuffle_slice;
 pub mod cluster_reduce;
 pub mod commit_view_tile;
@@ -44,9 +45,11 @@ pub mod scalar;
 pub mod scatter_gather;
 pub mod scatter_gather_topology;
 pub mod stotrf_table_lookup;
+pub mod sub_context_engines;
 pub mod switch_assertions;
 pub mod switch_engine;
 pub mod tile;
+pub mod to_trf_from_main;
 pub mod to_vrf_assertions;
 pub mod transformer;
 pub mod transpose;

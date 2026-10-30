@@ -176,7 +176,7 @@ impl<'l, const T: Tu, P: CanApplyFetchMask, D: Scalar, Chip: M, Cluster: M, Slic
 
 // ANCHOR: fetch_table_lookup_impl
 // Table lookup is a **main-context-only** hardware feature: only the main Fetch Unit's
-// `mode_indirect_table` can point at a resident lookup table, so this impl is fixed to
+// lookup-table register can point at a resident lookup table, so this impl is fixed to
 // `{ Tu::Main }`. The sub-context Fetch Unit (used by the StoTrf weight-staging path) has no
 // table-lookup register, so decoding a packed weight must happen in a main-context fetch that
 // commits the decoded stream to DM, after which a plain convert-only StoTrf stages it into the TRF.

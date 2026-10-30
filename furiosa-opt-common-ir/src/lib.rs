@@ -484,8 +484,8 @@ impl<Reg, Port> BranchedOperand<Reg, Port> {
     /// The first way this layout is ill-formed, or `Ok(())`.
     ///
     /// One place for the rules, because three have to apply them and cannot share a way of *reporting*:
-    /// the eDSL builder panics, the ViSA translator reports against the kernel's span, and lowering to
-    /// `VePass` returns an `eyre` error. Each wraps this [`SlotDefect`] in its own idiom.
+    /// the eDSL builder panics, the ViSA translator reports against the kernel's span, and lowering
+    /// returns an `eyre` error. Each wraps this [`SlotDefect`] in its own idiom.
     ///
     /// Checked in slot order, so the defect reported is the earliest a reader would find.
     pub fn validate(&self) -> Result<(), SlotDefect> {
@@ -853,8 +853,8 @@ mod tests {
         );
 
         // The read side carries the same order, which is what lowering maps onto the hardware's
-        // comparison-match form one bit at a time. Asserted here because that mapping lives a crate up
-        // -- `CmpMatches` is `tu-ops`' -- so this is the last place the order is this crate's to state.
+        // comparison-match form one bit at a time. Asserted here because that mapping lives in the IR
+        // backend, so this is the last place the order is this crate's to state.
         assert_eq!(yes.pattern(), Some((&pattern, false)), "`is` reads back in bit order");
         assert_eq!(
             no.pattern(),
@@ -947,7 +947,7 @@ mod tests {
 
     /// One case per [`SlotDefect`] variant, each built the way that defect actually arises, plus the
     /// shapes that are fine so the rules are not passing by refusing everything. This is the one place
-    /// the rules live -- the eDSL builder, the ViSA translator and lowering to `VePass` all report
+    /// the rules live -- the eDSL builder, the ViSA translator and lowering all report
     /// what `validate` decides -- so it is the one place they are pinned.
     #[test]
     fn reports_each_slot_defect() {

@@ -1,261 +1,301 @@
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
-use std::time::Duration;
+use std::task::{Poll, Waker};
 
-use crate::buffer::{Allocations, Buffer, View};
-use crate::{Error, Result, image};
+use crate::arch::rngd;
+use crate::buffer::{Allocator, Buffer};
+use crate::driver::Driver;
+use crate::function::Launches;
+use crate::memory::{Kind, Usage};
+use crate::pinned::Registration;
+use crate::{Error, Pinned, Placement, Result, ToPlacements, Topology};
 
-mod dma;
-pub(crate) mod engine;
-use engine::{Cluster, Engine, PeRange};
+mod transfer;
+mod worker;
+pub(crate) use transfer::Transfers;
+pub(crate) use worker::Worker;
 
 /// The chips a process opened: functions load and launch through it, and it carries every
 /// allocation and host transfer.
 pub struct Device {
-    pub(crate) engine: Arc<Engine>,
-    pub(crate) allocations: Arc<Allocations>,
-    /// Numbers each load, so a cluster can tell a new image at a reused address from the one it
-    /// already holds.
-    pub(crate) tokens: std::sync::atomic::AtomicU64,
-    pes: u8,
+    /// Joined first, so admitted work drains before the driver it drives closes.
+    pub(crate) worker: Worker,
+    /// Every function's launch slots, so launches nobody polls still complete and run their
+    /// epilogues.
+    pub(crate) launches: Arc<Launches>,
+    /// The transfers of pinned memory, so those nobody polls still complete.
+    pub(crate) transfers: Arc<Transfers>,
+    pub(crate) driver: Arc<Driver>,
+    /// Which device bytes each Buffer owns; outlives the device through its Buffers.
+    pub(crate) allocator: Arc<Allocator>,
+    pub(crate) placement: Placement,
 }
-
-/// Allocator bytes per chip in the common PE-owned window, excluding driver and firmware reservations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Memory {
-    /// Initial capacity of the window, rounded down to whole allocation units.
-    pub capacity: usize,
-    /// Free bytes after subtracting live allocations and their alignment padding.
-    pub available: usize,
-    /// Largest contiguous free span; zero when exhausted, not a reservation for a later allocation.
-    pub largest: usize,
-}
-
-/// A chip's position in its device, from 0 up to [`Device::chips`]: what a transfer names a
-/// chip by, not the chip's id on the host. A device of chip 3 alone has rank 0 only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ChipRank(usize);
-
-/// The chips a runtime opens, each contributing one cluster of `pes` PEs (1, 2 or 4) or, for 8,
-/// both clusters. Which chips is [`Builder::among`]'s to narrow: the first window whose lowest PEs
-/// no other process holds wins, and ascending chip order fixes the ranks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Topology {
-    /// Number of chips.
-    pub chips: u8,
-    /// Number of PEs per chip.
-    pub pes: u8,
-}
-
-impl From<(u8, u8)> for Topology {
-    fn from((chips, pes): (u8, u8)) -> Self {
-        Self { chips, pes }
-    }
-}
-
-/// How a device is opened; see [`Device::builder`].
-pub struct Builder {
-    topology: Topology,
-    timeout: Duration,
-    among: Option<Vec<u8>>,
-}
-
-/// How long a cluster lets one launch run before failing it, unless the builder says otherwise. The
-/// driver fails an unanswered doorbell at 60 s, so a timeout stays well under that.
-const TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Device {
-    /// Opens the chips `topology` names with the default options; see [`Device::builder`].
-    pub fn open(topology: impl Into<Topology>) -> Result<Self> {
-        Self::builder(topology).open()
-    }
-
-    /// Prepares to open the chips `topology` names, bringing up the firmware image on every
-    /// cluster once [`Builder::open`] runs.
-    pub fn builder(topology: impl Into<Topology>) -> Builder {
-        Builder {
-            topology: topology.into(),
-            timeout: TIMEOUT,
-            among: None,
-        }
-    }
-}
-
-impl Builder {
-    /// How long a cluster lets one launch run before failing it: 5 s unless set, in whole seconds
-    /// rounded up. [`Builder::open`] refuses zero and a limit past the driver's own deadline.
-    pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-
-    /// The chips a device may be chosen from; every exposed chip unless set.
-    /// Whoever decides that policy, an environment variable or a scheduler, decides it out here.
-    pub fn among(mut self, chips: impl IntoIterator<Item = u8>) -> Self {
-        self.among = Some(chips.into_iter().collect());
-        self
-    }
-
-    pub fn open(self) -> Result<Device> {
-        let Topology { chips, pes } = self.topology;
-        {
-            let placements = PeRange::placements(pes)?;
-            // The chips the host exposes, narrowed to `among` when set.
-            let exposed = || -> Result<Vec<u8>> {
-                let mut chips = std::fs::read_dir(DEVICE_DIR)
-                    .map_err(|why| Error::Topology(why.to_string()))?
-                    .filter_map(|entry| {
-                        let name = entry.ok()?.file_name();
-                        name.to_str()?
-                            .strip_prefix("npu")?
-                            .strip_suffix("mgmt")?
-                            .parse::<u8>()
-                            .ok()
-                    })
-                    .collect::<Vec<_>>();
-                chips.sort_unstable();
-                chips.dedup();
-                Ok(chips)
-            };
-            let mut available = exposed()?;
-            if let Some(among) = &self.among {
-                available.retain(|chip| among.contains(chip));
-            }
-            if chips == 0 || chips as usize > available.len() {
-                return Err(Error::Topology(format!(
-                    "invalid NPU chip count {chips}: {chips} chip(s) requested, {} present",
-                    available.len(),
-                )));
-            }
-            // Only PEs another process holds are worth passing over; any other failure is a
-            // fault this process must see.
-            let mut reserved = None;
-            for (window, placement) in available
-                .windows(chips as usize)
-                .flat_map(|window| placements.iter().map(move |placement| (window, placement)))
-            {
-                match self.open_chips(window, placement, pes) {
-                    Ok(device) => return Ok(device),
-                    Err(Error::Reserved(chip)) => {
-                        log::debug!("npu{window:?} {placement:?} is not free: npu{chip} holds it");
-                        reserved = Some(Error::Reserved(chip));
-                    }
-                    Err(error) => return Err(error),
+    /// Opens candidates in order, skipping only [`Error::Reserved`]; empty candidates are invalid.
+    pub fn new(placements: impl ToPlacements) -> Result<Self> {
+        let unpark = Arc::new(worker::Unpark::default());
+        let waker = Waker::from(Arc::clone(&unpark));
+        let mut reserved = None;
+        for placement in placements.to_placements()? {
+            let driver = match Driver::open(placement.clone(), waker.clone()) {
+                Err(Error::Reserved(chip)) => {
+                    reserved = Some(Error::Reserved(chip));
+                    continue;
                 }
-            }
-            Err(reserved.unwrap_or_else(|| Error::Topology("no candidate chips".into())))
+                opened => opened?,
+            };
+            let allocator = Arc::new(Allocator::over(driver.topology, driver.allocatable.clone()));
+            let driver = Arc::new(driver);
+            let launches = Arc::<Launches>::default();
+            let transfers = Arc::new(Transfers::new(waker.clone()));
+            let work = Work {
+                launches: Arc::clone(&launches),
+                transfers: Arc::clone(&transfers),
+                driver: Arc::clone(&driver),
+            };
+            return Ok(Self {
+                worker: Worker::spawn(work, unpark),
+                launches,
+                transfers,
+                driver,
+                allocator,
+                placement,
+            });
         }
+        Err(reserved.unwrap_or_else(|| Error::Invalid("no placement candidates".into())))
     }
 
-    /// Opens exactly `chips`, each contributing the clusters at `placement`, `pes` PEs in all.
-    fn open_chips(&self, chips: &[u8], placement: &[PeRange], pes: u8) -> Result<Device> {
-        let clusters = Cluster::across(chips, placement)?;
-        let engine = Engine::open(clusters, IMAGES, self.timeout)?;
-        let allocations = Arc::clone(&engine.allocations);
-        Ok(Device {
-            engine: Arc::new(engine),
-            allocations,
-            tokens: std::sync::atomic::AtomicU64::new(0),
-            pes,
-        })
-    }
-}
-
-#[cfg(test)]
-impl Device {
-    /// A device of `chips` with `pes` PEs each and no hardware behind it; see [`Engine::stub`].
-    pub(crate) fn stub(chips: &[u8], pes: u8) -> Self {
-        let allocations = Arc::new(Allocations::new(0..4096));
-        Self {
-            engine: Arc::new(Engine::stub(chips, Arc::clone(&allocations))),
-            allocations,
-            tokens: std::sync::atomic::AtomicU64::new(0),
-            pes,
-        }
-    }
-}
-
-/// The two images embedded in the host binary and run by every cluster.
-const IMAGES: engine::Images = engine::Images {
-    boot: include_bytes!(env!("FURIOSA_OPT_BOOTLOADER")),
-    device: include_bytes!(env!("FURIOSA_OPT_DEVICE_IMAGE")),
-};
-
-const DEVICE_DIR: &str = "/dev/rngd";
-
-impl Device {
-    /// Chips in the device; a [`Buffer::on_all`] view moves this many buffers' worth of host bytes.
-    pub fn chips(&self) -> usize {
-        self.engine.chips()
-    }
-
-    /// PEs of each chip the device holds; a function loads only when compiled for as many.
-    pub fn pes(&self) -> u8 {
-        self.pes
-    }
-
-    /// The chip at position `index` of the device, for a [`Buffer::on`] view.
-    pub fn rank(&self, index: usize) -> Result<ChipRank> {
-        (index < self.chips()).then_some(ChipRank(index)).ok_or_else(|| {
-            Error::Topology(format!(
-                "chip rank {index} is outside a device of {} chips",
-                self.chips()
-            ))
-        })
-    }
-
-    /// Every chip of the device in order, for one [`Buffer::on`] view each.
-    pub fn ranks(&self) -> impl Iterator<Item = ChipRank> + use<> {
-        (0..self.chips()).map(ChipRank)
-    }
-
-    /// Takes one DRAM allocator snapshot; fails if the allocator lock is poisoned.
+    /// Allocates `len` bytes of `kind` memory at one address on every chip.
     ///
-    /// The figures describe the moment of the call and reserve nothing. An allocation between this
-    /// call and the next may take the span this reported, so a subsequent request for it can still
-    /// fail, and the caller handles that failure rather than assuming it away. Read `largest` as the
-    /// ceiling a request may start from, not as a promise it will be met.
-    pub fn memory(&self) -> Result<Memory> {
-        Ok(self.allocations.memory()?)
+    /// - `Dram` takes, among the free spans that fit, the lowest one that puts the fewest bytes in
+    ///   the peer window at the bottom of DRAM; `DramShared` takes the lowest one inside it.
+    /// - SRAM residents fill down from the top, while each admitted launch's temporaries take the
+    ///   SRAM below its image's `sram_end`. A resident that would start below those temporaries
+    ///   fails with [`Error::SramOverlap`], as a launch does whose temporaries would reach the lowest
+    ///   resident.
+    /// - Dropped bytes are free again once their last owner, a running launch or transfer included,
+    ///   lets go of them; [`Error::OutOfMemory`] when no free span fits.
+    pub fn alloc(&self, kind: Kind, len: usize) -> Result<Buffer> {
+        self.allocator.alloc(kind, len)
     }
 
-    /// Allocates `len` bytes in `memory` at one address on every chip.
-    pub fn alloc(&self, memory: image::Memory, len: usize) -> Result<Buffer> {
-        Ok(self.allocations.alloc(memory, len)?)
-    }
-
-    /// Copies each host slice into its view: `(bytes, buffer.on(rank))` fills one chip,
-    /// `(bytes, buffer.on_all())` deals one buffer's worth per chip in chip order. Every pair moves
-    /// at once. Panics when a slice is not exactly its view's size, as `copy_from_slice` does; a
-    /// view whose buffer or rank is another device's is [`Error::ForeignBuffer`]. Slices of
-    /// [`crate::Pinned`] memory need no pinning for the transfer; others are pinned for its duration.
-    pub async fn write(&self, pairs: impl IntoIterator<Item = (&[u8], View)>) -> Result<()> {
-        self.engine.write(pairs).await
-    }
-
-    /// Copies each view into its host slice, with the same terms as [`Self::write`].
-    pub async fn read(&self, pairs: impl IntoIterator<Item = (View, &mut [u8])>) -> Result<()> {
-        self.engine.read(pairs).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reports_live_allocations() -> Result<()> {
-        let device = Device::stub(&[0, 1], 8);
-        let before = device.memory()?;
-
-        let buffer = device.alloc(image::Memory::Dram, 257)?;
-
-        let after = device.memory()?;
-        assert_eq!(after.capacity, before.capacity);
-        assert!(before.available - after.available >= buffer.size());
-        assert_eq!(before.available - after.available, 512);
-        assert!(after.largest <= after.available);
-        drop(buffer);
-        assert_eq!(device.memory()?, before);
+    /// Registers pinned host memory for firmware-issued DMA on every cluster.
+    ///
+    /// Registration and descriptor upload happen once, before launch; launches then take its views
+    /// as [`crate::Argument::Host`], and `write` and `read` move it on the clusters' channels. The
+    /// driver retains the pinned pages until this device closes. Each mapped allocation is limited
+    /// to `u32::MAX` bytes by the DMA operand encoding. [`Error::Unsupported`] when the driver
+    /// reserves no PDMA channels for the firmware; `write` and `read` then move the memory on the driver's.
+    pub async fn map(&self, pinned: &mut Pinned) -> Result<()> {
+        self.driver.pdma()?;
+        if pinned
+            .registration()
+            .is_some_and(|registration| registration.belongs_to(&self.allocator))
+        {
+            return Ok(());
+        }
+        let len = u32::try_from(pinned.len())
+            .map_err(|_| Error::Invalid("a mapped host allocation exceeds 4 GiB - 1 byte".into()))?;
+        let invalid = || Error::Device("the driver's DMA mapping does not cover the host allocation".into());
+        let tables = self
+            .driver
+            .register(pinned.dmabuf().fd().as_raw_fd())?
+            .into_iter()
+            .map(|segments| rngd::dma::SegmentTable::encode(len.into(), segments).ok_or_else(invalid))
+            .collect::<Result<Vec<_>>>()?;
+        // A chip's clusters' tables lie one after another, at the same offsets on every chip.
+        let clusters = tables.len() / self.driver.chips.len();
+        let mut end = 0;
+        let offsets = (tables.iter().enumerate())
+            .map(|(cluster, words)| {
+                let at = if cluster % clusters == 0 { 0 } else { end };
+                end = (at + words.len() * size_of::<u64>()).next_multiple_of(TABLE_ALIGNMENT);
+                at
+            })
+            .collect::<Vec<_>>();
+        let size = offsets
+            .iter()
+            .zip(&tables)
+            .map(|(at, words)| at + words.len() * size_of::<u64>())
+            .max();
+        let mut table = self.alloc(Kind::Dram, size.unwrap_or(0))?;
+        for (cluster, (words, &at)) in tables.iter().zip(&offsets).enumerate() {
+            let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+            let view = table.slice_mut(at..at + bytes.len())?.on(cluster / clusters)?;
+            self.write([(bytes.as_slice().into(), view)]).await?;
+        }
+        pinned.set_registration(Some(Arc::new(Registration { tables: table, offsets })));
         Ok(())
     }
+
+    /// Waits for every launch and transfer admitted before this call, epilogues included; the
+    /// driver's first failure once the device failed.
+    pub fn synchronize(&self) -> impl Future<Output = Result<()>> + Send + use<> {
+        self.work().drained()
+    }
+
+    /// Cluster `cluster`'s clock, in device rank order.
+    pub fn clock(&self, cluster: usize) -> Result<Clock<'_>> {
+        if cluster >= self.topology().clusters() {
+            return Err(Error::Invalid(format!("the device has no cluster {cluster}")));
+        }
+        Ok(Clock { device: self, cluster })
+    }
+
+    /// The chip count and processing elements per chip held by this device.
+    pub fn topology(&self) -> Topology {
+        self.allocator.topology()
+    }
+
+    /// The physical chips and PEs this device opened.
+    pub fn placement(&self) -> &Placement {
+        &self.placement
+    }
+
+    /// Bytes per chip that `kind` allocations can occupy, live or free: what the driver and firmware
+    /// leave, rounded down to whole allocation units.
+    pub fn capacity(&self, kind: Kind) -> usize {
+        self.allocator.capacity(kind)
+    }
+
+    /// Free `kind` memory per chip now, as [`Device::alloc`] of that kind can take it.
+    pub fn usage(&self, kind: Kind) -> Usage {
+        self.allocator.usage(kind)
+    }
+
+    /// The launches and transfers this device admitted.
+    pub(crate) fn work(&self) -> Work {
+        Work {
+            launches: Arc::clone(&self.launches),
+            transfers: Arc::clone(&self.transfers),
+            driver: Arc::clone(&self.driver),
+        }
+    }
+
+    /// Runs `admit`; on [`Error::Busy`] collects the work this device finished and runs it once
+    /// more. The caller must hold no transfer slot's lock.
+    pub(crate) fn admit<T>(&self, mut admit: impl FnMut() -> Result<T>) -> Result<T> {
+        match admit() {
+            Err(Error::Busy) => {
+                self.work().complete(Contention::Wait);
+                admit()
+            }
+            result => result,
+        }
+    }
 }
+
+/// One cluster's ARM counter, read against the host's clock.
+pub struct Clock<'d> {
+    device: &'d Device,
+    cluster: usize,
+}
+
+impl Clock<'_> {
+    /// The counter between two host clock reads; `None` while the cluster has work in flight,
+    /// which the read would wait behind.
+    pub fn read(&self) -> Result<Option<ClockReading>> {
+        let host = || {
+            let mut time = nix::libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            // SAFETY: `time` is writable storage for the requested monotonic clock.
+            if unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_MONOTONIC_RAW, &mut time) } != 0 {
+                return Err(Error::Device(std::io::Error::last_os_error().to_string()));
+            }
+            Ok(time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64)
+        };
+        let mut mailboxes = self.device.driver.mailboxes.lock().unwrap();
+        let mailbox = (mailboxes.get_mut(self.cluster)).ok_or_else(crate::driver::dma::stopped)?;
+        if !mailbox.idle() {
+            return Ok(None);
+        }
+        let before = host()?;
+        let counter = (mailbox.call(&furiosa_opt_ipc::Clock)?)
+            .map_err(|failure| crate::driver::mailbox::refused::<furiosa_opt_ipc::Clock>(self.cluster, &failure))?;
+        let after = host()?;
+        Ok(Some(ClockReading { before, counter, after }))
+    }
+}
+
+/// A cluster's ARM counter in ticks, read between two host `CLOCK_MONOTONIC_RAW` readings in ns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockReading {
+    pub before: u64,
+    pub counter: u64,
+    pub after: u64,
+}
+
+/// What collecting a device's work does with a launch slot another thread is advancing now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Contention {
+    /// Skip it: the worker never waits for a slot that an admission is binding.
+    Skip,
+    /// Wait for it, so every launch the hardware finished releases its memory before this returns.
+    Wait,
+}
+
+/// The launches and transfers a device admitted.
+pub(crate) struct Work {
+    launches: Arc<Launches>,
+    transfers: Arc<Transfers>,
+    driver: Arc<Driver>,
+}
+
+impl Work {
+    /// Advances the admitted transfers, then [`Self::collect`]s; true when none of either is in
+    /// flight.
+    pub(crate) fn complete(&self, contention: Contention) -> bool {
+        self.transfers.poll() & self.collect(contention)
+    }
+
+    /// Collects the launches and DMA the hardware finished, running their epilogues; true when
+    /// none is in flight. A failed device finishes no launch any more, so its launches count as
+    /// done. A transfer waits with this, never [`Self::complete`], so no transfer runs inside
+    /// another.
+    pub(crate) fn collect(&self, contention: Contention) -> bool {
+        let launches = self.launches.complete(contention) || self.driver.poison.get().is_some();
+        self.driver.dma.complete() && launches
+    }
+
+    /// Ends once every launch and transfer admitted before this call ended, epilogues included;
+    /// fails with the device's first failure once it failed.
+    fn drained(&self) -> impl Future<Output = Result<()>> + Send + use<> {
+        let launched = self.launches.launched();
+        // Jobs first: a slot a job submits after this is covered by the job's end.
+        let jobs = self.transfers.submitted().into_iter().map(Pending::Job);
+        let slots = (self.driver.dma.submitted()).map(|(index, sequence)| Pending::Slot { index, sequence });
+        let submitted = jobs.chain(slots).collect::<Vec<_>>();
+        let (transfers, driver) = (Arc::clone(&self.transfers), Arc::clone(&self.driver));
+        std::future::poll_fn(move |context| {
+            if let Some(error) = driver.poison.get() {
+                return Poll::Ready(Err(error.clone()));
+            }
+            let ended = |pending: &Pending| match *pending {
+                Pending::Job(sequence) => transfers.ended(sequence, context.waker()),
+                Pending::Slot { index, sequence } => driver.dma.ended(index, sequence, context.waker()),
+            };
+            if launched.ended(context.waker()) && submitted.iter().all(ended) {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        })
+    }
+
+    /// Stops task code on every cluster, before its DMA channels or peer mappings are released.
+    fn stop(&self) {
+        self.driver.stop();
+    }
+}
+
+/// A transfer admitted before a [`Device::synchronize`], which waits for its end.
+enum Pending {
+    /// A job of [`Transfers`], by admission number.
+    Job(u64),
+    /// A submitted DMA queue slot, by index and generation.
+    Slot { index: usize, sequence: u64 },
+}
+
+/// Where a cluster's host descriptor table may start: `rngd::dma::Operand` stores the table
+/// address in 256-byte units.
+const TABLE_ALIGNMENT: usize = 256;

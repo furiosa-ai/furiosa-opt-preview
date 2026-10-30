@@ -1,10 +1,100 @@
 //! Deferred SRAM redistribution.
+//!
+//! A redistribution is a plan, not a transfer. `DmRedistributeView` accumulates the steps, and
+//! only `to_dm` / `to_dm_view` moves bytes, by composing [`super::dma`] direct copies.
+//!
+//! This module owns the **stage adjacency matrix**: the `CanRedistributeTo` edges that gate which
+//! stage a step may be applied to. Each block below lists every outgoing edge from that stage.
+//! The set is normative: it must equal the `impl CanRedistributeTo<Yyy> for Xxx {}` lines below.
+//!
+//! # Stage graph
+//!
+//! ```text
+//! DmTensor / DmTensorView      (entry; each method names the stage it produces)
+//!     ├── chip_shuffle             →  ChipShuffle
+//!     ├── cluster_swap             →  ClusterSwap
+//!     ├── chip_slice               →  ChipSlice
+//!     └── cluster_slice            →  ClusterSlice
+//!
+//! ChipShuffle
+//!     ├── cluster_swap             →  ClusterSwap
+//!     ├── chip_slice               →  ChipSlice
+//!     └── cluster_slice            →  ClusterSlice
+//!
+//! ClusterSwap
+//!     ├── chip_slice               →  ChipSlice
+//!     └── cluster_slice            →  ClusterSlice
+//!
+//! ChipSlice
+//!     ├── chip_slice               →  ChipSlice      (one more axis)
+//!     └── cluster_slice            →  ClusterSlice
+//!
+//! ClusterSlice
+//!     └── cluster_slice            →  ClusterSlice   (one more axis)
+//!
+//! Every stage
+//!     ├── to_dm                    →  DmTensor
+//!     └── to_dm_view               →  writes an existing DmTensorViewMut
+//! ```
+//!
+//! The steps run in that order and never go back. `chip_shuffle` and `cluster_swap` permute whole
+//! clusters, so each applies at most once. The two slice steps select one position per target,
+//! so they repeat, and each call appends its axis to `AxesToSlice`.
+
+use std::marker::PhantomData;
+
+use furiosa_mapping::*;
+use furiosa_opt_macro::primitive;
+
+use crate::backend::Backend;
+use crate::context::*;
+use crate::scalar::*;
+use crate::tensor::*;
 
 use super::*;
 use furiosa_opt_lower::{
     ClusterPlacement, SliceRequest, SramRedistributeEntry, config_outermost_dm_slice, config_slice,
     validate_chip_shuffle, validate_slice_indices, validate_sram_redistribution,
 };
+
+#[doc(hidden)]
+pub trait RedistributionStage: std::fmt::Debug {}
+
+#[doc(hidden)]
+pub trait CanRedistributeTo<Next: RedistributionStage>: RedistributionStage {}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ChipShuffle;
+impl RedistributionStage for ChipShuffle {}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ClusterSwap;
+impl RedistributionStage for ClusterSwap {}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ChipSlice;
+impl RedistributionStage for ChipSlice {}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ClusterSlice;
+impl RedistributionStage for ClusterSlice {}
+
+// One group per source stage, in the order of the stage graph above.
+impl CanRedistributeTo<ClusterSwap> for ChipShuffle {}
+impl CanRedistributeTo<ChipSlice> for ChipShuffle {}
+impl CanRedistributeTo<ClusterSlice> for ChipShuffle {}
+
+impl CanRedistributeTo<ChipSlice> for ClusterSwap {}
+impl CanRedistributeTo<ClusterSlice> for ClusterSwap {}
+
+impl CanRedistributeTo<ChipSlice> for ChipSlice {}
+impl CanRedistributeTo<ClusterSlice> for ChipSlice {}
+
+impl CanRedistributeTo<ClusterSlice> for ClusterSlice {}
 
 impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<D, Chip, Cluster, Slice, Element, B> {
     /// Swaps the two clusters; the output mapping does not record the selected source clusters.
@@ -113,53 +203,6 @@ impl AxesToSlice for NoAxesToSlice {
         Vec::new()
     }
 }
-
-#[doc(hidden)]
-pub trait RedistributionStage: std::fmt::Debug {}
-
-#[doc(hidden)]
-pub trait CanRedistributeTo<Next: RedistributionStage>: RedistributionStage {}
-
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct Init;
-impl RedistributionStage for Init {}
-
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct ChipShuffle;
-impl RedistributionStage for ChipShuffle {}
-
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct ClusterSwap;
-impl RedistributionStage for ClusterSwap {}
-
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct ChipSlice;
-impl RedistributionStage for ChipSlice {}
-
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct ClusterSlice;
-impl RedistributionStage for ClusterSlice {}
-
-impl CanRedistributeTo<ChipShuffle> for Init {}
-
-impl CanRedistributeTo<ClusterSwap> for Init {}
-impl CanRedistributeTo<ClusterSwap> for ChipShuffle {}
-
-impl CanRedistributeTo<ChipSlice> for Init {}
-impl CanRedistributeTo<ChipSlice> for ChipShuffle {}
-impl CanRedistributeTo<ChipSlice> for ClusterSwap {}
-impl CanRedistributeTo<ChipSlice> for ChipSlice {}
-
-impl CanRedistributeTo<ClusterSlice> for Init {}
-impl CanRedistributeTo<ClusterSlice> for ChipShuffle {}
-impl CanRedistributeTo<ClusterSlice> for ClusterSwap {}
-impl CanRedistributeTo<ClusterSlice> for ChipSlice {}
-impl CanRedistributeTo<ClusterSlice> for ClusterSlice {}
 
 #[doc(hidden)]
 #[derive(Debug, Clone)]
@@ -671,4 +714,29 @@ pub(super) fn assert_slice_indices<Axis: M>(indices: &[usize], num_targets: usiz
 
 pub(super) fn assert_chip_shuffle_pattern(pattern: &[usize], num_chips: usize) {
     validate_chip_shuffle(pattern, num_chips).unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::backend::Cpu;
+    use crate::runtime::{Device, Topology};
+
+    #[test]
+    fn cpu_redistribution_accepts_an_equivalent_output_factorization() {
+        axes![X = 4, Tail = 2];
+
+        let input = DmTensor::<i32, m![1], m![1 # 2], m![1 # 64], m![X / 2 % 2, X % 2, Tail], Cpu>::from_parts(
+            Tensor::from_vec((0..2 * 64 * X::SIZE * Tail::SIZE).map(|value| value as i32)),
+        );
+        let expected = input.view().inner.read().into_vec();
+        let mut device = Device::new(Topology { chips: 1, pes: 8 }).unwrap();
+        let output = input
+            .view()
+            .chip_shuffle([0])
+            .to_dm::<m![X % 4, Tail]>(&mut device.tdma);
+
+        assert_eq!(output.view().inner.read().into_vec(), expected);
+    }
 }

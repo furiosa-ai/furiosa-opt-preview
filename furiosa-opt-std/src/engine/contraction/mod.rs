@@ -9,7 +9,7 @@
 //! Output: a [`ContractTensor`], at [`PositionContraction`].
 //!
 //! The engine always defers: a [`LazyContraction`] carrier threads through all four stages untouched and
-//! is finalized once, at the Lane Folder, with one fused [`crate::backend::Backend::contraction`].
+//! is finalized once, at the Lane Folder, with one fused `Backend::contraction`.
 //! See [`LazyContraction`].
 
 pub mod lane;
@@ -35,7 +35,7 @@ use crate::tensor::tu::{Position, TuTensor};
 /// The two un-broadcast operands (already widened to the contraction output type) plus the mappings
 /// the Lane Folder needs to fuse them, stashed by the Outer stage in place of a materialized product.
 /// This is the only inner value a contraction stage carries: the Packet/Time reducers pass it through
-/// untouched, and [`lane::contract_lane`] (via [`crate::backend::Backend::contraction`]) finalizes it
+/// untouched, and [`lane::contract_lane`] (via `Backend::contraction`) finalizes it
 /// with one fused multiply-reduce, allocating zero product cells — so a wide-output GEMM never
 /// materializes the hundreds-of-MB `pre_reduce`-shaped outer product.
 #[derive(Debug, Clone)]
@@ -113,7 +113,7 @@ pub struct ContractTimeTensor<
     /// The deferred carrier (see [`LazyContraction`]); [`lane::contract_lane`] finalizes it.
     pub(crate) inner: LazyContraction<D, B>,
     /// Pre-reduce `Time` mapping captured by `contract_time`, used by `contract_lane` to
-    /// derive the cross-stage `inner_size` accumulator-buffer bound.
+    /// derive the cross-stage accumulator-buffer bound (`inner_reduce_extent`).
     pub(crate) pre_reduce_time: Mapping,
     /// Axis typestate the stage transitions carry; `inner` is mapping-free.
     pub(crate) _axes: PhantomData<(Chip, Cluster, Slice, Lane, Time, Packet)>,

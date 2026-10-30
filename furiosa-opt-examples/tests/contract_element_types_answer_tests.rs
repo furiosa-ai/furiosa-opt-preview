@@ -1,9 +1,7 @@
 //! Answer-key tests for the per-element-type contraction kernels: run the
 //! `#[device]` body under the default (simulation) backend and compare against
-//! an independent hand-computed true-math oracle. Unlike the `npu-visa-test`
-//! `compare_edf` tests (VISA-sim vs LIR/EDF), this pins whether the VISA/device
-//! simulation itself is correct, localizing a divergence to either the
-//! eDSL/example or the LIR lowering.
+//! an independent hand-computed true-math oracle. This pins whether the
+//! VISA/device simulation itself is correct.
 
 use furiosa_opt_examples::contract_element_types::{A, K8, R, i8_contract};
 use furiosa_opt_std::prelude::*;
@@ -12,9 +10,6 @@ use rand::{Rng, SeedableRng};
 
 type Chip = m![1];
 
-// Same seeded input as `npu-visa-test`'s `test_i8_contract`, so a pass here
-// (VISA-sim == true math) means the sub-mac contraction bug is in the LIR
-// lowering, not the eDSL/simulation.
 #[tokio::test]
 async fn answer_i8_contract() -> eyre::Result<()> {
     const AN: usize = 8;

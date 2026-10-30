@@ -97,7 +97,7 @@ mod rejects {
         );
     }
 
-    /// Padding on an inner factor may not be dropped, as in a101's `block::linear2` weight tile.
+    /// Padding on an inner factor may not be dropped.
     #[test]
     fn inner_padding_omitted() {
         let error = config_tile(TileInput {

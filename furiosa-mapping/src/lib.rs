@@ -73,7 +73,7 @@ pub trait MappingExt: Sized {
     fn axes(&self) -> Vec<AxisTerm>;
     /// Whether every position reads the same cell across this mapping's extent.
     fn is_broadcast(&self) -> bool;
-    /// Whether this mapping contains inaccessible [`PaddingKind::Bottom`] cells.
+    /// Whether this mapping contains non-writable [`PaddingKind::Bottom`] cells.
     fn has_bottom_pad(&self) -> bool;
     /// Whether every position of this mapping holds a cell of its own: no padding of any kind.
     fn has_no_padding(&self) -> bool;

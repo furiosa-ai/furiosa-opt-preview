@@ -3,8 +3,7 @@
 //! The branch condition is an arbitrary runtime scalar: the example derives a `bool` variable from the
 //! loop index (`let take_then = i == 0;`) and branches on it, exercising the condition path end to end.
 //!
-//! Statement forms and supported value merges compile end to end to EDF. The remaining
-//! loop-carried value merges live in `npu-opt-examples::unsupported::runtime_if`.
+//! Statement forms and supported value merges compile end to end to EDF.
 
 use furiosa_opt_std::prelude::*;
 
@@ -119,4 +118,100 @@ pub fn runtime_if_const(device: &mut Device, input: &HbmTensor<i32, Chip, m![W]>
     };
 
     result.to_hbm(&mut device.tdma)
+}
+
+/// Array index selected by a branch: `inputs[if pick == 0 { 0 } else { 1 }]` picks a parameter, so
+/// the index is the branch's merged scalar rather than a constant or a loop index. It lowers to a
+/// runtime `BufferSelect` over the two HBM parameters.
+///
+/// The branch is the kernel's only one and `pick` comes from the host, so it never folds and the
+/// caller checks both selections by running the kernel once per value.
+/// Oracle: `output = (if pick == 0 { first } else { second }) + 1`.
+#[device(chip = 1, pe = 4)]
+pub fn runtime_if_array_index(
+    device: &mut Device,
+    pick: &HbmScalar<usize>,
+    first: &HbmTensor<i32, Chip, m![W]>,
+    second: &HbmTensor<i32, Chip, m![W]>,
+) -> HbmTensor<i32, Chip, m![W]> {
+    let inputs = [first, second];
+    let pick = pick.to_spm(&mut device.tdma);
+    let selected: Row = inputs[if pick == 0 { 0 } else { 1 }].to_dm(&mut device.tdma);
+    add_const(device, &selected, 1).to_hbm(&mut device.tdma)
+}
+
+/// Both arms assign the same runtime scalar; the join must replace the prior constant binding.
+#[device(chip = 1, pe = 4)]
+pub fn runtime_if_same_scalar(
+    device: &mut Device,
+    pick: &HbmScalar<usize>,
+    first: &HbmTensor<i32, Chip, m![W]>,
+    second: &HbmTensor<i32, Chip, m![W]>,
+) -> HbmTensor<i32, Chip, m![W]> {
+    let inputs = [first, second];
+    let pick = pick.to_spm(&mut device.tdma);
+    let mut index = 0;
+    #[expect(clippy::if_same_then_else, reason = "Identical arms exercise rebinding at the join.")]
+    if pick == 0 {
+        index = pick;
+    } else {
+        index = pick;
+    }
+    let selected: Row = inputs[index].to_dm(&mut device.tdma);
+    add_const(device, &selected, 1).to_hbm(&mut device.tdma)
+}
+
+/// Both arms assign the same tensor; the join must replace the prior tensor binding.
+#[device(chip = 1, pe = 4)]
+pub fn runtime_if_same_tensor(
+    device: &mut Device,
+    pick: &HbmScalar<usize>,
+    first: &HbmTensor<i32, Chip, m![W]>,
+    second: &HbmTensor<i32, Chip, m![W]>,
+) -> HbmTensor<i32, Chip, m![W]> {
+    let pick = pick.to_spm(&mut device.tdma);
+    let shared: Row = first.to_dm(&mut device.tdma);
+    let mut selected: Row = second.to_dm(&mut device.tdma);
+    #[expect(clippy::if_same_then_else, reason = "Identical arms exercise rebinding at the join.")]
+    if pick == 0 {
+        selected = shared;
+    } else {
+        selected = shared;
+    }
+    add_const(device, &selected, 1).to_hbm(&mut device.tdma)
+}
+
+/// Runtime `!=` chooses the second input for 1 and the first for 0.
+#[device(chip = 1, pe = 4)]
+pub fn runtime_if_not_equal(
+    device: &mut Device,
+    pick: &HbmScalar<usize>,
+    first: &HbmTensor<i32, Chip, m![W]>,
+    second: &HbmTensor<i32, Chip, m![W]>,
+) -> HbmTensor<i32, Chip, m![W]> {
+    let inputs = [first, second];
+    let pick = pick.to_spm(&mut device.tdma);
+    let index = if pick != 0 { 1 } else { 0 };
+    let selected: Row = inputs[index].to_dm(&mut device.tdma);
+    add_const(device, &selected, 1).to_hbm(&mut device.tdma)
+}
+
+/// Two scalar phis share a skip value: 0 selects the second input, 1 the first.
+#[device(chip = 1, pe = 4)]
+pub fn runtime_if_shared_scalar_initial(
+    device: &mut Device,
+    pick: &HbmScalar<usize>,
+    first: &HbmTensor<i32, Chip, m![W]>,
+    second: &HbmTensor<i32, Chip, m![W]>,
+) -> HbmTensor<i32, Chip, m![W]> {
+    let inputs = [first, second];
+    let pick = pick.to_spm(&mut device.tdma);
+    let mut a = pick;
+    let mut b = pick;
+    if pick == 0 {
+        a = pick + 1;
+        b = pick + 2;
+    }
+    let selected: Row = inputs[(a + b) % 2].to_dm(&mut device.tdma);
+    add_const(device, &selected, 1).to_hbm(&mut device.tdma)
 }

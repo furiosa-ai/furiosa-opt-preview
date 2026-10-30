@@ -24,7 +24,7 @@
 //! }
 //! #
 //! # fn main() -> Result<(), Error> {
-//! # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
+//! # let mut device: Device = Device::new(Topology { chips: 1, pes: 8 })?;
 //! # let input: BeginTensor<'_, _, i32, m![1], m![1 # 2], m![1 # 256], m![1], m![A]> =
 //! #     BeginTensor::new(&mut device.sub, Tensor::zero());
 //! # let _vrf = store(input);
@@ -60,7 +60,7 @@
 //! }
 //! #
 //! # fn main() -> Result<(), Error> {
-//! # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
+//! # let mut device: Device = Device::new(Topology { chips: 1, pes: 8 })?;
 //! # let input: BeginTensor<'_, { Tu::Main }, f32, m![1], m![1 # 2], m![1 # 256], m![1], m![A]> =
 //! #     BeginTensor::new(&mut device.main, Tensor::zero());
 //! # let _vrf = store(input, &mut device.sub);
@@ -95,7 +95,7 @@
 //! }
 //! #
 //! # fn main() -> Result<(), Error> {
-//! # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
+//! # let mut device: Device = Device::new(Topology { chips: 1, pes: 8 })?;
 //! # let input: BeginTensor<'_, { Tu::Main }, f32, m![1], m![1 # 2], m![1 # 256], m![1], m![A]> =
 //! #     BeginTensor::new(&mut device.main, Tensor::zero());
 //! # let _vrf = store(input, &mut device.sub);
@@ -119,7 +119,7 @@
 //! }
 //! #
 //! # fn main() -> Result<(), Error> {
-//! # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
+//! # let mut device: Device = Device::new(Topology { chips: 1, pes: 8 })?;
 //! # let input: BeginTensor<'_, _, i32, m![1], m![1 # 2], m![1 # 256], m![1], m![A]> =
 //! #     BeginTensor::new(&mut device.sub, Tensor::zero());
 //! # let _vrf = store(input);

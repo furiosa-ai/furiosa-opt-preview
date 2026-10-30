@@ -1,5 +1,5 @@
 //! Negative fixture for the "vISA scalar operand must be a compile-time constant"
-//! diagnostic (npu-visa-translate `eval_cast`).
+//! diagnostic.
 //!
 //! The kernel feeds a bare `<m![A]>::SIZE as f32` into a vISA scalar op without the
 //! required `const { .. }` wrapper. The inner `<m![A]>::SIZE` const-folds, but the

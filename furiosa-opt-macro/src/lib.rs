@@ -128,9 +128,9 @@ pub fn primitive(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// Derive macro for DeviceSend trait.
+/// Derive macro for the DeviceSend trait.
 ///
-/// Generates an owned implementation for structs whose fields are `DeviceSend`.
+/// Preserves owned, shared, and mutable field access when binding a struct.
 ///
 /// # Compile-time Checks
 ///
@@ -166,39 +166,34 @@ pub fn device_send(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let augment =
-        |where_clause: Option<&syn::WhereClause>, bounds: Vec<TokenStream2>| match (where_clause, bounds.is_empty()) {
-            (Some(clause), true) => quote!(#clause),
-            (Some(clause), false) => quote!(#clause, #(#bounds),*),
-            (None, true) => quote!(),
-            (None, false) => quote!(where #(#bounds),*),
-        };
-
-    let sendable = augment(
-        where_clause,
+    let (_, ty_generics, _) = input.generics.split_for_impl();
+    let mut generics = input.generics.clone();
+    generics.make_where_clause().predicates.extend(
         tys.iter()
-            .map(|ty| quote!(#ty: ::furiosa_opt_std::runtime::DeviceSend))
-            .collect(),
+            .map(|ty| -> syn::WherePredicate { parse_quote!(#ty: ::furiosa_opt_std::runtime::DeviceSend) }),
     );
-
+    let (generics, _, bounds) = generics.split_for_impl();
     quote! {
-        impl #impl_generics ::furiosa_opt_std::runtime::DeviceSend for #name #ty_generics
-        #sendable {
-            fn bind(&self, buffers: &mut ::furiosa_opt_std::runtime::Buffers) -> Result<(), ::furiosa_opt_std::Error> {
-                #(::furiosa_opt_std::runtime::DeviceSend::bind(&self.#accessors, buffers)?;)*
-                Ok(())
+        impl #generics ::furiosa_opt_std::runtime::DeviceSend for #name #ty_generics #bounds {
+            #[allow(unused_variables)]
+            fn arguments<'__a>(
+                &'__a self,
+                access: ::furiosa_opt_std::runtime::Access,
+                bind: &mut ::furiosa_opt_std::runtime::Bind<'__a, '_>,
+            ) -> ::core::result::Result<(), ::furiosa_opt_std::Error> {
+                #(::furiosa_opt_std::runtime::DeviceSend::arguments(&self.#accessors, access, bind)?;)*
+                ::core::result::Result::Ok(())
             }
         }
     }
     .into()
 }
 
-/// Marks a function as a device entry point for `launch()`.
+/// Marks a function as a device entry point.
 ///
-/// Generates a unit struct implementing `DeviceFn` with `execute()`.
-/// `cargo <subcommand>`: `execute()` calls the original function body (CPU).
-/// `cargo furiosa-opt <subcommand>`: `execute()` loads the compiled registry entry and runs on NPU.
+/// Defines `name` as a value whose type implements `DeviceFn`, so `launch(name, args)` runs it,
+/// and `Loadable`, so `name.load(&device)?` returns a `Kernel` that launches without a lookup. `cargo <subcommand>` runs the Rust body on the
+/// host; `cargo furiosa-opt <subcommand>` runs the compiled program on the NPU.
 #[proc_macro_attribute]
 pub fn device(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_device(&attr.to_string(), parse_macro_input!(item as Item)).into()
@@ -289,29 +284,10 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
     let context = &params[0].0;
     let arg_names: Vec<&syn::Ident> = params.iter().skip(1).map(|(name, _)| name).collect();
 
-    let bind_stmts: TokenStream2 = quote! {
-        let mut __furiosa_opt_inputs = furiosa_opt_std::runtime::Buffers::new();
-        furiosa_opt_std::runtime::DeviceSend::bind(&(#(#arg_names,)*), &mut __furiosa_opt_inputs)?;
-        let mut __furiosa_opt_outputs = furiosa_opt_std::runtime::Buffers::new();
-    };
-
     let return_ty = match output {
         syn::ReturnType::Default => quote!(()),
         syn::ReturnType::Type(_, ty) => quote!(#ty),
     };
-    let run_body = quote! {
-        <#return_ty as furiosa_opt_std::__private::DeviceOutput>::alloc_into(
-            &__furiosa_opt_function,
-            &mut __furiosa_opt_outputs,
-        )?;
-        __furiosa_opt_function.run(&__furiosa_opt_inputs, &__furiosa_opt_outputs).await?;
-        Ok(<#return_ty as furiosa_opt_std::__private::DeviceOutput>::take(&mut __furiosa_opt_outputs.into_iter()))
-    };
-    let run_into_body = quote! {
-        furiosa_opt_std::runtime::DeviceSend::bind(&*__furiosa_opt_destination, &mut __furiosa_opt_outputs)?;
-        __furiosa_opt_function.run(&__furiosa_opt_inputs, &__furiosa_opt_outputs).await
-    };
-
     let tuple_type = if types.len() == 1 {
         quote!(#(#types)*)
     } else {
@@ -343,28 +319,33 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
         })
         .collect();
 
-    // The launch selects its image from the binary's `furiosa_kernels` registry by the fn's
-    // path and its numeric axis/const values. A concrete fn is the empty-key case.
-    let kernel_stmts = quote! {
-        let __furiosa_opt_function = furiosa_opt_std::backend::npu::function(
-            #context,
-            concat!(module_path!(), "::", #name_str),
-            &[#(#generic_keys),*],
-        )
-        .await?;
+    let path = quote!(concat!(module_path!(), "::", #name_str));
+
+    // A registry entry per instantiation, the fn's path and its numeric axis/const values; `load`
+    // returns a kernel whose type keeps the arguments that selected it.
+    let loadable = {
+        quote! {
+            impl #impl_generics furiosa_opt_std::runtime::Loadable<#tuple_type> for #hidden #where_clause {
+                const PATH: &'static str = #path;
+                const KEY: &'static [usize] = &[#(#generic_keys),*];
+                fn run<__FuriosaOptReturns: furiosa_opt_std::runtime::Returns<Self::Output>>(
+                    __furiosa_opt_kernel: furiosa_opt_std::runtime::Kernel<Self, #tuple_type>,
+                    #body_destructure: #tuple_type,
+                    __furiosa_opt_returns: __FuriosaOptReturns,
+                ) -> furiosa_opt_std::runtime::Submitted<
+                    furiosa_opt_std::runtime::Launched<__FuriosaOptReturns::Value>,
+                > {
+                    furiosa_opt_std::__private::launch(
+                        #context,
+                        ::core::result::Result::Ok(__furiosa_opt_kernel),
+                        (#(#arg_names,)*),
+                        __furiosa_opt_returns,
+                        |#context, (#(#arg_names,)*)| self::#hidden(#(#param_names),*),
+                    )
+                }
+            }
+        }
     };
-    let npu_body = quote! {
-        #kernel_stmts
-        #bind_stmts
-        #run_body
-    };
-    let npu_into_body = quote! {
-        #kernel_stmts
-        #bind_stmts
-        #run_into_body
-    };
-    let cpu_body = quote! { Ok(self::#hidden(#(#param_names),*)) };
-    let cpu_into_body = quote! { *__furiosa_opt_destination = self::#hidden(#(#param_names),*); Ok(()) };
 
     let rev = rev();
     quote! {
@@ -396,33 +377,31 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
             /// A caller that filters functions takes it from here rather than restating the path.
             #[doc(hidden)]
             pub fn path(&self) -> &'static str {
-                concat!(module_path!(), "::", #name_str)
+                #path
             }
+
         }
 
         impl #impl_generics furiosa_opt_std::runtime::DeviceFn<#tuple_type> for #hidden #where_clause {
             type Output = #return_ty;
-            fn execute(#body_destructure: #tuple_type) -> impl std::future::Future<Output = Result<Self::Output, furiosa_opt_std::Error>> {
-                async move {
-                    #[cfg(backend = "npu")]
-                    { #npu_body }
-                    #[cfg(not(backend = "npu"))]
-                    { #cpu_body }
-                }
-            }
-
-            fn execute_into(
+            fn launch<__FuriosaOptReturns: furiosa_opt_std::runtime::Returns<Self::Output>>(
+                self,
                 #body_destructure: #tuple_type,
-                __furiosa_opt_destination: &mut Self::Output,
-            ) -> impl std::future::Future<Output = Result<(), furiosa_opt_std::Error>> {
-                async move {
-                    #[cfg(backend = "npu")]
-                    { #npu_into_body }
-                    #[cfg(not(backend = "npu"))]
-                    { #cpu_into_body }
-                }
+                __furiosa_opt_returns: __FuriosaOptReturns,
+            ) -> furiosa_opt_std::runtime::Submitted<furiosa_opt_std::runtime::Launched<__FuriosaOptReturns::Value>> {
+                // The host backend runs the Rust body instead of the loaded kernel.
+                let __furiosa_opt_kernel = furiosa_opt_std::runtime::Loadable::<#tuple_type>::load(self, #context);
+                furiosa_opt_std::__private::launch(
+                    #context,
+                    __furiosa_opt_kernel,
+                    (#(#arg_names,)*),
+                    __furiosa_opt_returns,
+                    |#context, (#(#arg_names,)*)| self::#hidden(#(#param_names),*),
+                )
             }
         }
+
+        #loadable
     }
 }
 

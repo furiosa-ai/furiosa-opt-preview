@@ -2,7 +2,7 @@
 //!
 //! Drains a post-Commit-Adapter `TuTensor` (from `commit_trim` onwards) into a
 //! [`DmTensor`] (or an existing mutable view). `verify_commit` synthesizes the
-//! write sequencer with `SMapping::sequence` (Write), the dual of the fetch read.
+//! write sequencer through `config_commit`, the dual of the fetch read.
 
 use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;

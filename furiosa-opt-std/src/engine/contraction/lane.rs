@@ -40,17 +40,19 @@ impl From<LaneMode> for LowerLaneMode {
 }
 
 // ANCHOR: contract_lane_def
-impl<'l, const T: Tu, D: ContractionAccumulator, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M, Packet: M, B: Backend>
-    ContractTimeTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
+impl<'l, D: ContractionAccumulator, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M, Packet: M, B: Backend>
+    ContractTimeTensor<'l, { Tu::Main }, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
 {
     /// Folds the `Lane` dimension into the output stream.
     /// `LaneMode::Interleaved` relocates `Lane` into `OutPacket`;
     /// `LaneMode::Sequential` relocates `Lane` into `OutTime`.
+    ///
+    /// Available only in the main context.
     #[primitive(ContractTimeTensor::contract_lane)]
     pub fn contract_lane<OutTime: M, OutPacket: M>(
         self,
         mode: LaneMode,
-    ) -> ContractTensor<'l, T, D, Chip, Cluster, Slice, OutTime, OutPacket, B> {
+    ) -> ContractTensor<'l, { Tu::Main }, D, Chip, Cluster, Slice, OutTime, OutPacket, B> {
         verify_contract_lane(ContractLaneInput {
             in_lane: Lane::to_value(),
             in_time: Time::to_value(),

@@ -26,7 +26,7 @@ pub trait Cast<D: Scalar> {
 )]
 pub trait FetchCast<D: Scalar>: Cast<D> {}
 
-// Identity: the stage is programmed `TypeConversion::None`.
+// Identity: the stage performs no type conversion.
 impl<D> FetchCast<D> for D where D: Scalar {}
 
 // Integer widenings to the i32 compute width.
@@ -38,8 +38,7 @@ impl FetchCast<f32> for f8e4m3 {}
 impl FetchCast<f32> for f8e5m2 {}
 impl FetchCast<f32> for bf16 {}
 impl FetchCast<bf16> for f32 {}
-// No 8-bit float to `bf16`; use `fetch_table_lookup`. `TypeConversion`'s four Renegade-S variants
-// stay out: the trait has no chip-generation axis to hold them.
+// No 8-bit float to `bf16`; use `fetch_table_lookup`.
 
 /// Input scalar types the Fetch Adapter's fixed table-lookup cast can decode to `OutD`.
 ///
@@ -153,9 +152,8 @@ impl CastEngineCast<bf16> for f32 {
 }
 
 /// The one cast the Commit Adapter folds in on the way to DM: `f32 -> bf16`
-/// (`CommitConversion::CommitF32ToBf16`, ReLU optionally fused). Anything else narrows in
-/// [`CastEngineCast`]; a plain `commit()` is already `NoCommitConversion`. See
-/// `computing-tensors/commit-adapter.md`.
+/// (ReLU optionally fused). Anything else narrows in [`CastEngineCast`]; a plain `commit()`
+/// performs no type conversion. See `computing-tensors/commit-adapter.md`.
 #[diagnostic::on_unimplemented(
     message = "cannot apply `commit_cast()` from `{Self}` to `{D}`",
     label = "unsupported Commit Adapter conversion",

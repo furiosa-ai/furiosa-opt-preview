@@ -4,18 +4,16 @@
 //! pins the logical->DPE promotion: `i8 -> i9` and `i4 -> i5` widen implicitly
 //! at the contraction boundary, while `f8`/`bf16` pass through. The reduction
 //! (packet) dim is one 32-byte flit per type, so these also exercise the
-//! sub-mac `CollectFlits::Flit1` path for each element size: i8/f8 = 32 elems,
+//! sub-mac single-flit path for each element size: i8/f8 = 32 elems,
 //! bf16 = 16 elems, i4 = 64 elems.
 //!
-//! i8/f8e4m3/f8e5m2/bf16 reach EDF. i4 reaches LIR: its vISA translation is
-//! complete, but LIR->EDF has incomplete RawInt5/i5 backend support (COM-63).
 //! `i16`, `i32` and `f32` are not DPE inputs at all, so no kernel here covers
 //! them: none has a `ContractionCast` impl, and a `contract_outer` on any of
 //! them does not compile.
 
 use furiosa_opt_std::prelude::*;
 
-axes![A = 8, K8 = 32, K16 = 16, K4 = 64, R = 8];
+axes![A = 8, K8 = 32, K16 = 16, K4 = 64, K4Wide = 128, R = 8];
 
 type Chip = m![1];
 type Cluster = m![1 # 2];
@@ -153,6 +151,42 @@ pub fn i4_contract(
         .fetch_cast::<i4>()
         .collect::<m![A], m![K4]>()
         .contract_outer::<m![A], m![K4], _, _, _>(&trf)
+        .contract_packet::<m![1]>()
+        .contract_time::<m![A]>()
+        .contract_lane::<m![A], m![R]>(LaneMode::Interleaved)
+        .commit_trim::<m![R]>()
+        .commit();
+
+    result.to_hbm(&mut device.tdma)
+}
+
+/// `i4` contraction over a 128-element reduction, one full i4 mac width.
+/// The collect still leaves one 64-element flit; `contract_outer` folds the
+/// outer half of the reduction in, so the feed buffer collects two flits.
+#[device(chip = 1)]
+pub fn i4_contract_wide(
+    device: &mut Device,
+    input: &HbmTensor<i4, Chip, m![A, K4Wide]>,
+    input_trf: &HbmTensor<i4, Chip, m![R, K4Wide]>,
+) -> HbmTensor<i32, Chip, m![A, R]> {
+    let input_dm = input.to_dm::<Cluster, Slice, m![A, K4Wide]>(&mut device.tdma);
+    let trf_dm = input_trf.to_dm::<Cluster, Slice, m![R, K4Wide]>(&mut device.tdma);
+
+    let trf: TrfTensor<i4, Chip, Cluster, Slice, Lane, m![K4Wide]> = device
+        .sub
+        .begin(trf_dm.view())
+        .fetch::<m![R, K4Wide / 64], m![K4Wide % 64]>()
+        .fetch_cast::<i4>()
+        .collect::<m![R, K4Wide / 64], m![K4Wide % 64]>()
+        .to_trf();
+
+    let result: DmTensor<i32, Chip, Cluster, Slice, m![A, R]> = device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![A, K4Wide / 64], m![K4Wide % 64]>()
+        .fetch_cast::<i4>()
+        .collect::<m![A, K4Wide / 64], m![K4Wide % 64]>()
+        .contract_outer::<m![A], m![K4Wide], _, _, _>(&trf)
         .contract_packet::<m![1]>()
         .contract_time::<m![A]>()
         .contract_lane::<m![A], m![R]>(LaneMode::Interleaved)

@@ -82,15 +82,14 @@ pub trait Scalar: ndarray::LinalgScalar + Debug + Clone + Copy + PartialEq + Num
     /// This is the single reconciliation point between the type's *nominal* in-memory
     /// representation (a sub-byte scalar such as [`f4e2m1`] / [`i4`] still occupies a whole byte in
     /// a `&[Self]` slice) and its *physical* on-device layout, where the codes are dense-packed by
-    /// bit width (`Precision::FourBits` for the 4-bit scalars). For a byte-multiple width the packed
+    /// bit width. For a byte-multiple width the packed
     /// image IS the raw little-endian `&[Self]` bytes, so this default is one `memcpy` of the whole
     /// slice (the whole-slice form of [`store`](Self::store)); a sub-byte width ([`f4e2m1`] / [`i4`])
     /// overrides it to emit two codes per byte (low element in the low nibble, half the length), the
     /// one place the even-count check lives (a byte-multiple width needs none). The bit-width stays
     /// confined to these two arms, so every downstream consumer stays generic over `D: Scalar` and
-    /// reads the size this returns (the LIR executor's `ElementType::size_in_bytes_with_length`
-    /// computes the same `n * BITS` bit count), keeping the stream packed all the way to the fetch
-    /// adapter, the sole stage that unpacks it.
+    /// reads the size this returns (the LIR executor computes the same `n * BITS` bit count),
+    /// keeping the stream packed all the way to the fetch adapter, the sole stage that unpacks it.
     fn to_buf(vals: &[Self]) -> Vec<u8> {
         // Byte-multiple: the packed image is the raw little-endian `&[Self]` bytes (the identical view
         // `load` / `store` take of one element), so serialize the whole slice in a single memcpy rather
@@ -154,6 +153,9 @@ pub trait RuntimeScalar: Copy + Send + Sync + runtime_scalar_sealed::Sealed {
 
     /// Converts this value to its HBM representation.
     fn into_storage(self) -> Self::Storage;
+
+    /// The value an HBM representation holds.
+    fn from_storage(storage: Self::Storage) -> Self;
 }
 
 macro_rules! impl_runtime_scalar_identity {
@@ -164,6 +166,10 @@ macro_rules! impl_runtime_scalar_identity {
 
                 fn into_storage(self) -> Self::Storage {
                     self
+                }
+
+                fn from_storage(storage: Self) -> Self {
+                    storage
                 }
             }
         )*
@@ -183,6 +189,10 @@ impl RuntimeScalar for bool {
     fn into_storage(self) -> Self::Storage {
         self.into()
     }
+
+    fn from_storage(storage: u8) -> Self {
+        storage != 0
+    }
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -191,6 +201,10 @@ impl RuntimeScalar for usize {
 
     fn into_storage(self) -> Self::Storage {
         self as u64
+    }
+
+    fn from_storage(storage: u64) -> Self {
+        storage as usize
     }
 }
 

@@ -6,6 +6,99 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [v0.10.0]
+
+### Changed
+
+- `Device::new` takes a `Topology`, which opens the first free placement of that shape, or a
+  `Placement`, which opens exactly there; `device.placement()` and `device.topology()` tell what it
+  opened. On the CPU it refuses a topology outside 1 to 8 chips of 1 to 8 PEs.
+- `Kernel<F>` becomes `Kernel<F, Args>`: a kernel launches only with the arguments it was loaded
+  for, and other arguments are a compile error.
+- A hand-written `DeviceSend` implements `arguments(&self, access, bind)` instead of
+  `bind(&self, buffers)`, handing each `(HbmBufferSlice, Access)` to `bind` in declaration order.
+  `#[derive(DeviceSend)]` needs no change.
+- `HbmTensor::new()` is for device functions; allocate host-side tensors with
+  `HbmTensor::alloc(&device)`.
+- `HbmBuffer::alloc` and `HbmTensor::alloc` place chip-local DRAM. A buffer another chip writes
+  must come from `HbmBuffer::alloc_shared`; binding chip-local memory to a peer-written argument is
+  refused.
+- `Device::memory()` returns `Memory` on both backends, with `capacity()` and `usage()`. Migrate:
+  use `memory().usage().available`.
+- Replace `scalar.write(value, dma)` with `HbmScalar::from_host(value, dma).output(&mut scalar)`.
+- The prelude exports the runtime API only; import plumbing types from `furiosa_opt_std::runtime`
+  or `furiosa_opt_std::backend`.
+- `chip_tile` on an HBM view returns `HbmTensorView<.., SomeChips>`: device DMA takes it, a launch
+  refuses it at compile time.
+- A main-context `to_trf` takes the sub context: write `.to_trf(&mut device.sub)`, as `to_vrf` does.
+- The Tensor Unit's contraction stages and `commit_cast` / `commit_cast_relu` exist on the main
+  context only, and `commit_valid_count_pack` on the sub context only; a call from the other
+  context is a compile error.
+- A `for` loop that reassigns a scalar declared before it is refused with `cannot carry a scalar
+  across iterations`; carry the value in a tensor.
+- `PaddingKind::Bottom` (`#{!}`) padding is readable, holding arbitrary values.
+- A submitted launch runs to completion even when its Future is dropped, and its memory stays in
+  use until the device finishes.
+- A device task that panics makes the code awaiting its launch panic with the task's message, as
+  on the CPU.
+- A launch may run until one second before the kernel driver's deadline (`pe_ipc_timeout_ms`, 60 s
+  by default) instead of 5 s; past it, it fails with `Error::Device`.
+- Device code that moves host or peer memory needs a kernel driver that reserves PDMA channels
+  (`NPU_PDMA_CAPS_RESERVE`); without one such a launch fails with `DeviceError::Unsupported`.
+- `DeviceError` names what failed (`Busy`, `Capacity`, `Invalid`, `Unsupported`, `Panicked`,
+  `OutOfMemory`, `SramOverlap`, ...) instead of the stage that failed.
+- A function's profile is fixed when it first loads: set `FURIOSA_OPT_PROFILE` and install the
+  `span::npu` subscriber before its first launch.
+- `cargo furiosa-opt` writes a new image format; recompile programs with this release.
+
+### Added
+
+- `HbmBuffer::alloc(&device, bytes)` allocates untyped memory, which `to_hbm` / `to_host`
+  transfer; `HbmTensor::try_from(buffer)` and `into_buffer` convert without copying, `split_at`
+  divides it and `alias` shares it. `buffer.slice(chips, bytes)` / `slice_mut` select chips and a
+  byte range.
+- `HostBuffer` holds transfer bytes, page-locked where supported (`is_pinned()`), and converts to
+  and from `HostTensor` without copying.
+- Launches and transfers are `Prepared` until `.await` or `.submit()`, which starts the work and
+  returns a `Submitted` Future.
+- `HbmBuffer::ready()`, `HbmTensor::ready()` and `Device::synchronize()` wait for earlier device
+  work without copying.
+- `device.pdma.to_hbm(pairs)` copies a batch into existing HBM slices in one write.
+- `function.load(&device)?` returns a `Kernel` that launches without repeating the lookup; a
+  generic function selects its instantiation with `Loadable::<Args>::load`.
+- `runtime::DeviceError` and `Error::Invalid` report runtime failures and requests outside a
+  buffer or tensor.
+- Device functions call closures, and a closure reads what it captures.
+- A runtime `if` yields a scalar, so a run-time value selects an array element:
+  `inputs[if pick == 0 { 0 } else { 1 }]`.
+- An `if` whose condition is known at compile time compiles only the arm it takes.
+- A DMA moves a tile whose width does not divide its axis, such as width 3 of an axis of 8.
+- `Mapping::abstract_limits` and `abstract_limits_upperbound`.
+
+### Removed
+
+- `DeviceFn::execute` and `execute_into`; use `launch(f, args)` and `.output(&mut out)`.
+- NPU `HbmTensor::into_vec`, `to_vec` and `to_buf`; use `to_host(&mut device.pdma).await?.into_vec()`.
+- `runtime::Buffers`, `TupleApply` and `backend::npu`.
+- `Error::Chips` and `Error::Poisoned`; match `Error::Device`.
+- `Address` (write `u64`) and `DpeTensor`.
+- The `furiosa-opt-rt` command-line runner.
+
+### Fixed
+
+- NPU tensor transfers between differing host and HBM layouts.
+- A launch of many short Tensor Unit operations, or many cluster syncs in a row, no longer times
+  out or hangs.
+- Host transfers of 4 GiB or more, and many transfers in flight at once, complete.
+- On the CPU, a `tile` whose window runs past its axis panics, and a tile of a reshaped view
+  selects cells by the new axes.
+- Instantiations of a generic function whose axes have equal sizes but differ in type no longer
+  share one kernel.
+- Kernels that the compiler wrongly refused now compile: a scalar `!=`, `to_vrf` straight after
+  `collect`, a sub-context fetch with Vector Engine arithmetic, a `to_dm_view` into a resident
+  `DmTensor`, 4-bit transposes of up to 16 rows, and full-width `i4` contractions.
+- A gather's `to_dm` with an unaligned tail is refused, as a direct `to_dm` is.
+
 ## [v0.9.0]
 
 ### Changed
@@ -42,7 +135,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   limit to a gather.
 - `DmTensorView::to_spm` copies a DM view into an SPM tensor.
 - `HbmScalar<T>` passes a runtime `bool`, `i32`, `u32`, `i64`, `u64`, or 64-bit `usize` value
-  to device code through `from_host`, `write`, and `to_spm`.
+  to device code through `from_host` (into a fresh scalar, or `.output(&mut scalar)` into an
+  existing one) and `to_spm`.
 - Device scalar expressions support Rust integer `as` casts among `i32`, `u32`, `i64`, `u64`,
   and `usize`, including `usize` tensor indices.
 - Runtime scalar conditions can guard work inside statically bounded `for` and `#[unroll]` loops.
@@ -244,8 +338,7 @@ Breaking changes come first, each with what to write instead.
 - `DmTensorView::dm_cluster_swap` swaps two clusters and lowers to EDF, with
   VISA/LIR/EDF regression coverage.
 - The Transpose Engine accepts doubled input packing for 8-bit and 16-bit elements. A packet can
-  now contribute 16 valid elements per cycle, and vISA lowering emits the corresponding
-  `fetch_in_width_shift`; 4-bit and 32-bit doubled packing remain unsupported.
+  now contribute 16 valid elements per cycle; 4-bit and 32-bit doubled packing remain unsupported.
 - `fetch_chip_lift`, `fetch_cluster_lift`, and `fetch_slice_lift` move axes that a plain `fetch`
   would traverse in `Time` onto a broadcast slot in the `Chip`, `Cluster`, or `Slice` placement.
   Each destination reads a different offset from its local copy, with no data transfer and no change
@@ -347,7 +440,7 @@ Breaking changes come first, each with what to write instead.
 
 - A stash read guarded on the group bit alone does not lower. A cached read needs two things the compiler keeps apart -- which elements the operand applies to, and which group wrote the slice being read -- and a group-shaped guard cannot be told from a zip's read. Constrain another bit as well, or drop the guard.
 - `TagMode::AxisToggle` does not lower. `vector_intra_slice_unzip()` is the supported route to a group split.
-- A DMA cannot place a tile whose padded axis is an inner digit of a split. The reduced case is pinned in the examples as `mre/dma_padded_inner_digit`.
+- A DMA cannot place a tile whose padded axis is an inner digit of a split.
 - An inner-digit tile is supported on an axis the HBM argument names directly. A tile reaching into an axis nested under another is still refused at compile time.
 
 ## [v0.5.1]

@@ -17,7 +17,6 @@ use crate::scalar::*;
 // ANCHOR: contract_packet_def
 impl<
     'l,
-    const T: Tu,
     D: Scalar,
     Storage: ContractionCast<Output = D>,
     Chip: M,
@@ -27,15 +26,17 @@ impl<
     Time: M,
     Packet: M,
     B: Backend,
-> ContractOuterTensor<'l, T, D, Storage, Chip, Cluster, Slice, Lane, Time, Packet, B>
+> ContractOuterTensor<'l, { Tu::Main }, D, Storage, Chip, Cluster, Slice, Lane, Time, Packet, B>
 {
     /// Spatial reduction within `Packet`: validates the reduce-add along the contracted axes inside
     /// `Packet` that the fused fold at `contract_lane` will perform. `D` is the widened accumulator the
     /// deferred carrier stays keyed on; the DPE input packet is still sized in `Storage` bytes.
+    ///
+    /// Available only in the main context.
     #[primitive(ContractOuterTensor::contract_packet)]
     pub fn contract_packet<OutPacket: M>(
         self,
-    ) -> ContractPacketTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, OutPacket, B> {
+    ) -> ContractPacketTensor<'l, { Tu::Main }, D, Chip, Cluster, Slice, Lane, Time, OutPacket, B> {
         verify_contract_packet(ContractPacketInput {
             in_packet: Packet::to_value(),
             out_packet: OutPacket::to_value(),

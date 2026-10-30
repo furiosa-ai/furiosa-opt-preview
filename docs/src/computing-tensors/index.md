@@ -93,9 +93,17 @@ The hardware exposes three:
 - **Sub** drives a subset of the same pipeline, typically prefetching operands into TRF / VRF while main computes.
 - **DMA** drives the DMA Engine alone, external to the Tensor Unit.
 
-The main context can drive every Tensor Unit engine.
-The sub context drops the Contraction Engine and a handful of other features.
-Everything else carries over from main.
+Every Tensor Unit stage is available in both contexts except these, and the type system enforces each row.
 
+| Stage | Context |
+| --- | --- |
+| [`contract_outer`](./contraction-engine/index.md) | main |
+| [`commit_cast`](./commit-adapter.md#type-casting), `commit_cast_relu` | main |
+| [`fetch_table_lookup`](./fetch-adapter.md) | main |
+| [`memset`](./commit-adapter.md#generate-mode) | sub |
+
+
+`to_trf` and `to_vrf` are available in both contexts.
+Both write through the sub context, so the main-context form of each takes it as an argument and holds it for the write.
 
 Context ordering, overlap, resource conflicts, and memory-rule scheduling are defined in [Schedule](../scheduling/schedule.md).

@@ -215,12 +215,12 @@ Three kinds are tracked.
   These positions are accessible and known to hold zero.
   The mapping records that value property; the expression itself does not perform the fill.
 - `m![A #{!} m]` is bottom padding to size `m`.
-  These positions are inaccessible and reads/writes are undefined behavior.
-  This models addresses the compiler must avoid.
+  Reads are allowed and return arbitrary values; writes are forbidden.
+  This models positions the compiler must preserve when writing.
 
 `#` defaults to top kind.
 The Rust type level mirrors this via a const generic of `PaddingKind` on `Padding<L, SIZE, KIND>`.
-`Padding<L, N>` is `KIND = PaddingKind::Top`, `Padding<L, N, { PaddingKind::Zero }>` is the zero-filled variant, and `Padding<L, N, { PaddingKind::Bottom }>` is inaccessible.
+`Padding<L, N>` is `KIND = PaddingKind::Top`, `Padding<L, N, { PaddingKind::Zero }>` is the zero-filled variant, and `Padding<L, N, { PaddingKind::Bottom }>` is readable but non-writable.
 
 `Cell::Padding(kind)` reports a position inside the padded extent but outside the inner mapping.
 The `kind` is `Top`, `Zero`, or `Bottom`; positions beyond the padded extent remain `Cell::OutOfBounds`.

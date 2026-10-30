@@ -6,7 +6,7 @@
 //! values, and each wrapper converts back to a plain `Result`. The engine *verifications* (the
 //! `config_*` in [`verify`]) are published in full: they state the DSL contract in pure
 //! `furiosa_mapping` terms, with no hidden algorithm. Both the frontend (`furiosa-opt-std`) and the IR
-//! backend (`tu-ops` / `npu-visa-translate`) call all of these.
+//! backend call all of these.
 
 pub use furiosa_opt_lower_types::{
     COMMIT_VALID_PACKET_SIZES, CommitError, DivideError, DivideTerm, FETCH_BASE_BYTES, FETCH_VALID_CLUSTER_SIZES,

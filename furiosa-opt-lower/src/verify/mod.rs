@@ -3,8 +3,8 @@
 //! Unlike the lowering algorithms in the crate root (thin FFI wrappers over the hidden
 //! `furiosa-opt-lower-impl`), these are plain, published functions. They state *what* mapping a stage
 //! must produce, in pure `furiosa_mapping` terms. Both the frontend (`furiosa-opt-std`, whose
-//! type-level `verify_*` delegate here) and the IR translator (`npu-visa-translate`) call them, so a
-//! kernel is checked identically whether it runs under an interpreting backend or is compiled.
+//! type-level `verify_*` delegate here) and the IR translator call them, so a kernel is checked
+//! identically whether it runs under an interpreting backend or is compiled.
 //!
 //! Each check returns a typed, per-engine error enum carrying the offending mappings; both callers
 //! render it (`panic!` in the frontend, a spanned diagnostic in the translator).

@@ -49,7 +49,6 @@ pub fn stotrf_table_lookup_gemm(
     let act_dm: DmTensor<f8e4m3, Chip, GemmCl, TokSlice, m![Red]> = act.to_dm(&mut device.tdma);
 
     // Resident token-major output DM (tokens on slices, `Out` contiguous in the element).
-    const OUT_DM_ADDR: Address = 0x0040_0000;
     let mut out_dm: DmTensor<bf16, Chip, GemmCl, TokSlice, m![Out]> = DmTensor::new();
 
     // The full `[Out]` per-output-channel dequant scale, broadcast across the token-slices.
@@ -66,9 +65,8 @@ pub fn stotrf_table_lookup_gemm(
         // Table lookup is a main-context fetch stage, so the packed f4e2m1 weight is decoded to
         // f8e4m3 in a main-context fetch that commits the decoded stream to a resident DM. The fetch
         // reads the packed f4 (2 codes/byte) and `fetch_table_lookup::<f8e4m3>()` decodes each 4-bit
-        // code to its e4m3 value. The decoded weight lands in a resident DM (fixed address, not a
-        // transient `commit()` scratch) so the sub-context StoTrf below can read it back.
-        const WEIGHT_F8_DM_ADDR: Address = 0x0060_0000;
+        // code to its e4m3 value. The decoded weight lands in a resident DM, not a transient
+        // `commit()` scratch, so the sub-context StoTrf below can read it back.
         let mut weight_f8_dm: DmTensor<f8e4m3, Chip, GemmCl, TokSlice, m![Out % 8, Red]> = DmTensor::new();
         device
             .main
@@ -101,7 +99,7 @@ pub fn stotrf_table_lookup_gemm(
             .to_vrf();
 
         // Contract the streamed per-token e4m3 activation against the decoded 8-row f8 weight TRF
-        // (`mac_width(f8) = 64`, so the contraction OutPacket is `Red % 64`), fold the 8 output
+        // (the f8 MAC width is 64, so the contraction OutPacket is `Red % 64`), fold the 8 output
         // features Interleaved into the `OutPacket`, then dequant in the VE tail and round to bf16.
         device
             .main

@@ -65,7 +65,7 @@ For example, selecting an operator highlights its input and output tensors.
 Selecting a tensor highlights operators connected to that tensor.
 
 Because tensors and operators are based on actual hardware instructions, they may differ from the tensors and operators defined in vISA.
-Whenever possible, the Schedule Viewer shows the vISA tensor name and shape, and the operator description.
+Whenever possible, the Schedule Viewer shows the vISA tensor name and shape, and the vISA code snippet of an operator.
 
 ### Zoom In on the Schedule
 

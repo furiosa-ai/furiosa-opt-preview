@@ -44,7 +44,7 @@ pub(super) enum Token {
 pub(super) enum HashFillKind {
     /// `#{*}`: top padding (undefined slots). `#` is its shorthand.
     Star,
-    /// `#{!}`: inaccessible (bottom) padding; reads are UB.
+    /// `#{!}`: bottom padding; reads are allowed, writes are forbidden.
     Bang,
     /// `#{0}`: accessible padding masked to zero. Only `0` is accepted.
     Zero,

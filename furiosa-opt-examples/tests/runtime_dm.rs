@@ -4,6 +4,7 @@ use furiosa_opt_std::prelude::*;
 type Chip = m![1];
 type Dm = DmTensor<i32, Chip, m![1], m![S], m![E]>;
 
+/// A DM resident keeps its bytes across the launches that write and read it.
 #[tokio::test]
 async fn residents_survive_calls() {
     let mut device = Device::new(stage.topology()).unwrap();

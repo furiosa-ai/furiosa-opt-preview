@@ -11,16 +11,18 @@ use crate::engine::contraction::{ContractPacketTensor, ContractTimeTensor};
 use crate::scalar::*;
 
 // ANCHOR: contract_time_def
-impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M, Packet: M, B: Backend>
-    ContractPacketTensor<'l, T, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
+impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Time: M, Packet: M, B: Backend>
+    ContractPacketTensor<'l, { Tu::Main }, D, Chip, Cluster, Slice, Lane, Time, Packet, B>
 {
     /// Accumulates per-cycle contractions over the `Time` dimension via the shared
     /// accumulator buffer, shrinking input `Time` to `OutTime`. The axes present in
     /// `Time` but absent from `OutTime` are reduce-added.
+    ///
+    /// Available only in the main context.
     #[primitive(ContractPacketTensor::contract_time)]
     pub fn contract_time<OutTime: M>(
         self,
-    ) -> ContractTimeTensor<'l, T, D, Chip, Cluster, Slice, Lane, OutTime, Packet, B> {
+    ) -> ContractTimeTensor<'l, { Tu::Main }, D, Chip, Cluster, Slice, Lane, OutTime, Packet, B> {
         verify_contract_time(ContractTimeInput {
             in_time: Time::to_value(),
             out_time: OutTime::to_value(),

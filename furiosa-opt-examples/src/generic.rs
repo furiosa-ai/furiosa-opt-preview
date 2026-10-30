@@ -1,4 +1,4 @@
-//! Generic `#[device]` fixtures for npu-opt's `registry` test: launched from test-shaped
+//! Generic `#[device]` fixtures for the device function registry: launched from test-shaped
 //! roots, and each root's binary registers exactly its own instantiations. A generic fn has no
 //! artifact of its own. Its kernels compile at a root's link.
 

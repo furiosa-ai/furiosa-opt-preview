@@ -441,8 +441,8 @@ fn fill_rf<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, A: PortArg<D, M
 
 /// Panics if a fill was refused.
 ///
-/// The rules are `BranchedOperand::validate`'s, shared with the ViSA translator and with lowering to
-/// `VePass` so they cannot drift apart; only the reporting is local.
+/// The rules are `BranchedOperand::validate`'s, shared with the ViSA translator and with lowering
+/// so they cannot drift apart; only the reporting is local.
 ///
 /// Panicking is a host-side backstop, not the enforcement: a `#[device]` function's body is read as MIR
 /// and never run, so this never fires for a compiled kernel. The translator checks the same rules

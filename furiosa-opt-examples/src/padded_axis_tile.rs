@@ -53,7 +53,7 @@ pub fn padded_axis_chunk_read(
 /// Chunking is valid here (`24 = 3 * 8`) and leaves the padding alone: 4 chunks, 3 with live rows.
 pub type ChunkedDivisible = m![Divisible # 32 / 8, Divisible # 32 % 8, H];
 
-/// The lowering side: `IndexAccess` steps over 4 chunks where the projection's term counts 3.
+/// The lowering side: the index access steps over 4 chunks where the projection's term counts 3.
 #[device(chip = 1)]
 pub fn divisible_chunk_read(
     device: &mut Device,

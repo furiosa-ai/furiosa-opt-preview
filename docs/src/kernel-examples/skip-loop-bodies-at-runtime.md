@@ -88,7 +88,7 @@ Create the scalar through the launch context's PDMA queue, then pass it like ano
 # let mut device = Device::new(scalar_consumer.topology())?;
 let mut active = HbmScalar::<usize>::from_host(0, &mut device.pdma).await?;
 
-active.write(3, &mut device.pdma).await?;
+HbmScalar::from_host(3, &mut device.pdma).output(&mut active).await?;
 launch(scalar_consumer, (&mut device, &active)).await?;
 # Ok(())
 # }

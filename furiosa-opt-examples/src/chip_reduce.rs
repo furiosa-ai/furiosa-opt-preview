@@ -144,7 +144,7 @@ pub fn butterfly_all_reduce(
 }
 // ANCHOR_END: butterfly_all_reduce
 
-/// Slices an axis inside `Element`, which the ParallelCopy path cannot address.
+/// Slices an axis inside `Element`, which the parallel-copy path cannot address.
 #[device(chip = 4)]
 pub fn shuffle_slice_middle(
     device: &mut Device,

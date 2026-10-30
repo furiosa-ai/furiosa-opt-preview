@@ -4,7 +4,7 @@ use furiosa_opt_std::prelude::*;
 
 type Chip = m![1];
 type Cluster = m![1];
-axes![P = 64, A = 8, B = 16, C = 32, D = 4];
+axes![P = 64, A = 8, B = 16, C = 32, D = 4, A4 = 16, B4 = 32];
 
 /// Device function that transposes a tensor from shape [A, B, C] to [C, A, B].
 /// it is divided into two steps for demonstration purposes.
@@ -64,6 +64,27 @@ pub fn transpose_i16_tu(
         .collect::<m![D], m![B]>()
         .transpose::<m![B], m![D # 16]>()
         .commit_trim::<m![D]>()
+        .commit();
+
+    output_dm.to_hbm(&mut device.tdma)
+}
+
+/// Transposes an `i4` tensor from `[P, A4, B4]` to `[P, B4, A4]`, with the
+/// 16 input rows a 4-bit element allows (16 x 4 bits = the 8-byte row width).
+#[device(chip = 1, pe = 1)]
+pub fn transpose_i4_tu(
+    device: &mut Device,
+    input: &HbmTensor<i4, Chip, m![P, A4, B4]>,
+) -> HbmTensor<i4, Chip, m![P, B4, A4]> {
+    let input_dm: DmTensor<i4, Chip, Cluster, m![P], m![A4, B4]> = input.to_dm(&mut device.tdma);
+
+    let output_dm: DmTensor<i4, Chip, Cluster, m![P], m![B4, A4]> = device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![A4, B4 / 16], m![B4 % 16]>()
+        .collect::<m![A4, B4 / 16], m![B4 % 16 # 64]>()
+        .transpose::<m![B4], m![A4 # 64]>()
+        .commit_trim::<m![A4]>()
         .commit();
 
     output_dm.to_hbm(&mut device.tdma)

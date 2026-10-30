@@ -75,12 +75,29 @@ impl<'l, const T: Tu, P: CanApplyCollect, D: Scalar, Chip: M, Cluster: M, Slice:
 // ANCHOR_END: collect_impl
 
 // ANCHOR: collect_to_trf
-impl<'l, const T: Tu, P: CanApplyToTrf, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<'l, P: CanApplyToTrf, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    TuTensor<'l, { Tu::Sub }, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Stores to the tensor register file.
     #[primitive(TuTensor::to_trf)]
     pub fn to_trf<Lane: M, Element: M>(self) -> TrfTensor<D, Chip, Cluster, Slice, Lane, Element, B> {
+        verify_to_trf::<D, Lane, Time, Packet, Element>();
+        TrfTensor::new(self.inner.transpose(false))
+    }
+}
+
+impl<'l, P: CanApplyToTrf, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    TuTensor<'l, { Tu::Main }, P, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    /// Stores to the tensor register file, occupying the sub context the write runs through.
+    ///
+    /// The borrow lasts the statement. The compiler manages register allocation separately,
+    /// so the returned [`TrfTensor`] keeps no context borrow.
+    #[primitive(TuTensor::to_trf_from_main)]
+    pub fn to_trf<Lane: M, Element: M>(
+        self,
+        _sub: &mut TuContext<{ Tu::Sub }>,
+    ) -> TrfTensor<D, Chip, Cluster, Slice, Lane, Element, B> {
         verify_to_trf::<D, Lane, Time, Packet, Element>();
         TrfTensor::new(self.inner.transpose(false))
     }

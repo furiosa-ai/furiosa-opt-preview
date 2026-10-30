@@ -100,13 +100,13 @@ type Slice   = m![M % 16, V % 16];      // inner M × inner V = 16 × 16 = 256 s
 type Lane    = m![N];                   // N (output channels) partitions the 8 hardware lanes
 
 /// Batched matmul with K placed in Time.
-fn bmatmul_k_in_time<'l, const T: Tu>(
+fn bmatmul_k_in_time<'l>(
     // Streaming operand: V outer + K in Time, with a one-element Packet m![1].
-    input: CollectTensor<'l, T, bf16, Chip, Cluster, Slice, m![V / 16, K], m![1 # 16]>,
+    input: CollectTensor<'l, { Tu::Main }, bf16, Chip, Cluster, Slice, m![V / 16, K], m![1 # 16]>,
     // TRF operand: N in Lane, K in Element. Stored into TRF by a prior .to_trf() call.
     trf: &TrfTensor<bf16, Chip, Cluster, Slice, Lane, m![K]>,
     // Output: one (M × N) f32 matrix per (slice, V-outer) pair.
-) -> ContractTensor<'l, T, f32, Chip, Cluster, Slice, m![V / 16], m![N]> {
+) -> ContractTensor<'l, { Tu::Main }, f32, Chip, Cluster, Slice, m![V / 16], m![N]> {
     input
          // Outer: Lane = m![N] (inferred from trf), OutTime = m![V / 16, K], OutPacket = m![1 # 32].
          // input: 1 K-element broadcast across all N lanes.
@@ -154,15 +154,15 @@ type Slice   = m![V % 16 # 256];        // inner V split across slices (V % 16 =
 type Lane    = m![N];                   // N (output channels) partitions the 8 hardware lanes (N = 8 fills the cap)
 
 /// Batched matmul: V slices × (M × K) · (K × N) → V × M × N.
-fn bmatmul_m_in_time<'l, const T: Tu>(
+fn bmatmul_m_in_time<'l>(
     // Streaming operand: M in Time, K in Packet.
     // Element type can be i4, i8, f8, or bf16; integers widen to i32 output, floats to f32.
-    input: CollectTensor<'l, T, bf16, Chip, Cluster, Slice, m![M, K / 16], m![K % 16]>,
+    input: CollectTensor<'l, { Tu::Main }, bf16, Chip, Cluster, Slice, m![M, K / 16], m![K % 16]>,
     // TRF operand: N in Lane (one output channel per lane), K in Element.
     // Stored into TRF by a prior .to_trf() call in the sub context.
     trf: &TrfTensor<bf16, Chip, Cluster, Slice, Lane, m![K]>,
     // Output: one (M × N) f32 matrix per slice.
-) -> ContractTensor<'l, T, f32, Chip, Cluster, Slice, m![M], m![N]> {
+) -> ContractTensor<'l, { Tu::Main }, f32, Chip, Cluster, Slice, m![M], m![N]> {
     input
          // Outer: broadcast input and trf, multiply elementwise.
          // Lane = m![N] (inferred from trf), OutTime = m![M], OutPacket = m![K].
@@ -207,13 +207,13 @@ type Slice   = m![M % 16 # 256];        // inner M split across slices (M % 16 =
 type Lane    = m![N];                   // N (output channels) partitions the 8 hardware lanes
 
 /// Batched matmul with V (batch) placed in Time.
-fn bmatmul_v_in_time<'l, const T: Tu>(
+fn bmatmul_v_in_time<'l>(
     // Streaming operand: V in Time, K in Packet.
-    input: CollectTensor<'l, T, bf16, Chip, Cluster, Slice, m![V, K / 16], m![K % 16]>,
+    input: CollectTensor<'l, { Tu::Main }, bf16, Chip, Cluster, Slice, m![V, K / 16], m![K % 16]>,
     // TRF operand: N in Lane, K in Element. Stored into TRF by a prior .to_trf() call.
     trf: &TrfTensor<bf16, Chip, Cluster, Slice, Lane, m![K]>,
     // Output: one (V × N) f32 matrix per slice.
-) -> ContractTensor<'l, T, f32, Chip, Cluster, Slice, m![V], m![N]> {
+) -> ContractTensor<'l, { Tu::Main }, f32, Chip, Cluster, Slice, m![V], m![N]> {
     input
          // Outer: Lane = m![N] (inferred from trf), OutTime = m![V], OutPacket = m![K].
          // input: K elements broadcast across all N lanes.

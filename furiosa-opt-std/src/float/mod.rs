@@ -1,4 +1,4 @@
-//! Hardware numeric type operations for Renegade NPU.
+//! Hardware numeric type operations for RNGD.
 
 mod bf16;
 mod f8e4;

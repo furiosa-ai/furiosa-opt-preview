@@ -117,9 +117,6 @@ pub fn vrf_slice_regroup(
 
 /// [`vrf_slice_reshape`] at the 64-slice topology, which is the one a default NPU config has.
 ///
-/// The kernels above need 512 slices, so their `compare_edf` tests skip unless the config supplies
-/// them; this one is the same relabel where the comparison actually runs.
-///
 /// One PE, since 64 slices is what one covers: a DM allocation spans the whole device, so the
 /// single-cluster mapping below only adds up under `pe = 1`.
 #[device(chip = 1, pe = 1)]

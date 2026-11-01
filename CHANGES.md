@@ -189,6 +189,16 @@ How entries are written:
 
 ### Fixed
 
+- A contraction that sums a Time digit up to a runtime count compiles when the fetch reads that
+  digit contiguously with the digits around it, as the values of one KV head over its 32-channel
+  chunks; it was refused with "no fetch iterator of [...] streams the accumulated DPE iterator".
+  A fetch now steps every runtime-counted digit with an iterator of its own.
+- A runtime branch that writes a `&mut` tensor through a reshape taken before the branch, which
+  relabels the tensor without changing its layout, updates the tensor; the write was dropped, and a
+  kernel whose only output it was stopped in LIR with "an opt Image requires exactly one NPU task".
+- A contraction whose output rows run to a runtime count compiles when its row digit sits next to
+  a contiguous inner digit, as with one KV head a slice; it was refused with "runtime row
+  iterator cannot merge with contraction iterators".
 - A Tensor Unit fetch from a tensor whose `Slice` pads an axis past its next power of two, such as
   40 heads on `m![Heads # 256]`, compiles; it stopped in LIR with an internal compiler error.
 - A DMA through a padded composite axis such as `[S, Phases] #{!} 1104` copies each row from its

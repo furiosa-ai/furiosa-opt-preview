@@ -29,6 +29,9 @@ How entries are written:
 - A kernel's PCIe DMA copy that waits for a free DMA channel starts as soon as one frees, while
   the kernel keeps running; it started only when the kernel next waited for a copy, usually at its
   first reader.
+- Kernels whose DMA completion ids take many rounds to settle in a late loop compile in less time:
+  each round analyzes the kernel again only from the first block whose DMAs took other ids. The
+  compiled images are byte-identical.
 - A multi-chip or multi-cluster kernel waits less around a transfer. A transfer's publication
   (data sync, returning syncs, cluster sync) moves from right after the transfer toward the first
   use of its result, also when a loop carries the result to the next trip; a remote write's
@@ -292,6 +295,10 @@ How entries are written:
 - NPU tensor transfers rearrange bytes on the host when host and HBM layouts differ.
 - A launch of many short Tensor Unit operations no longer runs past its time limit while one
   cluster waits for the other; profiling at `info` or `debug` made this likely.
+- A loop over a runtime count hands the tensor unit every command its last trip queued before
+  checking the count. They were dropped when the count ended the loop before its static bound, so
+  a DMA after the loop could start without the wait queued for it and read a vector engine output
+  before the engine wrote it.
 
 ## [v0.9.0]
 

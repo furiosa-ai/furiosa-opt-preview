@@ -20,8 +20,9 @@ impl Transfer<'_> {
         slot.access.extend([request.into()])
     }
 
+    /// Holds `access`, regions leased before this transfer took the slot, until the slot ends.
     pub(crate) fn hold(&mut self, access: Lease) {
-        self.queue.slots[self.index].lock().unwrap().access = access;
+        self.queue.slots[self.index].lock().unwrap().held = Some(access);
     }
 
     pub(crate) fn push(&mut self, route: Route) {

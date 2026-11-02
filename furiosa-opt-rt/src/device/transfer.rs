@@ -647,6 +647,29 @@ mod tests {
         assert_eq!(fake.pending().len(), 2);
     }
 
+    /// A small write reaches every chip through its window, whatever its queue slot held before.
+    #[test]
+    fn writes_small_bytes_after_a_smaller_transfer() {
+        let mut context = Context::from_waker(Waker::noop());
+        let device = crate::test::device(&[0, 1, 2, 3], 8);
+        let fake = crate::driver::dma::fixture::transport(&device.driver.dma);
+        let mut buffer = device.alloc(Kind::Dram, 64).unwrap();
+        let mut host = crate::test::pinned();
+        let mut read = Box::pin(device.read([(buffer.slice(..).unwrap().on(0).unwrap(), host.slice_mut(..64))]));
+        let read = loop {
+            if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                break result;
+            }
+            device.work().complete(Contention::Wait);
+            fake.pending().into_iter().for_each(|tag| fake.respond(tag, Ok(0)));
+        };
+        assert_eq!(read, Ok(()));
+        let bytes = [7; 4 * 64];
+        let mut write = Box::pin(device.write([((&bytes[..]).into(), buffer.slice_mut(..).unwrap())]));
+        assert_eq!(write.as_mut().poll(&mut context), Poll::Ready(Ok(())));
+        assert!(fake.pending().is_empty(), "a small write moves through the window");
+    }
+
     /// A submitted transfer crosses slot boundaries after its observer is dropped.
     #[test]
     fn completes_every_slot() {

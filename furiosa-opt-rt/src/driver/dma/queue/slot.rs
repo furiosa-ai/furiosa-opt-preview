@@ -100,7 +100,10 @@ pub(super) struct Slot {
     /// Whether a command moves host bytes the slot does not lease, which must not be freed before
     /// the slot ends.
     pub(super) borrowed: bool,
+    /// The regions its holder adds one by one, in records the slot keeps across holders.
     pub(super) access: Lease,
+    /// The regions a transfer leased before it took the slot.
+    pub(super) held: Option<Lease>,
     pub(super) sequence: u64,
 }
 
@@ -108,6 +111,7 @@ impl Slot {
     /// Release before publication or after every submitted CQE has confirmed quiescence.
     pub(super) fn release(&mut self, state: State) -> Option<Waker> {
         self.access.clear();
+        self.held = None;
         self.entries.clear();
         self.borrowed = false;
         self.state = state;
@@ -117,6 +121,7 @@ impl Slot {
     /// Releases quiescent work with `error`, poisoning the host and device regions held for Write.
     pub(super) fn fail(&mut self, error: Error) -> Option<Waker> {
         self.access.poison();
+        self.held.iter().for_each(Lease::poison);
         self.release(State::Complete(Err(error)))
     }
 }
@@ -158,6 +163,7 @@ impl Slots {
                     entries: ArrayVec::new(),
                     borrowed: false,
                     access: Lease::new(DEPTH as usize * 2),
+                    held: None,
                     sequence: 0,
                 })
             })

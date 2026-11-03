@@ -11,7 +11,7 @@ These register files must be populated before their consumer engine runs.
 A `TrfTensor` is a tensor stored in the TRF:
 
 ```rust,ignore
-{{#include ../../../furiosa-opt-std/src/tensor/memory/mod.rs:trf_tensor_def}}
+{{#include ../../../furiosa-opt-std/src/tensor/memory/register_file.rs:trf_tensor_def}}
 ```
 
 `Chip` / `Cluster` / `Slice` pass through from the source.
@@ -211,7 +211,7 @@ The VRF is written either from the [Collect Engine](./collect-engine.md) or dire
 A `VrfTensor` is a tensor stored in the VRF:
 
 ```rust,ignore
-{{#include ../../../furiosa-opt-std/src/tensor/memory/mod.rs:vrf_tensor_def}}
+{{#include ../../../furiosa-opt-std/src/tensor/memory/register_file.rs:vrf_tensor_def}}
 ```
 
 `Chip` / `Cluster` / `Slice` pass through from the source.
@@ -263,6 +263,10 @@ fn store_vrf<'l>(
 
 The store has one signature per context, and the example above takes the sub context's.
 A store issued from the main context takes `device.sub` as an argument, because the write registers live in the sub context's register map: see [Which context a store occupies](#which-context-a-store-occupies).
+
+`.to_vrf()` returns a fresh tensor; `.to_vrf_view()` writes into an existing one through `view_mut()`.
+Both collect-only and vector-engine stores support `.to_vrf_view()`.
+`VrfTensor::new()` declares uninitialized device storage; write it before reading it.
 
 #### From Data Memory
 

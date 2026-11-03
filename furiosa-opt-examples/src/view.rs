@@ -194,7 +194,7 @@ pub mod padding {
 pub mod whole_view_mut {
     use furiosa_opt_std::prelude::*;
 
-    axes![S = 128];
+    axes![S = 128, A = 64, T = 2, E = 8];
 
     #[device(chip = 1)]
     pub fn write_view_mut(
@@ -204,5 +204,35 @@ pub mod whole_view_mut {
     ) {
         let dm: DmTensor<bf16, m![1], m![1 # 2], m![1 # 256], m![S]> = input.to_dm(&mut device.tdma);
         dm.view().to_hbm_view(&mut device.tdma, output);
+    }
+
+    /// Writes through a mutable VRF view and reads it as a vector operand.
+    #[device(chip = 1, pe = 1)]
+    pub fn write_vrf_view_mut(
+        device: &mut Device,
+        input: &HbmTensor<i32, m![1], m![A, T, E]>,
+    ) -> HbmTensor<i32, m![1], m![A, T, E]> {
+        let input_dm = input.to_dm::<m![1], m![A], m![T, E]>(&mut device.tdma);
+        let mut vrf = VrfTensor::<i32, m![1], m![1], m![A], m![T, E]>::new();
+        device
+            .sub
+            .begin(input_dm.view())
+            .fetch::<m![T], m![E]>()
+            .collect::<m![T], m![E]>()
+            .to_vrf_view(vrf.view_mut());
+
+        let output: DmTensor<i32, m![1], m![1], m![A], m![T, E]> = device
+            .main
+            .begin(input_dm.view())
+            .fetch::<m![T], m![E]>()
+            .collect::<m![T], m![E]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_fxp(FxpBinaryOp::AddFxp, vrf.view())
+            .vector_final()
+            .commit_trim::<m![E]>()
+            .commit();
+
+        output.to_hbm(&mut device.tdma)
     }
 }

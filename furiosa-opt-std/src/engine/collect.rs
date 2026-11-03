@@ -23,7 +23,7 @@ use crate::engine::{CanApplyCollect, CanApplyToTrf, CanApplyToVrf};
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
-use crate::tensor::memory::{TrfTensor, VrfTensor};
+use crate::tensor::memory::{TrfTensor, VrfTensor, VrfTensorViewMut};
 use crate::tensor::tu::{Position, TuTensor};
 
 /// After the switch engine's collect engine (32-byte packet normalized).
@@ -112,7 +112,14 @@ impl<'l, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, 
     #[primitive(TuTensor::to_vrf)]
     pub fn to_vrf<Element: M>(self) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
         verify_to_vrf::<D, Time, Packet, Element>();
-        VrfTensor::new(self.inner.transpose(false))
+        VrfTensor::from_inner(self.inner.transpose(false))
+    }
+
+    /// Stores into an existing vector register-file tensor through its whole mutable view.
+    #[primitive(TuTensor::to_vrf_view)]
+    pub fn to_vrf_view<Element: M>(self, mut dst: VrfTensorViewMut<'l, D, Chip, Cluster, Slice, Element, B>) {
+        verify_to_vrf::<D, Time, Packet, Element>();
+        dst.inner.transpose(self.inner.view(), false);
     }
 }
 
@@ -129,7 +136,18 @@ impl<'l, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, 
         _sub: &mut TuContext<{ Tu::Sub }>,
     ) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
         verify_to_vrf::<D, Time, Packet, Element>();
-        VrfTensor::new(self.inner.transpose(false))
+        VrfTensor::from_inner(self.inner.transpose(false))
+    }
+
+    /// Stores into a whole mutable VRF view, occupying the sub context for the write.
+    #[primitive(TuTensor::to_vrf_view_from_main)]
+    pub fn to_vrf_view<Element: M>(
+        self,
+        _sub: &mut TuContext<{ Tu::Sub }>,
+        mut dst: VrfTensorViewMut<'l, D, Chip, Cluster, Slice, Element, B>,
+    ) {
+        verify_to_vrf::<D, Time, Packet, Element>();
+        dst.inner.transpose(self.inner.view(), false);
     }
 }
 // ANCHOR_END: collect_to_vrf

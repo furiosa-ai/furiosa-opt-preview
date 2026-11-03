@@ -27,3 +27,21 @@ async fn test_view_simpl() -> eyre::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_write_vrf_view_mut() -> eyre::Result<()> {
+    use furiosa_opt_examples::view::whole_view_mut::{A, E, T, write_vrf_view_mut};
+
+    type Layout = m![A, T, E];
+
+    let values: Vec<i32> = (1..=Layout::SIZE as i32).collect();
+    let expected: Vec<i32> = values.iter().map(|value| 2 * value).collect();
+    let mut device = Device::new(write_vrf_view_mut.topology())?;
+    let input = HostTensor::<i32, Layout>::from_vec(values)
+        .to_hbm::<m![1], Layout>(&mut device.pdma)
+        .await?;
+
+    let output = launch(write_vrf_view_mut, (&mut device, &input)).await?;
+    assert_eq!(output.to_host::<Layout>(&mut device.pdma).await?.into_vec(), expected);
+    Ok(())
+}

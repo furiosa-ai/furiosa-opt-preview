@@ -1,6 +1,6 @@
 //! Rejection fixtures for the vector engine: an ALU the chain asks for twice, an interleaved group
-//! that outgrows the VE register-file cache, a VRF operand the indexer cannot address, and the two
-//! ways an operand can be under the wrong partition. The legal operand shapes are
+//! that outgrows the VE register-file cache, a VRF operand the indexer cannot address, incompatible
+//! partitions, and overwriting a borrowed VRF. The legal operand shapes are
 //! [`vrf_operand`](crate::vrf_operand).
 //!
 //! The partition fixtures are doctests rather than kernels, for the reason
@@ -61,7 +61,7 @@
 //! }
 //! ```
 //!
-//! `reshape` is not a way around the rule, which the last fixture is about: its guard is per-level
+//! `reshape` is not a way around the rule, which the following fixture is about: its guard is per-level
 //! `SIZE` equality, so an operand spanning a different number of slices is refused before it can
 //! reach an op. The guard is a `const` block, so the example calls what it declares.
 //!
@@ -93,6 +93,30 @@
 //! #
 //! # Ok(())
 //! # }
+//! ```
+//!
+//! A VRF read view keeps its source borrowed until the consuming pipeline finishes.
+//! Writing that VRF while the pipeline is pending is rejected by Rust.
+//!
+//! ```compile_fail,E0502
+//! # #![feature(adt_const_params)]
+//! use furiosa_opt_std::prelude::*;
+//! # axes![S = 64, T = 2, E = 8];
+//! # type Dm = DmTensor<i32, m![1], m![1], m![S], m![T, E]>;
+//! # type Vrf = VrfTensor<i32, m![1], m![1], m![S], m![T, E]>;
+//!
+//! fn overwrite_with_pending_pipeline(device: &mut Device, source: &Dm, stored: &mut Vrf) -> Dm {
+//!     let pipeline = device.main.begin(source.view())
+//!         .fetch::<m![T], m![E]>().collect::<m![T], m![E]>()
+//!         .vector_init().vector_intra_slice_tag(TagMode::Zero)
+//!         .vector_fxp(FxpBinaryOp::AddFxp, stored.view());
+//!
+//!     device.sub.begin(source.view())
+//!         .fetch::<m![T], m![E]>().collect::<m![T], m![E]>()
+//!         .to_vrf_view(stored.view_mut()); // The pipeline still borrows `stored`.
+//!
+//!     pipeline.vector_final().commit_trim::<m![E]>().commit()
+//! }
 //! ```
 
 use furiosa_opt_std::prelude::*;

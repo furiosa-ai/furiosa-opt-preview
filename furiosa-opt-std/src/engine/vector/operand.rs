@@ -30,16 +30,16 @@
 //! type Map = m![1];
 //!
 //! // Returns a layout the caller passes straight to an op.
-//! fn clamp_band(lo: TagGuard, hi: TagGuard) -> VeOperandBuilder<f32, Map, f32, NoStash, TwoRegs> {
+//! fn clamp_band<'l>(lo: TagGuard, hi: TagGuard) -> VeOperandBuilder<'l, f32, Map, f32, NoStash, TwoRegs> {
 //!     Branched::imm(lo, -1.0f32).imm(hi, 1.0f32)
 //! }
 //!
 //! // And it may append an immediate from wherever the caller has already got to, by naming the
 //! // capability rather than a position: this works on a one- or two-immediate builder alike.
-//! fn with_floor<Slot: CanAppendImm>(
-//!     b: VeOperandBuilder<f32, Map, f32, NoStash, Slot>,
+//! fn with_floor<'l, Slot: CanAppendImm>(
+//!     b: VeOperandBuilder<'l, f32, Map, f32, NoStash, Slot>,
 //!     guard: TagGuard,
-//! ) -> VeOperandBuilder<f32, Map, f32, NoStash, Slot::Next> {
+//! ) -> VeOperandBuilder<'l, f32, Map, f32, NoStash, Slot::Next> {
 //!     b.imm(guard, 0.0f32)
 //! }
 //! ```
@@ -51,10 +51,10 @@
 //! ```compile_fail,E0308
 //! use furiosa_opt_std::prelude::*;
 //! type Map = m![1];
-//! fn maybe_second(
-//!     b: VeOperandBuilder<f32, Map, f32, NoStash, OneReg>,
+//! fn maybe_second<'l>(
+//!     b: VeOperandBuilder<'l, f32, Map, f32, NoStash, OneReg>,
 //!     cond: bool,
-//! ) -> VeOperandBuilder<f32, Map, f32, NoStash, TwoRegs> {
+//! ) -> VeOperandBuilder<'l, f32, Map, f32, NoStash, TwoRegs> {
 //!     if cond { b.imm(TagGuard::all(), 2.0f32) } else { b } // OneReg vs TwoRegs
 //! }
 //! ```
@@ -79,7 +79,7 @@ use crate::engine::vector::stage::state::VeState;
 use crate::engine::vector::stash_slot::{Occupied, Spent, StashState};
 use crate::engine::vector::tensor::VeTensorShape;
 use crate::tensor::Tensor;
-use crate::tensor::memory::VrfTensor;
+use crate::tensor::memory::{VrfTensor, VrfTensorView};
 // Straight from the common IR, not through `branch`, which deliberately does not re-export it: a
 // kernel author reaches a layout only through [`Branched`]. Named here because the builder holds one.
 use furiosa_opt_common_ir::{BranchedOperand, ImmSlot, SlotDefect};
@@ -341,25 +341,25 @@ impl CanFillRf for ThreeRegs {}
 /// register type pins the whole layout, port included. That is what lets one [`Branched`] slot
 /// constructor serve both arities: its argument names `Self`, and the port slot follows without a
 /// turbofish.
-pub trait RegPayload<D: VeScalar, Mapping: M>: sealed::SlotSealed {
+pub trait RegPayload<'l, D: VeScalar, Mapping: M>: sealed::SlotSealed {
     /// What the pass's one rf port slot carries.
     type Port;
 }
 
 /// A binary `i32` pass: the port is a register or stash read, with nothing riding along.
-impl<Mapping: M> RegPayload<i32, Mapping> for i32 {
-    type Port = RfPort<i32, Mapping>;
+impl<'l, Mapping: M> RegPayload<'l, i32, Mapping> for i32 {
+    type Port = RfPort<'l, i32, Mapping>;
 }
 
 /// A binary `f32` pass, the same shape as the `i32` one.
-impl<Mapping: M> RegPayload<f32, Mapping> for f32 {
-    type Port = RfPort<f32, Mapping>;
+impl<'l, Mapping: M> RegPayload<'l, f32, Mapping> for f32 {
+    type Port = RfPort<'l, f32, Mapping>;
 }
 
 /// A ternary pass: every slot carries its own `operand1`, so the port payload grows one `f32`.
 /// Ternary ops are f32-only, which is why there is no `i32` counterpart.
-impl<Mapping: M> RegPayload<f32, Mapping> for (f32, f32) {
-    type Port = (RfPort<f32, Mapping>, f32);
+impl<'l, Mapping: M> RegPayload<'l, f32, Mapping> for (f32, f32) {
+    type Port = (RfPort<'l, f32, Mapping>, f32);
 }
 
 /// Opens a guarded operand. The namespace a conditional operand is written through:
@@ -390,19 +390,19 @@ pub enum Branched {}
 impl Branched {
     /// Opens with one immediate register: `v`, applied where `guard` matches.
     #[primitive(op::Branched::imm)]
-    pub fn imm<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>>(
+    pub fn imm<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>>(
         guard: TagGuard,
         v: Reg,
-    ) -> VeOperandBuilder<D, Mapping, Reg, NoStash, OneReg> {
+    ) -> VeOperandBuilder<'l, D, Mapping, Reg, NoStash, OneReg> {
         fill_reg(BranchedOperand::default(), ImmSlot::Reg0, guard, v)
     }
 
     /// Opens with the pass's rf port: `arg`, applied where `guard` matches. Nothing may follow it.
     #[primitive(op::Branched::rf)]
-    pub fn rf<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, A: PortArg<D, Mapping, Reg>>(
+    pub fn rf<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>, A: PortArg<'l, D, Mapping, Reg>>(
         guard: TagGuard,
         arg: A,
-    ) -> VeOperandBuilder<D, Mapping, Reg, A::Mark, AtRf> {
+    ) -> VeOperandBuilder<'l, D, Mapping, Reg, A::Mark, AtRf> {
         fill_rf(BranchedOperand::default(), guard, arg)
     }
 }
@@ -413,12 +413,12 @@ impl Branched {
 
 /// Fills immediate register `imm`, landing at whatever `Slot` the caller's return type names. The
 /// stash marker rides along: an immediate never reads the stash, so filling one cannot change it.
-fn fill_reg<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, StashMark, Slot>(
+fn fill_reg<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>, StashMark, Slot>(
     mut operand: BranchedOperand<Reg, Reg::Port>,
     imm: ImmSlot,
     guard: TagGuard,
     v: Reg,
-) -> VeOperandBuilder<D, Mapping, Reg, StashMark, Slot> {
+) -> VeOperandBuilder<'l, D, Mapping, Reg, StashMark, Slot> {
     assert_fill(operand.fill_imm(imm, guard, v));
     VeOperandBuilder {
         operand,
@@ -427,11 +427,11 @@ fn fill_reg<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, StashMark, Slo
 }
 
 /// Fills the rf port, landing at [`AtRf`] and taking the stash marker from what the port read.
-fn fill_rf<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, A: PortArg<D, Mapping, Reg>>(
+fn fill_rf<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>, A: PortArg<'l, D, Mapping, Reg>>(
     mut operand: BranchedOperand<Reg, Reg::Port>,
     guard: TagGuard,
     arg: A,
-) -> VeOperandBuilder<D, Mapping, Reg, A::Mark, AtRf> {
+) -> VeOperandBuilder<'l, D, Mapping, Reg, A::Mark, AtRf> {
     assert_fill(operand.fill_rf(guard, arg.into_port()));
     VeOperandBuilder {
         operand,
@@ -460,6 +460,9 @@ fn assert_fill(filled: Result<(), SlotDefect>) {
 /// `imm` may be called three times and `rf` once, last -- each position below carries exactly the methods
 /// that may still follow it. `StashMark` records whether the rf port read the stash, which is what
 /// [`StashTransition`] keys on for read-once.
+///
+/// `'l` retains the VRF source borrow through operand construction and conversion. A vector stage
+/// connects it to the pipeline's lifetime, so the source cannot be overwritten before the terminal.
 ///
 /// Positive: two immediates and the rf port, the most a pass can drive on the immediate side plus its
 /// one read.
@@ -507,10 +510,10 @@ fn assert_fill(filled: Result<(), SlotDefect>) {
 /// };
 /// use furiosa_mapping::Broadcast;
 /// // The same bound `vector_fp_binary`/`vector_fxp` put on their operand `Op`.
-/// fn op_operand<SD, S, Map, const W: Way, Op>()
+/// fn op_operand<'l, SD, S, Map, const W: Way, Op>()
 /// where
 ///     SD: VeScalar, S: StashState, Map: M,
-///     Op: IntoBranchedOperand<SD, Map> + StashTransition<S, SD, W>,
+///     Op: IntoBranchedOperand<'l, SD, Map> + StashTransition<S, SD, W>,
 /// {}
 /// // A `WithStash` builder sits at `AtRf` by construction: the stash fills the rf port.
 /// op_operand::<
@@ -518,7 +521,7 @@ fn assert_fill(filled: Result<(), SlotDefect>) {
 ///     Occupied<f32, Broadcast<1>, { Way::Way8 }>,
 ///     Broadcast<1>,
 ///     { Way::Way8 },
-///     VeOperandBuilder<f32, Broadcast<1>, f32, WithStash, AtRf>,
+///     VeOperandBuilder<'_, f32, Broadcast<1>, f32, WithStash, AtRf>,
 /// >();
 /// // Filling the stash slot is what produces that `WithStash` operand.
 /// let _ = Branched::rf::<f32, Broadcast<1>, f32, _>(TagGuard::all(), Stash);
@@ -530,7 +533,7 @@ fn assert_fill(filled: Result<(), SlotDefect>) {
 /// # use furiosa_opt_std::prelude::{stage::Way, StashTransition, VeOperandBuilder, WithStash, AtRf, Spent, StashState, VeScalar};
 /// # use furiosa_mapping::Broadcast;
 /// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
-/// reads::<Spent, f32, { Way::Way8 }, VeOperandBuilder<f32, Broadcast<1>, f32, WithStash, AtRf>>();
+/// reads::<Spent, f32, { Way::Way8 }, VeOperandBuilder<'_, f32, Broadcast<1>, f32, WithStash, AtRf>>();
 /// ```
 /// Negative: the same operand on a `Fresh` (never-written) slot -- nothing to read.
 /// ```compile_fail,E0277
@@ -538,12 +541,19 @@ fn assert_fill(filled: Result<(), SlotDefect>) {
 /// # use furiosa_opt_std::prelude::{stage::Way, StashTransition, VeOperandBuilder, WithStash, AtRf, Fresh, StashState, VeScalar};
 /// # use furiosa_mapping::Broadcast;
 /// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
-/// reads::<Fresh, f32, { Way::Way8 }, VeOperandBuilder<f32, Broadcast<1>, f32, WithStash, AtRf>>();
+/// reads::<Fresh, f32, { Way::Way8 }, VeOperandBuilder<'_, f32, Broadcast<1>, f32, WithStash, AtRf>>();
 /// ```
 #[derive(Debug, Clone)]
-pub struct VeOperandBuilder<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, StashMark = NoStash, Slot = OneReg> {
+pub struct VeOperandBuilder<
+    'l,
+    D: VeScalar,
+    Mapping: M,
+    Reg: RegPayload<'l, D, Mapping>,
+    StashMark = NoStash,
+    Slot = OneReg,
+> {
     operand: BranchedOperand<Reg, Reg::Port>,
-    _mark: PhantomData<(D, Mapping, StashMark, Slot)>,
+    _mark: PhantomData<(&'l (), D, Mapping, StashMark, Slot)>,
 }
 
 // The transition graph, written out. Each block is one position and holds exactly the calls that may
@@ -552,27 +562,27 @@ pub struct VeOperandBuilder<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>
 // [`AtRf`] gets no block: the pass has one rf port and it is applied last, so nothing follows it.
 
 /// Appending an immediate, from any position that still has one.
-impl<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, StashMark, Slot: CanAppendImm>
-    VeOperandBuilder<D, Mapping, Reg, StashMark, Slot>
+impl<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>, StashMark, Slot: CanAppendImm>
+    VeOperandBuilder<'l, D, Mapping, Reg, StashMark, Slot>
 {
     /// The next immediate register: `v`, applied where `guard` matches.
     #[primitive(op::VeOperandBuilder::imm)]
-    pub fn imm(self, guard: TagGuard, v: Reg) -> VeOperandBuilder<D, Mapping, Reg, StashMark, Slot::Next> {
+    pub fn imm(self, guard: TagGuard, v: Reg) -> VeOperandBuilder<'l, D, Mapping, Reg, StashMark, Slot::Next> {
         fill_reg(self.operand, Slot::NEXT_IMM, guard, v)
     }
 }
 
 /// Filling the rf port, from any position that has not filled it.
-impl<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, StashMark, Slot: CanFillRf>
-    VeOperandBuilder<D, Mapping, Reg, StashMark, Slot>
+impl<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>, StashMark, Slot: CanFillRf>
+    VeOperandBuilder<'l, D, Mapping, Reg, StashMark, Slot>
 {
     /// The pass's rf port: `arg`, applied where `guard` matches.
     #[primitive(op::VeOperandBuilder::rf)]
-    pub fn rf<A: PortArg<D, Mapping, Reg>>(
+    pub fn rf<A: PortArg<'l, D, Mapping, Reg>>(
         self,
         guard: TagGuard,
         arg: A,
-    ) -> VeOperandBuilder<D, Mapping, Reg, A::Mark, AtRf> {
+    ) -> VeOperandBuilder<'l, D, Mapping, Reg, A::Mark, AtRf> {
         fill_rf(self.operand, guard, arg)
     }
 }
@@ -624,10 +634,10 @@ impl sealed::SlotSealed for FpUnaryOp {}
 impl sealed::SlotSealed for TagGuard {}
 
 /// What the pass's one rf port reads, as the argument to [`Branched::rf`] and to the builder's `rf`
-/// methods: `&vrf` or [`Stash`] for a binary pass, `(&vrf, operand1)` or `(Stash, operand1)` for a
-/// ternary one. The argument names the arity, exactly as an `imm` value does, so no call needs a
+/// methods: `&vrf`, a [`VrfTensorView`], or [`Stash`] for a binary pass; `(source, operand1)` for a
+/// ternary pass. The argument names the arity, exactly as an `imm` value does, so no call needs a
 /// turbofish for it.
-pub trait PortArg<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>>: sealed::SlotSealed {
+pub trait PortArg<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>>: sealed::SlotSealed {
     /// Whether filling the port with this argument consumes the pipeline's stash: [`WithStash`] for a
     /// stash read, [`NoStash`] for a register read.
     type Mark;
@@ -652,72 +662,114 @@ fn verify_vrf_operand<Element: M, Time: M, Packet: M>() {
     }
 }
 
-/// The rf port a `&VrfTensor` drives, transposed to the stream's tensor shape. Every VRF operand form
-/// below goes through here, so [`verify_vrf_operand`] runs in one place.
-///
-/// `#[track_caller]`, as its callers are, though the reported location still stops at the first frame
-/// that does not forward it (a trait default or `fill_rf`), so the panic names this module and not
-/// yet the kernel line.
+/// Prepares a borrowed VRF tensor through [`vrf_view_rf_port`].
 #[track_caller]
-fn vrf_rf_port<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>(
-    vrf: &VrfTensor<D, Chip, Cluster, Slice, Element>,
-) -> RfPort<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
+fn vrf_rf_port<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>(
+    vrf: &'l VrfTensor<D, Chip, Cluster, Slice, Element>,
+) -> RfPort<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
+    vrf_view_rf_port(vrf.view())
+}
+
+/// Prepares a VRF operand in the stream's shape while retaining the source borrow.
+/// All VRF operand forms pass through here, so [`verify_vrf_operand`] runs in one place.
+///
+/// `#[track_caller]` forwards diagnostics only while callers also forward it; a trait default or
+/// `fill_rf` may stop the reported location before the kernel call.
+#[track_caller]
+fn vrf_view_rf_port<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>(
+    vrf: VrfTensorView<'l, D, Chip, Cluster, Slice, Element>,
+) -> RfPort<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
     verify_vrf_operand::<Element, Time, Packet>();
-    RfPort::External(
-        vrf.inner
-            .transpose::<VeTensorShape<Chip, Cluster, Slice, Time, Packet>>(true),
-    )
+    let mut tensor = Tensor::<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>::zeroed();
+    tensor.view_mut().transpose(vrf.inner, true);
+    RfPort::External(tensor, PhantomData)
 }
 
 /// A binary register read, under [`IntoBranchedOperand`]'s rules.
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
-    PortArg<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>, D> for &VrfTensor<D, Chip, Cluster, Slice, Element>
+impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+    PortArg<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>, D>
+    for &'l VrfTensor<D, Chip, Cluster, Slice, Element>
 where
     D: RegPayload<
+            'l,
             D,
             VeTensorShape<Chip, Cluster, Slice, Time, Packet>,
-            Port = RfPort<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
+            Port = RfPort<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
         >,
 {
     type Mark = NoStash;
 
     #[track_caller]
-    fn into_port(self) -> RfPort<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
+    fn into_port(self) -> RfPort<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
         vrf_rf_port(self)
     }
 }
 
-/// A binary stash read.
-impl<D: VeScalar, Mapping: M> PortArg<D, Mapping, D> for Stash
+/// A binary register read through a view, under [`IntoBranchedOperand`]'s rules.
+impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+    PortArg<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>, D>
+    for VrfTensorView<'l, D, Chip, Cluster, Slice, Element>
 where
-    D: RegPayload<D, Mapping, Port = RfPort<D, Mapping>>,
+    D: RegPayload<
+            'l,
+            D,
+            VeTensorShape<Chip, Cluster, Slice, Time, Packet>,
+            Port = RfPort<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
+        >,
+{
+    type Mark = NoStash;
+
+    #[track_caller]
+    fn into_port(self) -> RfPort<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
+        vrf_view_rf_port(self)
+    }
+}
+
+/// A binary stash read.
+impl<'l, D: VeScalar, Mapping: M> PortArg<'l, D, Mapping, D> for Stash
+where
+    D: RegPayload<'l, D, Mapping, Port = RfPort<'l, D, Mapping>>,
 {
     type Mark = WithStash;
 
-    fn into_port(self) -> RfPort<D, Mapping> {
+    fn into_port(self) -> RfPort<'l, D, Mapping> {
         RfPort::Stash
     }
 }
 
 /// A ternary register read, carrying this branch's `operand1` alongside `operand0`.
-impl<Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
-    PortArg<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>, (f32, f32)>
-    for (&VrfTensor<f32, Chip, Cluster, Slice, Element>, f32)
+impl<'l, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+    PortArg<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>, (f32, f32)>
+    for (&'l VrfTensor<f32, Chip, Cluster, Slice, Element>, f32)
 {
     type Mark = NoStash;
 
     #[track_caller]
-    fn into_port(self) -> (RfPort<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>, f32) {
+    fn into_port(self) -> (RfPort<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>, f32) {
         let (vrf, operand1) = self;
         (vrf_rf_port(vrf), operand1)
     }
 }
 
+/// A ternary register read through a view, carrying this branch's `operand1`.
+impl<'l, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+    PortArg<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>, (f32, f32)>
+    for (VrfTensorView<'l, f32, Chip, Cluster, Slice, Element>, f32)
+{
+    type Mark = NoStash;
+
+    #[track_caller]
+    fn into_port(self) -> (RfPort<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>, f32) {
+        let (vrf, operand1) = self;
+        (vrf_view_rf_port(vrf), operand1)
+    }
+}
+
 /// A ternary stash read, carrying this branch's `operand1`.
-impl<Mapping: M> PortArg<f32, Mapping, (f32, f32)> for (Stash, f32) {
+impl<'l, Mapping: M> PortArg<'l, f32, Mapping, (f32, f32)> for (Stash, f32) {
     type Mark = WithStash;
 
-    fn into_port(self) -> (RfPort<f32, Mapping>, f32) {
+    fn into_port(self) -> (RfPort<'l, f32, Mapping>, f32) {
         let (_, operand1) = self;
         (RfPort::Stash, operand1)
     }
@@ -725,12 +777,12 @@ impl<Mapping: M> PortArg<f32, Mapping, (f32, f32)> for (Stash, f32) {
 
 // A builder with no stash slot leaves the stash alone, so it is `Plain` like any other
 // stash-free operand.
-impl<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, Slot> sealed::Sealed
-    for VeOperandBuilder<D, Mapping, Reg, NoStash, Slot>
+impl<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>, Slot> sealed::Sealed
+    for VeOperandBuilder<'l, D, Mapping, Reg, NoStash, Slot>
 {
 }
-impl<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, Slot> Plain
-    for VeOperandBuilder<D, Mapping, Reg, NoStash, Slot>
+impl<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>, Slot> Plain
+    for VeOperandBuilder<'l, D, Mapping, Reg, NoStash, Slot>
 {
 }
 
@@ -738,8 +790,8 @@ impl<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, Slot> Plain
 // so a second read later in the chain has no impl (read-once). Pinned to `AtRf` because only an `rf`
 // fill produces a `WithStash` builder, which makes "a `WithStash` builder is already at the rf port"
 // a fact of the type rather than a comment.
-impl<D: VeScalar, StashMapping: M, Mapping: M, Reg: RegPayload<D, Mapping>, const W: Way>
-    StashTransition<Occupied<D, StashMapping, W>, D, W> for VeOperandBuilder<D, Mapping, Reg, WithStash, AtRf>
+impl<'l, D: VeScalar, StashMapping: M, Mapping: M, Reg: RegPayload<'l, D, Mapping>, const W: Way>
+    StashTransition<Occupied<D, StashMapping, W>, D, W> for VeOperandBuilder<'l, D, Mapping, Reg, WithStash, AtRf>
 {
     type Next = Spent;
     fn transition(state: VeState<Occupied<D, StashMapping, W>>) -> VeState<Spent> {
@@ -760,6 +812,14 @@ impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::Sealed
 {
 }
 impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> Plain for &VrfTensor<D, Chip, Cluster, Slice, Element> {}
+impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::Sealed
+    for VrfTensorView<'_, D, Chip, Cluster, Slice, Element>
+{
+}
+impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> Plain
+    for VrfTensorView<'_, D, Chip, Cluster, Slice, Element>
+{
+}
 
 // Composites are [`Plain`] iff every element is: a stash read (`Stash`) is never `Plain`, so a
 // tuple containing one is not `Plain` and keeps its explicit `StashTransition`. This is what makes
@@ -777,17 +837,21 @@ impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::SlotSealed
     for &VrfTensor<D, Chip, Cluster, Slice, Element>
 {
 }
+impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::SlotSealed
+    for VrfTensorView<'_, D, Chip, Cluster, Slice, Element>
+{
+}
 // `(operand0, operand1)` pairs, which is every ternary form: `(2.0, 3.0)`, `(&vrf, 3.0)`,
 // `(Stash, 3.0)`.
 impl<A: sealed::SlotSealed, B: sealed::SlotSealed> sealed::SlotSealed for (A, B) {}
 // The builder, at any slot and either stash marker -- `IntoBranchedOperand` accepts it whatever it
 // read, unlike `Plain` above, which is `NoStash` only.
-impl<D: VeScalar, Mapping: M, Reg: RegPayload<D, Mapping>, StashMark, Slot> sealed::SlotSealed
-    for VeOperandBuilder<D, Mapping, Reg, StashMark, Slot>
+impl<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>, StashMark, Slot> sealed::SlotSealed
+    for VeOperandBuilder<'l, D, Mapping, Reg, StashMark, Slot>
 {
 }
 // A per-group operand that is already built, which `IntoGroupTernaryOperand` passes through.
-impl<Mapping: M> sealed::SlotSealed for GroupTernaryOperand<Mapping> {}
+impl<'l, Mapping: M> sealed::SlotSealed for GroupTernaryOperand<'l, Mapping> {}
 
 // ============================================================================
 // IntoBranchedOperand - every operand form, as the slots it fills
@@ -810,7 +874,7 @@ impl<Mapping: M> sealed::SlotSealed for GroupTernaryOperand<Mapping> {}
 /// tensor.vector_fxp(op, Branched::imm(guard, 16384))     // reg0 = (guard, 16384)
 /// ```
 ///
-/// A `&VrfTensor` is the one form with shape rules of its own, and this is where they are stated.
+/// `&VrfTensor` and [`VrfTensorView`] share the following shape rules.
 ///
 /// **Its `Chip` / `Cluster` / `Slice` are the stream's own.** The VE runs per slice, so at slice `s`
 /// an op reads the operand slice `s` holds, and one partitioned differently would read another
@@ -836,8 +900,8 @@ impl<Mapping: M> sealed::SlotSealed for GroupTernaryOperand<Mapping> {}
 /// ```compile_fail,E0277
 /// use furiosa_opt_std::prelude::{IntoBranchedOperand, TagGuard, M, VeScalar};
 /// struct MyOperand;
-/// impl<D: VeScalar, Map: M> IntoBranchedOperand<D, Map> for MyOperand {
-///     fn fill_slots(self, _operand: &mut furiosa_opt_std::prelude::BinaryBranchedOperand<D, Map>, _guard: TagGuard) {}
+/// impl<'l, D: VeScalar, Map: M> IntoBranchedOperand<'l, D, Map> for MyOperand {
+///     fn fill_slots(self, _operand: &mut furiosa_opt_std::prelude::BinaryBranchedOperand<'l, D, Map>, _guard: TagGuard) {}
 /// }
 /// ```
 #[diagnostic::on_unimplemented(
@@ -847,13 +911,13 @@ impl<Mapping: M> sealed::SlotSealed for GroupTernaryOperand<Mapping> {}
             the same slices, restate it with `VrfTensor::reshape`",
     note = "a constant operand carries the stream's scalar: `i32` for logic / fxp, `f32` for fp"
 )]
-pub trait IntoBranchedOperand<D: VeScalar, TargetMapping: M>: Sized + sealed::SlotSealed {
+pub trait IntoBranchedOperand<'l, D: VeScalar, TargetMapping: M>: Sized + sealed::SlotSealed {
     /// Writes this operand's slot(s) into `operand`, applied where `guard` matches.
-    fn fill_slots(self, operand: &mut BinaryBranchedOperand<D, TargetMapping>, guard: TagGuard);
+    fn fill_slots(self, operand: &mut BinaryBranchedOperand<'l, D, TargetMapping>, guard: TagGuard);
 
     /// The slot layout of one VE pass. A bare operand is unconditional; a [`Branched`] layout carries
     /// the guards the kernel wrote.
-    fn into_branched_operand(self) -> BinaryBranchedOperand<D, TargetMapping> {
+    fn into_branched_operand(self) -> BinaryBranchedOperand<'l, D, TargetMapping> {
         let mut operand = BinaryBranchedOperand::default();
         self.fill_slots(&mut operand, TagGuard::all());
         operand
@@ -861,39 +925,54 @@ pub trait IntoBranchedOperand<D: VeScalar, TargetMapping: M>: Sized + sealed::Sl
 }
 
 /// An `i32` constant drives an immediate register.
-impl<Mapping: M> IntoBranchedOperand<i32, Mapping> for i32 {
-    fn fill_slots(self, operand: &mut BinaryBranchedOperand<i32, Mapping>, guard: TagGuard) {
+impl<'l, Mapping: M> IntoBranchedOperand<'l, i32, Mapping> for i32 {
+    fn fill_slots(self, operand: &mut BinaryBranchedOperand<'l, i32, Mapping>, guard: TagGuard) {
         assert_fill(operand.fill_imm(ImmSlot::Reg0, guard, self));
     }
 }
 
 /// An `f32` constant drives an immediate register.
-impl<Mapping: M> IntoBranchedOperand<f32, Mapping> for f32 {
-    fn fill_slots(self, operand: &mut BinaryBranchedOperand<f32, Mapping>, guard: TagGuard) {
+impl<'l, Mapping: M> IntoBranchedOperand<'l, f32, Mapping> for f32 {
+    fn fill_slots(self, operand: &mut BinaryBranchedOperand<'l, f32, Mapping>, guard: TagGuard) {
         assert_fill(operand.fill_imm(ImmSlot::Reg0, guard, self));
     }
 }
 
 /// A VRF register drives the rf port, transposed to the op's tensor shape. VRF is read-many, so the
 /// same register may feed several ops.
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
-    IntoBranchedOperand<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-    for &VrfTensor<D, Chip, Cluster, Slice, Element>
+impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+    IntoBranchedOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+    for &'l VrfTensor<D, Chip, Cluster, Slice, Element>
 {
     #[track_caller]
     fn fill_slots(
         self,
-        operand: &mut BinaryBranchedOperand<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
+        operand: &mut BinaryBranchedOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
         guard: TagGuard,
     ) {
         assert_fill(operand.fill_rf(guard, vrf_rf_port(self)));
     }
 }
 
+/// A VRF view drives the rf port, transposed to the op's tensor shape.
+impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+    IntoBranchedOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+    for VrfTensorView<'l, D, Chip, Cluster, Slice, Element>
+{
+    #[track_caller]
+    fn fill_slots(
+        self,
+        operand: &mut BinaryBranchedOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
+        guard: TagGuard,
+    ) {
+        assert_fill(operand.fill_rf(guard, vrf_view_rf_port(self)));
+    }
+}
+
 /// [`Stash`] reads the stash on the rf port: `RfPort::Stash` in place of a VRF tensor, since the
 /// stash *is* the value.
-impl<D: VeScalar, Mapping: M> IntoBranchedOperand<D, Mapping> for Stash {
-    fn fill_slots(self, operand: &mut BinaryBranchedOperand<D, Mapping>, guard: TagGuard) {
+impl<'l, D: VeScalar, Mapping: M> IntoBranchedOperand<'l, D, Mapping> for Stash {
+    fn fill_slots(self, operand: &mut BinaryBranchedOperand<'l, D, Mapping>, guard: TagGuard) {
         assert_fill(operand.fill_rf(guard, RfPort::Stash));
     }
 }
@@ -901,12 +980,12 @@ impl<D: VeScalar, Mapping: M> IntoBranchedOperand<D, Mapping> for Stash {
 /// An operand already in slot form: the builder's slots carry their own guards, so the guard handed
 /// down has nothing left to say. Only a builder whose registers hold a bare `D` is a *binary* operand;
 /// a ternary one goes through [`IntoTernaryOperand`] instead.
-impl<D: VeScalar, Mapping: M, StashMark, Slot> IntoBranchedOperand<D, Mapping>
-    for VeOperandBuilder<D, Mapping, D, StashMark, Slot>
+impl<'l, D: VeScalar, Mapping: M, StashMark, Slot> IntoBranchedOperand<'l, D, Mapping>
+    for VeOperandBuilder<'l, D, Mapping, D, StashMark, Slot>
 where
-    D: RegPayload<D, Mapping, Port = RfPort<D, Mapping>>,
+    D: RegPayload<'l, D, Mapping, Port = RfPort<'l, D, Mapping>>,
 {
-    fn fill_slots(self, operand: &mut BinaryBranchedOperand<D, Mapping>, _guard: TagGuard) {
+    fn fill_slots(self, operand: &mut BinaryBranchedOperand<'l, D, Mapping>, _guard: TagGuard) {
         *operand = self.operand;
     }
 }
@@ -932,7 +1011,7 @@ where
 /// ```compile_fail,E0277
 /// use furiosa_opt_std::prelude::{IntoTernaryOperand, M, VeScalar};
 /// use furiosa_mapping::Broadcast;
-/// fn ternary_operand<D: VeScalar, Map: M, Op: IntoTernaryOperand<D, Map>>(_op: Op) {}
+/// fn ternary_operand<'l, D: VeScalar, Map: M, Op: IntoTernaryOperand<'l, D, Map>>(_op: Op) {}
 /// ternary_operand::<f32, Broadcast<1>, _>(2.0f32);
 /// ```
 #[diagnostic::on_unimplemented(
@@ -942,13 +1021,13 @@ where
             the same slices, restate it with `VrfTensor::reshape` (`IntoBranchedOperand` states every \
             operand rule)"
 )]
-pub trait IntoTernaryOperand<D: VeScalar, TargetMapping: M>: Sized + sealed::SlotSealed {
+pub trait IntoTernaryOperand<'l, D: VeScalar, TargetMapping: M>: Sized + sealed::SlotSealed {
     /// Writes this operand's slot(s) into `operand`, applied where `guard` matches.
-    fn fill_ternary_slots(self, operand: &mut TernaryBranchedOperand<D, TargetMapping>, guard: TagGuard);
+    fn fill_ternary_slots(self, operand: &mut TernaryBranchedOperand<'l, D, TargetMapping>, guard: TagGuard);
 
     /// The ternary slot layout of one VE pass. A bare operand is unconditional; a [`Branched`] layout
     /// carries the guards the kernel wrote.
-    fn into_ternary_operand(self) -> TernaryBranchedOperand<D, TargetMapping> {
+    fn into_ternary_operand(self) -> TernaryBranchedOperand<'l, D, TargetMapping> {
         let mut operand = TernaryBranchedOperand::default();
         self.fill_ternary_slots(&mut operand, TagGuard::all());
         operand
@@ -956,21 +1035,21 @@ pub trait IntoTernaryOperand<D: VeScalar, TargetMapping: M>: Sized + sealed::Slo
 }
 
 /// `(operand0, operand1)` constants drive one immediate register carrying both.
-impl<Mapping: M> IntoTernaryOperand<f32, Mapping> for (f32, f32) {
-    fn fill_ternary_slots(self, operand: &mut TernaryBranchedOperand<f32, Mapping>, guard: TagGuard) {
+impl<'l, Mapping: M> IntoTernaryOperand<'l, f32, Mapping> for (f32, f32) {
+    fn fill_ternary_slots(self, operand: &mut TernaryBranchedOperand<'l, f32, Mapping>, guard: TagGuard) {
         assert_fill(operand.fill_imm(ImmSlot::Reg0, guard, self));
     }
 }
 
 /// A VRF `operand0` drives the rf port, which carries this branch's `operand1` with it.
-impl<Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
-    IntoTernaryOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-    for (&VrfTensor<f32, Chip, Cluster, Slice, Element>, f32)
+impl<'l, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+    IntoTernaryOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+    for (&'l VrfTensor<f32, Chip, Cluster, Slice, Element>, f32)
 {
     #[track_caller]
     fn fill_ternary_slots(
         self,
-        operand: &mut TernaryBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
+        operand: &mut TernaryBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
         guard: TagGuard,
     ) {
         let (vrf, operand1) = self;
@@ -978,9 +1057,25 @@ impl<Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
     }
 }
 
+/// A VRF view supplies `operand0` on the rf port, alongside this branch's `operand1`.
+impl<'l, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+    IntoTernaryOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+    for (VrfTensorView<'l, f32, Chip, Cluster, Slice, Element>, f32)
+{
+    #[track_caller]
+    fn fill_ternary_slots(
+        self,
+        operand: &mut TernaryBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
+        guard: TagGuard,
+    ) {
+        let (vrf, operand1) = self;
+        assert_fill(operand.fill_rf(guard, (vrf_view_rf_port(vrf), operand1)));
+    }
+}
+
 /// A stash `operand0` reads the rf port and carries this branch's `operand1`.
-impl<Mapping: M> IntoTernaryOperand<f32, Mapping> for (Stash, f32) {
-    fn fill_ternary_slots(self, operand: &mut TernaryBranchedOperand<f32, Mapping>, guard: TagGuard) {
+impl<'l, Mapping: M> IntoTernaryOperand<'l, f32, Mapping> for (Stash, f32) {
+    fn fill_ternary_slots(self, operand: &mut TernaryBranchedOperand<'l, f32, Mapping>, guard: TagGuard) {
         let (_, operand1) = self;
         assert_fill(operand.fill_rf(guard, (RfPort::Stash, operand1)));
     }
@@ -988,10 +1083,10 @@ impl<Mapping: M> IntoTernaryOperand<f32, Mapping> for (Stash, f32) {
 
 /// A ternary operand already in slot form: the builder's registers hold `(operand0, operand1)` pairs,
 /// which is exactly what a ternary slot carries, so the layout transfers as it stands.
-impl<Mapping: M, StashMark, Slot> IntoTernaryOperand<f32, Mapping>
-    for VeOperandBuilder<f32, Mapping, (f32, f32), StashMark, Slot>
+impl<'l, Mapping: M, StashMark, Slot> IntoTernaryOperand<'l, f32, Mapping>
+    for VeOperandBuilder<'l, f32, Mapping, (f32, f32), StashMark, Slot>
 {
-    fn fill_ternary_slots(self, operand: &mut TernaryBranchedOperand<f32, Mapping>, _guard: TagGuard) {
+    fn fill_ternary_slots(self, operand: &mut TernaryBranchedOperand<'l, f32, Mapping>, _guard: TagGuard) {
         *operand = self.operand;
     }
 }
@@ -1002,10 +1097,10 @@ impl<Mapping: M, StashMark, Slot> IntoTernaryOperand<f32, Mapping>
 
 /// Optional per-group operand for VectorTensorPair operations. `None` skips the operation for
 /// that group; `Some(operand)` applies it.
-pub type GroupOperand<D, Mapping> = Option<BinaryBranchedOperand<D, Mapping>>;
+pub type GroupOperand<'l, D, Mapping> = Option<BinaryBranchedOperand<'l, D, Mapping>>;
 
 /// Trait for converting a per-group operand into a [`GroupOperand`]. Accepts an `i32` or `f32`
-/// constant, a `&VrfTensor`, or `()` to skip the operation for this group (`None`).
+/// constant, a `&VrfTensor`, a [`VrfTensorView`], or `()` to skip the operation for this group (`None`).
 ///
 /// Neither a [`Branched`] layout nor a [`Stash`] read is among them: a pair op spends both of a pass's
 /// guards on its two groups, and runs no stash read. Having no impl is what says so, at the kernel
@@ -1015,7 +1110,7 @@ pub type GroupOperand<D, Mapping> = Option<BinaryBranchedOperand<D, Mapping>>;
 /// ```
 /// use furiosa_opt_std::prelude::{IntoGroupOperand, M, VeScalar};
 /// use furiosa_mapping::Broadcast;
-/// fn group_operand<D: VeScalar, Map: M, Op: IntoGroupOperand<D, Map>>(_op: Op) {}
+/// fn group_operand<'l, D: VeScalar, Map: M, Op: IntoGroupOperand<'l, D, Map>>(_op: Op) {}
 /// group_operand::<i32, Broadcast<1>, _>(10i32);
 /// group_operand::<f32, Broadcast<1>, _>(1.0f32);
 /// group_operand::<f32, Broadcast<1>, _>(()); // skips this group
@@ -1025,14 +1120,14 @@ pub type GroupOperand<D, Mapping> = Option<BinaryBranchedOperand<D, Mapping>>;
 /// ```compile_fail,E0277
 /// use furiosa_opt_std::prelude::{IntoGroupOperand, Stash, M, VeScalar};
 /// use furiosa_mapping::Broadcast;
-/// fn group_operand<D: VeScalar, Map: M, Op: IntoGroupOperand<D, Map>>(_op: Op) {}
+/// fn group_operand<'l, D: VeScalar, Map: M, Op: IntoGroupOperand<'l, D, Map>>(_op: Op) {}
 /// group_operand::<i32, Broadcast<1>, _>(Stash);
 /// ```
 /// Negative: a [`Branched`] layout, which a pair op has no room for and the translator no case for.
 /// ```compile_fail,E0277
 /// use furiosa_opt_std::prelude::{Branched, IntoGroupOperand, TagGuard, M, VeScalar};
 /// use furiosa_mapping::Broadcast;
-/// fn group_operand<D: VeScalar, Map: M, Op: IntoGroupOperand<D, Map>>(_op: Op) {}
+/// fn group_operand<'l, D: VeScalar, Map: M, Op: IntoGroupOperand<'l, D, Map>>(_op: Op) {}
 /// group_operand::<f32, Broadcast<1>, _>(Branched::imm::<f32, Broadcast<1>, _>(TagGuard::all(), 1.0));
 /// ```
 #[diagnostic::on_unimplemented(
@@ -1042,14 +1137,14 @@ pub type GroupOperand<D, Mapping> = Option<BinaryBranchedOperand<D, Mapping>>;
             the same slices, restate it with `VrfTensor::reshape` (`IntoBranchedOperand` states every \
             operand rule)"
 )]
-pub trait IntoGroupOperand<D: VeScalar, Mapping: M>: sealed::SlotSealed {
+pub trait IntoGroupOperand<'l, D: VeScalar, Mapping: M>: sealed::SlotSealed {
     /// Converts into a [`GroupOperand`]. `None` skips the operation for this group.
-    fn into_group_operand(self) -> GroupOperand<D, Mapping>;
+    fn into_group_operand(self) -> GroupOperand<'l, D, Mapping>;
 }
 
 /// `()` represents skipping the operation for this group.
-impl<D: VeScalar, Mapping: M> IntoGroupOperand<D, Mapping> for () {
-    fn into_group_operand(self) -> GroupOperand<D, Mapping> {
+impl<'l, D: VeScalar, Mapping: M> IntoGroupOperand<'l, D, Mapping> for () {
+    fn into_group_operand(self) -> GroupOperand<'l, D, Mapping> {
         None
     }
 }
@@ -1060,27 +1155,37 @@ impl<D: VeScalar, Mapping: M> IntoGroupOperand<D, Mapping> for () {
 /// Each form below is spelled out rather than blanketed over [`IntoBranchedOperand`], which would
 /// overlap the `()` impl: coherence will not rule out `(): IntoBranchedOperand` on the strength of
 /// there being no such impl today..
-impl<Mapping: M> IntoGroupOperand<i32, Mapping> for i32 {
-    fn into_group_operand(self) -> GroupOperand<i32, Mapping> {
+impl<'l, Mapping: M> IntoGroupOperand<'l, i32, Mapping> for i32 {
+    fn into_group_operand(self) -> GroupOperand<'l, i32, Mapping> {
         Some(self.into_branched_operand())
     }
 }
 
 /// An `f32` constant, the float clusters' peer of the `i32` form above.
-impl<Mapping: M> IntoGroupOperand<f32, Mapping> for f32 {
-    fn into_group_operand(self) -> GroupOperand<f32, Mapping> {
+impl<'l, Mapping: M> IntoGroupOperand<'l, f32, Mapping> for f32 {
+    fn into_group_operand(self) -> GroupOperand<'l, f32, Mapping> {
         Some(self.into_branched_operand())
     }
 }
 
 /// A VRF register drives the rf port. It is read-many, so both groups may name the same one, and
 /// each group's stream is the pair's own.
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
-    IntoGroupOperand<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-    for &VrfTensor<D, Chip, Cluster, Slice, Element>
+impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+    IntoGroupOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+    for &'l VrfTensor<D, Chip, Cluster, Slice, Element>
 {
     #[track_caller]
-    fn into_group_operand(self) -> GroupOperand<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
+    fn into_group_operand(self) -> GroupOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
+        Some(self.into_branched_operand())
+    }
+}
+
+impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+    IntoGroupOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+    for VrfTensorView<'l, D, Chip, Cluster, Slice, Element>
+{
+    #[track_caller]
+    fn into_group_operand(self) -> GroupOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
         Some(self.into_branched_operand())
     }
 }
@@ -1090,11 +1195,11 @@ impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
 // ============================================================================
 
 /// Optional per-group ternary operand for VectorTensorPair operations.
-pub type GroupTernaryOperand<Mapping> = Option<TernaryBranchedOperand<f32, Mapping>>;
+pub type GroupTernaryOperand<'l, Mapping> = Option<TernaryBranchedOperand<'l, f32, Mapping>>;
 
-/// Trait for converting a per-group ternary operand into a [`GroupTernaryOperand`]. Accepts
-/// `(operand0, operand1)` where `operand0` is a constant or `&vrf`, a `GroupTernaryOperand`
-/// (pass-through), or `()` to skip the operation for this group.
+/// Converts a per-group ternary operand into a [`GroupTernaryOperand`]. Accepts `(operand0, operand1)`
+/// with `operand0` a constant, `&vrf`, or a [`VrfTensorView`]; an already-built `GroupTernaryOperand`;
+/// or `()` to skip the operation for this group.
 ///
 /// `(Stash, c)` is excluded, by the `T: Plain` bound below: a pair op reads no stash.
 #[diagnostic::on_unimplemented(
@@ -1104,34 +1209,34 @@ pub type GroupTernaryOperand<Mapping> = Option<TernaryBranchedOperand<f32, Mappi
             the same slices, restate it with `VrfTensor::reshape` (`IntoBranchedOperand` states every \
             operand rule)"
 )]
-pub trait IntoGroupTernaryOperand<Mapping: M>: sealed::SlotSealed {
+pub trait IntoGroupTernaryOperand<'l, Mapping: M>: sealed::SlotSealed {
     /// Converts into a [`GroupTernaryOperand`] with the specified mapping.
-    fn into_group_ternary_operand(self) -> GroupTernaryOperand<Mapping>;
+    fn into_group_ternary_operand(self) -> GroupTernaryOperand<'l, Mapping>;
 }
 
 /// `()` represents skipping the operation for this group.
-impl<Mapping: M> IntoGroupTernaryOperand<Mapping> for () {
-    fn into_group_ternary_operand(self) -> GroupTernaryOperand<Mapping> {
+impl<'l, Mapping: M> IntoGroupTernaryOperand<'l, Mapping> for () {
+    fn into_group_ternary_operand(self) -> GroupTernaryOperand<'l, Mapping> {
         None
     }
 }
 
 /// A `GroupTernaryOperand` passes through.
-impl<Mapping: M> IntoGroupTernaryOperand<Mapping> for GroupTernaryOperand<Mapping> {
-    fn into_group_ternary_operand(self) -> GroupTernaryOperand<Mapping> {
+impl<'l, Mapping: M> IntoGroupTernaryOperand<'l, Mapping> for GroupTernaryOperand<'l, Mapping> {
+    fn into_group_ternary_operand(self) -> GroupTernaryOperand<'l, Mapping> {
         self
     }
 }
 
 /// `(rhs, operand1)` applies to this group. Spelled out rather than blanketed over
 /// [`IntoBranchedOperand`] for the same coherence reason as [`IntoGroupOperand`].
-impl<T, Mapping: M> IntoGroupTernaryOperand<Mapping> for (T, f32)
+impl<'l, T, Mapping: M> IntoGroupTernaryOperand<'l, Mapping> for (T, f32)
 where
-    (T, f32): IntoTernaryOperand<f32, Mapping>,
+    (T, f32): IntoTernaryOperand<'l, f32, Mapping>,
     // `T: Plain` keeps `(Stash, c)` out: a pair op has no stash to read. See [`IntoGroupOperand`].
     T: Plain,
 {
-    fn into_group_ternary_operand(self) -> GroupTernaryOperand<Mapping> {
+    fn into_group_ternary_operand(self) -> GroupTernaryOperand<'l, Mapping> {
         Some(self.into_ternary_operand())
     }
 }
@@ -1185,14 +1290,15 @@ mod tests {
     /// exactly one register. A scalar argument is what makes the operand binary.
     #[test]
     fn one_immediate_register_leaves_the_rest_unused() {
-        let operand: BinaryBranchedOperand<f32, Map> = Branched::imm(TagGuard::all(), 2.0f32).into_branched_operand();
+        let operand: BinaryBranchedOperand<'_, f32, Map> =
+            Branched::imm(TagGuard::all(), 2.0f32).into_branched_operand();
 
         let ([reg0, reg1, reg2], has_rf) = slots(&operand);
         assert_eq!(reg0, Some((TagGuard::all(), 2.0f32)));
         assert!(reg1.is_none() && reg2.is_none() && !has_rf);
 
         // Same path for an i32 op: the literal's type is the only thing that differs.
-        let operand: BinaryBranchedOperand<i32, Map> =
+        let operand: BinaryBranchedOperand<'_, i32, Map> =
             Branched::imm(TagGuard::all(), 0x777f_i32).into_branched_operand();
 
         let ([reg0, reg1, reg2], has_rf) = slots(&operand);
@@ -1205,12 +1311,12 @@ mod tests {
     /// register's data is what distinguishes it from a stash read on the same slot.
     #[test]
     fn register_fills_the_rf_port_and_leaves_the_rest_unused() {
-        let vrf: VrfTensor<i32, Map, Map, Map, VrfElement> = VrfTensor::new(Tensor::splat(7));
-        let operand: BinaryBranchedOperand<i32, VrfStream> =
+        let vrf: VrfTensor<i32, Map, Map, Map, VrfElement> = VrfTensor::from_inner(Tensor::splat(7));
+        let operand: BinaryBranchedOperand<'_, i32, VrfStream> =
             Branched::rf(TagGuard::all(), &vrf).into_branched_operand();
 
         let (rf_guard, port) = operand.rf_slot().as_ref().unwrap();
-        let RfPort::External(rf_data) = port else {
+        let RfPort::External(rf_data, _) = port else {
             panic!("a register read is `External`")
         };
         assert_eq!(*rf_guard, TagGuard::all());
@@ -1229,7 +1335,7 @@ mod tests {
     /// cross-group cache read -- so building one here would pin a shape a kernel cannot compile.
     #[test]
     fn a_bit3_guard_gates_its_slot_on_that_group() {
-        let operand: BinaryBranchedOperand<f32, Map> = Branched::imm(GROUP0, 2.0f32).into_branched_operand();
+        let operand: BinaryBranchedOperand<'_, f32, Map> = Branched::imm(GROUP0, 2.0f32).into_branched_operand();
 
         let ([reg0, _, _], has_rf) = slots(&operand);
         let (reg0_guard, reg0_value) = reg0.unwrap();
@@ -1238,9 +1344,9 @@ mod tests {
         assert!(!has_rf);
 
         // The rf slot takes such a guard the same way, group 1 this time.
-        let vrf: VrfTensor<f32, Map, Map, Map, VrfElement> = VrfTensor::new(Tensor::splat(9.0));
-        let operand: BinaryBranchedOperand<f32, VrfStream> = Branched::rf(GROUP1, &vrf).into_branched_operand();
-        let Some((rf_guard, RfPort::External(_))) = operand.rf_slot() else {
+        let vrf: VrfTensor<f32, Map, Map, Map, VrfElement> = VrfTensor::from_inner(Tensor::splat(9.0));
+        let operand: BinaryBranchedOperand<'_, f32, VrfStream> = Branched::rf(GROUP1, &vrf).into_branched_operand();
+        let Some((rf_guard, RfPort::External(_, _))) = operand.rf_slot() else {
             panic!("a register read is `RfPort::External`")
         };
         assert!(rf_guard.admits(id::<0b1000>()) && !rf_guard.admits(id::<0>()));
@@ -1251,7 +1357,7 @@ mod tests {
     /// mirroring the hardware's per-branch selection. Nothing spells the arity out.
     #[test]
     fn a_pair_argument_makes_the_slots_ternary() {
-        let ternary: TernaryBranchedOperand<f32, Map> =
+        let ternary: TernaryBranchedOperand<'_, f32, Map> =
             Branched::imm(TagGuard::all(), (2.0f32, 3.0f32)).into_ternary_operand();
 
         let ([reg0, _, _], has_rf) = slots(&ternary);
@@ -1261,7 +1367,7 @@ mod tests {
         assert!(!has_rf);
 
         // The ternary rf slot pairs its read with `operand1`, so `(Stash, c)` fills one slot.
-        let ternary: TernaryBranchedOperand<f32, Map> =
+        let ternary: TernaryBranchedOperand<'_, f32, Map> =
             Branched::rf::<f32, Map, (f32, f32), _>(TagGuard::all(), (Stash, 1.0f32)).into_ternary_operand();
         assert!(ternary.reads_stash());
         let Some((guard, (RfPort::Stash, operand1))) = ternary.rf_slot() else {
@@ -1276,7 +1382,7 @@ mod tests {
     /// hardware selects `operand1` per branch, so nothing has to be shared.
     #[test]
     fn per_branch_ternary_operands_fill_one_register_each() {
-        let ternary: TernaryBranchedOperand<f32, Map> = Branched::imm(GROUP0, (2.0f32, 1.0f32))
+        let ternary: TernaryBranchedOperand<'_, f32, Map> = Branched::imm(GROUP0, (2.0f32, 1.0f32))
             .imm(GROUP1, (3.0f32, 2.0f32))
             .into_ternary_operand();
 
@@ -1300,7 +1406,7 @@ mod tests {
     fn regs_fill_densely_in_call_order() {
         let first = TagGuard::matches([One, Ignore, Ignore, Ignore]);
         let second = TagGuard::matches([Zero, One, Ignore, Ignore]);
-        let operand: BinaryBranchedOperand<f32, Map> =
+        let operand: BinaryBranchedOperand<'_, f32, Map> =
             Branched::imm(first, 1.0f32).imm(second, 2.0f32).into_branched_operand();
 
         let ([reg0, reg1, reg2], has_rf) = slots(&operand);
@@ -1320,8 +1426,8 @@ mod tests {
     /// stops one call short of.
     #[test]
     fn three_immediates_and_the_rf_port_fill_the_pass() {
-        let vrf: VrfTensor<f32, Map, Map, Map, VrfElement> = VrfTensor::new(Tensor::splat(9.0));
-        let operand: BinaryBranchedOperand<f32, VrfStream> =
+        let vrf: VrfTensor<f32, Map, Map, Map, VrfElement> = VrfTensor::from_inner(Tensor::splat(9.0));
+        let operand: BinaryBranchedOperand<'_, f32, VrfStream> =
             Branched::imm(TagGuard::matches([One, Ignore, Ignore, Ignore]), 1.0f32)
                 .imm(TagGuard::matches([Zero, One, Ignore, Ignore]), 2.0f32)
                 .imm(TagGuard::matches([Zero, Zero, One, Ignore]), 3.0f32)
@@ -1339,7 +1445,7 @@ mod tests {
     /// stash once.
     #[test]
     fn builder_stash_slot_reads_the_stash() {
-        let operand: BinaryBranchedOperand<f32, Map> =
+        let operand: BinaryBranchedOperand<'_, f32, Map> =
             Branched::imm(TagGuard::not_matches([One, Ignore, Ignore, Ignore]), 1.0f32)
                 .rf(TagGuard::matches([One, Ignore, Ignore, Ignore]), Stash)
                 .into_branched_operand();

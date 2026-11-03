@@ -20,7 +20,7 @@ pub use hbm::{AllChips, HbmTensor, HbmTensorView, HbmTensorViewMut, SomeChips};
 pub use hbm_scalar::HbmScalar;
 pub use host::HostTensor;
 pub use redistribute::*;
-pub use register_file::{TrfTensor, VrfTensor};
+pub use register_file::{TrfTensor, VrfTensor, VrfTensorView, VrfTensorViewMut};
 pub use spm::SpmTensor;
 
 use dm::SliceIndexing;

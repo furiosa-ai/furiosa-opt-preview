@@ -125,7 +125,7 @@ pub(crate) fn assert_packet_one_or_two_flit<D: Scalar, Packet: M>() {
     };
 }
 
-/// Asserts one slice's vector register file operand fits [`VRF_BYTES`] (every `VrfTensor::new`).
+/// Asserts one slice's vector register file operand fits [`VRF_BYTES`] (every `VrfTensor::from_inner`).
 ///
 /// A compile-time check, unlike the TRF's: the VRF is one undivided file per slice, so its capacity
 /// is fixed here, while `to_trf` checks the whole tensor register file.

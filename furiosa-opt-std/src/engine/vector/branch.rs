@@ -1,6 +1,7 @@
 //! Tag Unit configuration for Vector Engine.
 
 use std::fmt::{self, Debug, Display, Formatter};
+use std::marker::PhantomData;
 
 use furiosa_mapping::{Ident, Index, M, MappingExt};
 use furiosa_opt_macro::primitive;
@@ -124,10 +125,11 @@ impl<D: VeScalar + Display> Display for Cmp<D> {
 
 /// What a slot's register-file port reads. A VE pass has exactly one such port, so these two reads
 /// are mutually exclusive and the choice belongs in the payload rather than alongside it.
-#[derive(Debug)]
-pub enum RfPort<D: VeScalar, Mapping: M> {
+/// The lifetime tracks an external operand's source borrow through the consuming pipeline.
+#[derive(Debug, Clone)]
+pub enum RfPort<'l, D: VeScalar, Mapping: M> {
     /// Reads an external register: the VRF tensor, already transposed to the op's tensor shape.
-    External(Tensor<D, Mapping>),
+    External(Tensor<D, Mapping>, PhantomData<&'l ()>),
     /// Reads the stash. It carries no value here because the stashed tensor is the pipeline's, not
     /// the operand's.
     Stash,
@@ -135,18 +137,18 @@ pub enum RfPort<D: VeScalar, Mapping: M> {
 
 /// One binary VE pass's slots: each immediate register holds a constant, the rf port holds a register
 /// or stash read.
-pub type BinaryBranchedOperand<D, Mapping> = BranchedOperand<D, RfPort<D, Mapping>>;
+pub type BinaryBranchedOperand<'l, D, Mapping> = BranchedOperand<D, RfPort<'l, D, Mapping>>;
 
 /// One ternary VE pass's slots: each slot also carries the `operand1` its branch feeds, which the
 /// hardware selects per branch just like `operand0`, so two zipped groups can use different ones in a
 /// single pass. [`VeOperandLayout`] flattens the pair for the apply path.
-pub type TernaryBranchedOperand<D, Mapping> = BranchedOperand<(D, D), (RfPort<D, Mapping>, D)>;
+pub type TernaryBranchedOperand<'l, D, Mapping> = BranchedOperand<(D, D), (RfPort<'l, D, Mapping>, D)>;
 
 /// How to read one pass's slots whatever they carry: [`BinaryBranchedOperand`] and
 /// [`TernaryBranchedOperand`] are the same [`BranchedOperand`] with different payloads, and this trait turns
 /// that into one way to iterate them. The arity surfaces only as
 /// [`Operand1`](Self::Operand1) flowing into the op.
-pub trait VeOperandLayout<D: VeScalar, Mapping: M> {
+pub trait VeOperandLayout<'l, D: VeScalar, Mapping: M> {
     /// What each slot carries besides `operand0`: `()` for a binary op, `operand1` for a ternary one.
     /// `Sync` because the apply path hands it to a parallel per-cell closure.
     type Operand1: Copy + Sync;
@@ -156,7 +158,7 @@ pub trait VeOperandLayout<D: VeScalar, Mapping: M> {
     fn regs(&self) -> [Option<(&TagGuard, D, Self::Operand1)>; 3];
 
     /// The register-file port, as `(guard, where it reads, operand1)`.
-    fn port(&self) -> Option<(&TagGuard, &RfPort<D, Mapping>, Self::Operand1)>;
+    fn port(&self) -> Option<(&TagGuard, &RfPort<'l, D, Mapping>, Self::Operand1)>;
 
     /// Whether the port reads the stash rather than a register. The apply path clones the stash only
     /// when this holds.
@@ -165,7 +167,7 @@ pub trait VeOperandLayout<D: VeScalar, Mapping: M> {
     }
 }
 
-impl<D: VeScalar, Mapping: M> VeOperandLayout<D, Mapping> for BinaryBranchedOperand<D, Mapping> {
+impl<'l, D: VeScalar, Mapping: M> VeOperandLayout<'l, D, Mapping> for BinaryBranchedOperand<'l, D, Mapping> {
     type Operand1 = ();
 
     fn regs(&self) -> [Option<(&TagGuard, D, ())>; 3] {
@@ -173,12 +175,12 @@ impl<D: VeScalar, Mapping: M> VeOperandLayout<D, Mapping> for BinaryBranchedOper
             .map(|slot| slot.as_ref().map(|(guard, operand0)| (guard, *operand0, ())))
     }
 
-    fn port(&self) -> Option<(&TagGuard, &RfPort<D, Mapping>, ())> {
+    fn port(&self) -> Option<(&TagGuard, &RfPort<'l, D, Mapping>, ())> {
         self.rf_slot().as_ref().map(|(guard, port)| (guard, port, ()))
     }
 }
 
-impl<D: VeScalar, Mapping: M> VeOperandLayout<D, Mapping> for TernaryBranchedOperand<D, Mapping> {
+impl<'l, D: VeScalar, Mapping: M> VeOperandLayout<'l, D, Mapping> for TernaryBranchedOperand<'l, D, Mapping> {
     type Operand1 = D;
 
     fn regs(&self) -> [Option<(&TagGuard, D, D)>; 3] {
@@ -188,7 +190,7 @@ impl<D: VeScalar, Mapping: M> VeOperandLayout<D, Mapping> for TernaryBranchedOpe
         })
     }
 
-    fn port(&self) -> Option<(&TagGuard, &RfPort<D, Mapping>, D)> {
+    fn port(&self) -> Option<(&TagGuard, &RfPort<'l, D, Mapping>, D)> {
         self.rf_slot()
             .as_ref()
             .map(|(guard, (port, operand1))| (guard, port, *operand1))

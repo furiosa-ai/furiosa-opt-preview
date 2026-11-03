@@ -98,10 +98,12 @@ Each operand comes from one of three sources.
 | Source | Example | Description |
 |--------|---------|-------------|
 | Constant | `100`, `2.5f32` | Scalar broadcast to all elements |
-| VRF tensor | `&vrf_tensor` | Pre-loaded via `.to_vrf()` before entering the Vector Engine |
+| VRF tensor or view | `&vrf_tensor`, `vrf_tensor.view()` | Values stored by `.to_vrf()` or `.to_vrf_view()` |
 | Stash | `Stash` | Snapshot of an earlier chain step, described below |
 
 Ternary ops (`FmaF`) take a pair `(operand0, operand1)`.
+
+VRF operands borrow their source tensor for the lifetime of the consuming pipeline.
 
 A VRF operand is read per slice by an indexer, which puts three rules on it.
 
@@ -718,7 +720,7 @@ axes![A = 2048, B = 2, N = 256];
 
 fn vrf_add<'l, const T: Tu>(
     input: CollectTensor<'l, T, i32, m![1], m![B], m![A / 8], m![N], m![A % 8]>,
-    vrf: &VrfTensor<i32, m![1], m![B], m![A / 8], m![A % 8]>,
+    vrf: &'l VrfTensor<i32, m![1], m![B], m![A / 8], m![A % 8]>,
 ) -> VectorFinalTensor<'l, T, i32, m![1], m![B], m![A / 8], m![N], m![A % 8]> {
     input
         .vector_init()

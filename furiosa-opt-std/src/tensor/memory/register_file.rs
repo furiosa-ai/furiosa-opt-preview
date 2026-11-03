@@ -77,7 +77,7 @@ impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
 
     /// Every VRF handle is built here, which is where one slice's `Element` answers to the file it
     /// has to fit.
-    pub(crate) fn new(inner: Tensor<D, Self::Mapping, B>) -> Self {
+    pub(crate) fn from_inner(inner: Tensor<D, Self::Mapping, B>) -> Self {
         constraints::assert_vrf_capacity::<D, Element>();
         Self {
             inner,
@@ -85,10 +85,18 @@ impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         }
     }
 
+    /// Creates a kernel-local VRF tensor handle. Device storage is not initialized;
+    /// write to the tensor before reading it.
+    #[allow(clippy::new_without_default)]
+    #[primitive(VrfTensor::new)]
+    pub fn new() -> Self {
+        Self::from_inner(Tensor::zeroed())
+    }
+
     /// A fresh VRF tensor, zero-filled. Where in the register file it lands is the compiler's to
     /// decide, so the handle carries no address of its own.
     pub fn zero() -> Self {
-        Self::new(Tensor::zeroed())
+        Self::from_inner(Tensor::zeroed())
     }
 }
 
@@ -140,16 +148,54 @@ impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
             self.inner
                 .reshape::<m![{ Chip2 }, { Cluster2 }, { Slice2 }, { Element2 }]>()
         };
-        VrfTensor::new(reshaped)
+        VrfTensor::from_inner(reshaped)
     }
 
     /// Creates a mutable view into the tensor.
-    pub fn view_mut<'l>(&'l mut self) -> TensorViewMut<'l, D, Self::Mapping, B> {
-        self.inner.view_mut()
+    #[primitive(VrfTensor::view_mut)]
+    pub fn view_mut<'l>(&'l mut self) -> VrfTensorViewMut<'l, D, Chip, Cluster, Slice, Element, B> {
+        VrfTensorViewMut {
+            inner: self.inner.view_mut(),
+        }
     }
 
     /// Creates an immutable view into the tensor.
-    pub fn view<'l>(&'l self) -> TensorView<'l, D, Self::Mapping, B> {
-        self.inner.view()
+    #[primitive(VrfTensor::view)]
+    pub fn view<'l>(&'l self) -> VrfTensorView<'l, D, Chip, Cluster, Slice, Element, B> {
+        VrfTensorView {
+            inner: self.inner.view(),
+        }
     }
+}
+
+/// Mutable view of a vector register-file tensor.
+#[primitive(VrfTensorViewMut)]
+#[derive(Debug)]
+pub struct VrfTensorViewMut<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend = CurrentBackend> {
+    pub(crate) inner: TensorViewMut<'l, D, Pair<Chip, Pair<Cluster, Pair<Slice, Element>>>, B>,
+}
+
+/// View of a vector register-file tensor.
+#[primitive(VrfTensorView)]
+#[derive(Debug, Clone)]
+pub struct VrfTensorView<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend = CurrentBackend> {
+    pub(crate) inner: TensorView<'l, D, Pair<Chip, Pair<Cluster, Pair<Slice, Element>>>, B>,
+}
+
+impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
+    From<VrfTensorViewMut<'l, D, Chip, Cluster, Slice, Element, B>>
+    for VrfTensorView<'l, D, Chip, Cluster, Slice, Element, B>
+{
+    fn from(view: VrfTensorViewMut<'l, D, Chip, Cluster, Slice, Element, B>) -> Self {
+        Self {
+            inner: view.inner.into(),
+        }
+    }
+}
+
+impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
+    VrfTensorView<'l, D, Chip, Cluster, Slice, Element, B>
+{
+    /// Logical shape (mapping) of this tensor.
+    pub type Mapping = m![{ Chip }, { Cluster }, { Slice }, { Element }];
 }

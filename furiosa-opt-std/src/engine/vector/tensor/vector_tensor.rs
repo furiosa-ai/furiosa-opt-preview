@@ -198,7 +198,7 @@ impl<
         mut self,
         alu: RngdAlu,
         op_fn: impl Fn(D, D) -> D + Sync,
-        operand: &BinaryBranchedOperand<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
+        operand: &BinaryBranchedOperand<'_, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
         stash_data: Option<Tensor<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>>,
     ) -> VeTensorData<NextStage, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, NextFS, W> {
         self.ve_state.use_alu(alu);
@@ -354,7 +354,8 @@ impl<
         operand: Op,
     ) -> VectorTensor<'l, T, NextStage, D, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, NextFS, W>
     where
-        Op: IntoBranchedOperand<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> + StashTransition<Stash, D, W>,
+        Op: IntoBranchedOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+            + StashTransition<Stash, D, W>,
     {
         let stash_data = Op::stashed(self.ve_state());
         let operand = operand.into_branched_operand();
@@ -909,7 +910,7 @@ fn exec_id(raw: u8) -> ExecutionId {
 /// Binary and ternary passes share this body because they share the slot layout ([`VeOperandLayout`]);
 /// the arity shows up only as the `operand1` handed to `combine`. Stash data arrives as a `Tensor`,
 /// already transposed, and is read by the rhs port when that port carries no register.
-fn apply_slots<D: VeScalar, Mapping: M, L: VeOperandLayout<D, Mapping>>(
+fn apply_slots<'l, D: VeScalar, Mapping: M, L: VeOperandLayout<'l, D, Mapping>>(
     data: &Tensor<D, Mapping>,
     tag: &Tensor<u8, Mapping>,
     operand: &L,
@@ -924,7 +925,7 @@ fn apply_slots<D: VeScalar, Mapping: M, L: VeOperandLayout<D, Mapping>>(
         .map(|slot| slot.map(|(guard, operand0, operand1)| (*guard, operand0, operand1)));
     let port = operand.port().map(|(guard, port, operand1)| {
         let rhs = match port {
-            RfPort::External(register) => register,
+            RfPort::External(register, _) => register,
             RfPort::Stash => stash_data.expect(
                 "a stash operand reached the engine without a stashed tensor: use the `Stash` operand, whose \
                  `StashTransition` supplies it, not a hand-built slot",
@@ -962,7 +963,7 @@ pub(super) fn apply_binary_op<D: VeScalar, Mapping: M>(
     data: &Tensor<D, Mapping>,
     tag: &Tensor<u8, Mapping>,
     op: impl Fn(D, D) -> D + Sync,
-    operand: &BinaryBranchedOperand<D, Mapping>,
+    operand: &BinaryBranchedOperand<'_, D, Mapping>,
     stash_data: Option<&Tensor<D, Mapping>>,
 ) -> Tensor<D, Mapping> {
     apply_slots(data, tag, operand, stash_data, |mainstream, rhs, ()| {
@@ -993,7 +994,7 @@ pub(super) fn apply_ternary_op<Mapping: M>(
     data: &Tensor<f32, Mapping>,
     tag: &Tensor<u8, Mapping>,
     op: impl Fn(f32, f32, f32) -> f32 + Sync,
-    operand: &TernaryBranchedOperand<f32, Mapping>,
+    operand: &TernaryBranchedOperand<'_, f32, Mapping>,
     stash_data: Option<&Tensor<f32, Mapping>>,
 ) -> Tensor<f32, Mapping> {
     apply_slots(data, tag, operand, stash_data, op)
@@ -1028,7 +1029,7 @@ where
         operand: Op,
     ) -> VectorLogicTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Logic, stage::Standalone, Op>(op, None, operand)
@@ -1043,7 +1044,7 @@ where
         operand: Op,
     ) -> VectorLogicTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Logic, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1079,7 +1080,7 @@ where
         operand: Op,
     ) -> VectorLogicTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way8 }>,
     {
         self.do_binary::<stage::Logic, stage::Standalone, Op>(op, None, operand)
@@ -1094,7 +1095,7 @@ where
         operand: Op,
     ) -> VectorLogicTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way8 }>,
     {
         self.do_binary::<stage::Logic, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1130,7 +1131,7 @@ where
         operand: Op,
     ) -> VectorFxpTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Fxp, stage::Standalone, Op>(op, None, operand)
@@ -1145,7 +1146,7 @@ where
         operand: Op,
     ) -> VectorFxpTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Fxp, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1326,7 +1327,7 @@ where
         operand: Op,
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         self.do_binary::<stage::Fp, stage::Standalone, Op>(op, None, operand)
@@ -1341,7 +1342,7 @@ where
         operand: Op,
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         self.do_binary::<stage::Fp, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1362,7 +1363,7 @@ where
         operands: Op,
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoTernaryOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoTernaryOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         self.vector_fp_ternary_with_mode(op, TernaryArgMode::Mode012, operands)
@@ -1378,7 +1379,7 @@ where
         operands: Op,
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoTernaryOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoTernaryOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         let stash_data = Op::stashed(self.ve_state());
@@ -1567,7 +1568,7 @@ where
         operand: Op,
     ) -> VectorFpDivTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS, { Way4 }>
     where
-        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         self.do_binary::<stage::FpDiv, FS, Op>(FpDivBinaryOp::DivF, None, operand)
@@ -1581,7 +1582,7 @@ where
         operand: Op,
     ) -> VectorFpDivTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS, { Way4 }>
     where
-        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way4 }>,
     {
         self.do_binary::<stage::FpDiv, FS, Op>(FpDivBinaryOp::DivF, Some(mode), operand)
@@ -1735,7 +1736,7 @@ where
         operand: Op,
     ) -> VectorClipTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Clip, stage::Standalone, Op>(op, None, operand)
@@ -1750,7 +1751,7 @@ where
         operand: Op,
     ) -> VectorClipTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, i32, { Way8 }>,
     {
         self.do_binary::<stage::Clip, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1786,7 +1787,7 @@ where
         operand: Op,
     ) -> VectorClipTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way8 }>,
     {
         self.do_binary::<stage::Clip, stage::Standalone, Op>(op, None, operand)
@@ -1801,7 +1802,7 @@ where
         operand: Op,
     ) -> VectorClipTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER>
     where
-        Op: IntoBranchedOperand<f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
+        Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
             + StashTransition<Stash, f32, { Way8 }>,
     {
         self.do_binary::<stage::Clip, stage::Standalone, Op>(op, Some(mode), operand)
@@ -1890,9 +1891,9 @@ mod tests {
         let data = Tensor::<i32, m![A]>::from_vec([0, 0, 0, 0]);
         let tag = Tensor::<u8, m![A]>::from_vec([0b0100, 0b0000, 0b0100, 0b0000]);
         let register = Tensor::<i32, m![A]>::from_vec([50, 50, 50, 50]);
-        let operand: BinaryBranchedOperand<i32, m![A]> = BranchedOperand::try_from_slots(
+        let operand: BinaryBranchedOperand<'_, i32, m![A]> = BranchedOperand::try_from_slots(
             [Some((negative, 10)), None, None],
-            Some((TagGuard::all(), RfPort::External(register))),
+            Some((TagGuard::all(), RfPort::External(register, PhantomData))),
         )
         .unwrap();
 
@@ -1929,7 +1930,7 @@ mod tests {
         let only_bit0 = TagGuard::matches([BitReq::One, BitReq::Ignore, BitReq::Ignore, BitReq::Ignore]);
         let data = Tensor::<i32, m![A]>::from_vec([7, 7]);
         let tag = Tensor::<u8, m![A]>::from_vec([0b0001, 0b0000]);
-        let operand: BinaryBranchedOperand<i32, m![A]> =
+        let operand: BinaryBranchedOperand<'_, i32, m![A]> =
             BranchedOperand::try_from_slots([Some((only_bit0, 1)), None, None], None).unwrap();
 
         let out = apply_binary_op(&data, &tag, |a, b| a + b, &operand, None);
@@ -1961,7 +1962,7 @@ mod tests {
         let group1 = TagGuard::matches([BitReq::Ignore, BitReq::Ignore, BitReq::Ignore, BitReq::One]);
         let data = Tensor::<f32, m![A]>::from_vec([1.0, 1.0, 1.0, 1.0]);
         let tag = Tensor::<u8, m![A]>::from_vec([0b0000, 0b1000, 0b0000, 0b1000]);
-        let operand: TernaryBranchedOperand<f32, m![A]> =
+        let operand: TernaryBranchedOperand<'_, f32, m![A]> =
             BranchedOperand::try_from_slots([Some((group0, (2.0, 10.0))), Some((group1, (3.0, 20.0))), None], None)
                 .unwrap();
 
@@ -1979,7 +1980,7 @@ mod tests {
         let data = Tensor::<i32, m![A]>::from_vec([1, 1]);
         let tag = Tensor::<u8, m![A]>::from_vec([0b0001, 0b0000]);
         let stash = Tensor::<i32, m![A]>::from_vec([40, 40]);
-        let operand: BinaryBranchedOperand<i32, m![A]> =
+        let operand: BinaryBranchedOperand<'_, i32, m![A]> =
             BranchedOperand::try_from_slots([None, None, None], Some((bit0, RfPort::Stash))).unwrap();
 
         let out = apply_binary_op(&data, &tag, |a, b| a + b, &operand, Some(&stash));

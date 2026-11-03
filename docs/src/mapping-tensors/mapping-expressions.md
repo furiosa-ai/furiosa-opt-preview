@@ -279,7 +279,8 @@ The `B = 2 # 512` mapping gives the view two live `B` positions inside a 512-cel
 They are starts, not a separate tile-number API.
 
 Read views fill cells outside the tile with `PaddingKind::Top`; mutable views require `PaddingKind::Bottom` there so writes cannot escape the tile.
-HBM and DM expose tier-specific tile wrappers, while TRF, VRF, and DPE use the generic view; `HostTensor` has no view/tile API.
+HBM and DM expose tier-specific tile wrappers, while TRF and DPE use the generic view.
+VRF has dedicated whole-tensor views without tiling; `HostTensor` has no view/tile API.
 
 ### Stride and Modulo
 

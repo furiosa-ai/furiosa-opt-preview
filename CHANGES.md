@@ -19,6 +19,9 @@ How entries are written:
 
 ### Changed
 
+- A tile of a DM tensor's clusters or slices that starts past the first (`cluster_tile`,
+  `slice_tile`) and that only DMAs read or write is addressed where its cells lie. It was copied to
+  a scratch at the first cluster or slice and back, each copy between cluster syncs.
 - `#[device(chip = ..., pe = ...)]` accepts usize constant expressions evaluated for each
   launched specialization through the required `DeviceFn<Args>::TOPOLOGY` constant.
   The inherent `topology()` method exists only when neither expression names a generic

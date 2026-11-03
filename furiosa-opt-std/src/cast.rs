@@ -43,14 +43,14 @@ impl FetchCast<bf16> for f32 {}
 
 /// Input scalar types the Fetch Adapter's fixed table-lookup cast can decode to `OutD`.
 ///
-/// One impl per hardware table: a paired 4b->8b decode of `f4e2m1` into either 8-bit float, and a
-/// non-paired 8-bit decode of either into `bf16`, which is the only route from an 8-bit float to
+/// One impl per hardware table: a paired decode of `f4e2m1` into either 8-bit float or `bf16`, and a
+/// non-paired 8-bit decode of either 8-bit float into `bf16`, which is the only route from it to
 /// `bf16` since no [`FetchCast`] does it. Selecting the table by type is what lets
 /// `fetch_table_lookup` takes no runtime table argument. See `computing-tensors/fetch-adapter.md`.
 #[diagnostic::on_unimplemented(
     message = "cannot apply `fetch_table_lookup()` from `{Self}` to `{D}`",
     label = "unsupported fixed table-lookup conversion",
-    note = "supported conversions: f4e2m1 -> f8e4m3/f8e5m2 and f8e4m3/f8e5m2 -> bf16; the table is selected by the source type"
+    note = "supported conversions: f4e2m1 -> f8e4m3/f8e5m2/bf16 and f8e4m3/f8e5m2 -> bf16; the table is selected by the source type"
 )]
 pub trait TableLookupCast<D: Scalar> {
     /// Functional model of the hardware decode table.
@@ -66,6 +66,13 @@ impl TableLookupCast<f8e4m3> for f4e2m1 {
 impl TableLookupCast<f8e5m2> for f4e2m1 {
     fn lookup(self) -> f8e5m2 {
         f8e5m2::from_f32(self.to_f32())
+    }
+}
+
+impl TableLookupCast<bf16> for f4e2m1 {
+    /// Every `f4e2m1` value has at most 1 mantissa bit, so the `bf16` entry is exact.
+    fn lookup(self) -> bf16 {
+        bf16::from_f32(self.to_f32())
     }
 }
 

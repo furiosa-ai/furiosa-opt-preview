@@ -33,7 +33,7 @@ The key width picks the table and the requested output type picks the entry enco
 
 | Input | Output |
 |-------|--------|
-| `f4e2m1` | `f8e4m3`, `f8e5m2` |
+| `f4e2m1` | `f8e4m3`, `f8e5m2`, `bf16` |
 | `f8e4m3` | `bf16` |
 | `f8e5m2` | `bf16` |
 
@@ -43,7 +43,7 @@ The table for the `f4e2m1` decode is a compile-time constant baked into the fetc
 The 16-entry e2m1 decode is block-independent, which is why the per-block scale stays out of it: folding the scale in would need a distinct table per block and defeat the shared static table.
 
 The hardware sequencer walks byte-aligned keys (1 or 2 bytes), never a raw 4-bit nibble, and a 4-bit key must use a *paired* table.
-The `f4e2m1` decode therefore runs as a 256-entry byte-indexed table: each byte carries two nibbles and one lookup yields the pair of decoded `f8e4m3` values, decoding at two elements per key.
+The `f4e2m1` decode therefore runs as a 256-entry byte-indexed table: each byte carries two nibbles and one lookup yields the pair of decoded values (two bytes each for `bf16`), decoding at two elements per key.
 The `f4e2m1` scalar is modelled accordingly as a byte holding two nibbles, with `BITS = 4` so the fetch mapping accounts elements rather than bytes.
 
 ```rust,ignore

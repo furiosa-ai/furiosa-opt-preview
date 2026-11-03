@@ -195,8 +195,8 @@ impl<
     /// Runs the Fetch Adapter's table-lookup stage (main context only).
     ///
     /// Each input value indexes a decode table selected by the `TableLookupCast` impl,
-    /// not by a runtime argument: `f4e2m1` decodes to either 8-bit float through the
-    /// paired 4b->8b table (the NVFP4 / MXFP4 weight path), and either 8-bit float
+    /// not by a runtime argument: `f4e2m1` decodes to either 8-bit float or `bf16` through
+    /// the paired table (the NVFP4 / MXFP4 weight path), and either 8-bit float
     /// decodes to `bf16` through the non-paired table. Chain a
     /// [`fetch_cast`](Self::fetch_cast) to widen a paired decode to `f32`; the
     /// per-block scale is applied downstream in the Vector or Contraction Engine.

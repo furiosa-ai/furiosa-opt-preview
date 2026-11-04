@@ -206,6 +206,11 @@ How entries are written:
 
 ### Fixed
 
+- A DMA through `chip_tile` views of HBM or DM tensors compiles, on one chip or from one chip to
+  another, when only DMAs read or write the views; it was refused with "tiling a non-in-slice axis
+  is not lowered yet". A chip tile past the first chip that another operation uses is refused with
+  its own message. A load from one chip's HBM into another chip's DM, which stopped the compiler
+  with an internal error, runs on the source chip's DMA engines.
 - A device function that a library launches finds its kernel when the launch's type holds a slice
   of another crate's values, such as `&'static [Branch]` with `Branch` re-exported: the binary
   registered the kernel under the values' definition paths, which the library does not print, and

@@ -1,5 +1,5 @@
 //! Device functions every run of which panics, as a calculation that is not written yet does. The
-//! compiler stores the panic in place of an image, and loading the function raises it on the host.
+//! compiler lowers the panic to a task panic, and the launch raises it on the host.
 
 use furiosa_opt_std::prelude::*;
 
@@ -28,4 +28,15 @@ pub fn panics_in_loop(device: &mut Device, x: &Tensor) -> Tensor {
         let _ = pending(x);
     }
     pending(x)
+}
+
+/// Panics after a loop it unrolls, whose trips copy `x`.
+#[device(chip = 1)]
+pub fn panics_after_unrolled_loop(device: &mut Device, x: &Tensor) -> Tensor {
+    let mut copy = Tensor::new();
+    #[unroll]
+    for _ in 0..2 {
+        x.view().to_hbm_view(&mut device.tdma, copy.view_mut());
+    }
+    pending(&copy)
 }

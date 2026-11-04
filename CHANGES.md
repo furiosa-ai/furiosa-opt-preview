@@ -19,6 +19,13 @@ How entries are written:
 
 ### Changed
 
+- `fetch_table_lookup` stages and banks each table once a kernel, with one DMA and one StoTab, and
+  every lookup of that table reads the banked copy, whatever loops, branch arms or scopes the
+  lookups sit in. Each lookup staged the table again before, on every trip of a loop.
+- `to_dm` of an `HbmTensor` whose mapping holds copies (`Broadcast` terms) into a `DmTensor` that
+  broadcasts it reads a different copy for each slice, as far as the copies reach. Every slice read
+  the same copy before, and many reads of one small part of HBM are slow. A tensor that holds one
+  copy lands as before.
 - A tile of a DM tensor's clusters or slices that starts past the first (`cluster_tile`,
   `slice_tile`) and that only DMAs read or write is addressed where its cells lie. It was copied to
   a scratch at the first cluster or slice and back, each copy between cluster syncs.
@@ -44,6 +51,10 @@ How entries are written:
   one per PE once the prefix reaches its later runs; it split every digit above the innermost
   into single positions.
 - Equal constants that several scopes stage share one SRAM slot after hoisting.
+- A loop's next trip issues beside the previous trip's last command on the main or sub context: a
+  `DmTensor` that command uses no longer shares data memory or a virtual page with one the next
+  trip uses before its first command on that context, where data memory holds both apart. The
+  commands of a loop nested in the body count where its trips issue them.
 - A gather in a loop whose runtime prefix reads its lengths from a tensor the loop captures stages
   the length table into SPM once, in the outermost enclosing scope whose SPM still holds it,
   instead of on every trip; the transfer issues as soon as the table's source exists.
@@ -195,6 +206,14 @@ How entries are written:
 
 ### Fixed
 
+- A device function that a library launches finds its kernel when the launch's type holds a slice
+  of another crate's values, such as `&'static [Branch]` with `Branch` re-exported: the binary
+  registered the kernel under the values' definition paths, which the library does not print, and
+  the launch failed with `UncompiledInstance`. Such a launch also no longer needs
+  `-Ztrim-diagnostic-paths=false` to keep rustc from aborting the build.
+- A device function that always panics raises its panic at the launch also when it unrolls a
+  loop with `#[unroll]`. Dead-code removal dropped the panic with the work before it, so the
+  image was empty and the launch returned the output buffer's previous contents.
 - A contraction that sums a Time digit up to a runtime count compiles when the fetch reads that
   digit contiguously with the digits around it, as the values of one KV head over its 32-channel
   chunks; it was refused with "no fetch iterator of [...] streams the accumulated DPE iterator".

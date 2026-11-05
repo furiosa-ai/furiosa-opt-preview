@@ -210,6 +210,10 @@ How entries are written:
 
 ### Fixed
 
+- A gather with a runtime prefix that writes into a view of a DM tensor compiles when the kernel
+  wrote the prefix lengths itself, such as a tile it copied out of a length table. The lengths'
+  transfer into SPM was left unlowered, and the compiler stopped with "Lowering Deadline Violation:
+  TensorDmaByShapeKind() is allowed up to precommandgen, found in lir".
 - A DMA through `chip_tile` views of HBM or DM tensors compiles, on one chip or from one chip to
   another, when only DMAs read or write the views; it was refused with "tiling a non-in-slice axis
   is not lowered yet". A chip tile past the first chip that another operation uses is refused with

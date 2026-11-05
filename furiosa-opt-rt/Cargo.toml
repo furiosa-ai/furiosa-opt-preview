@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-opt-rt"
-version = "0.10.0+g74cba51a"
+version = "0.10.0+gbbba8153"
 edition = "2024"
 license = "Apache-2.0"
 description = "Host runtime for executing Furiosa Opt device functions on Furiosa NPUs."

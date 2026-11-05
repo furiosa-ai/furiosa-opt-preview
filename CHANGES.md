@@ -55,6 +55,10 @@ How entries are written:
   `DmTensor` that command uses no longer shares data memory or a virtual page with one the next
   trip uses before its first command on that context, where data memory holds both apart. The
   commands of a loop nested in the body count where its trips issue them.
+- A loop of one trip frees a `DmTensor` it reads from before it, which nothing after the loop
+  reads, after the trip's last read of it: the rest of the trip, a loop nested in it included,
+  can take its data memory. It stayed held for the whole trip unless the trip did not fit
+  otherwise, so a nested loop that needed it could not compile.
 - A gather in a loop whose runtime prefix reads its lengths from a tensor the loop captures stages
   the length table into SPM once, in the outermost enclosing scope whose SPM still holds it,
   instead of on every trip; the transfer issues as soon as the table's source exists.

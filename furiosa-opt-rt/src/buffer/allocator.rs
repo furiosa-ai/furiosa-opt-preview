@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use super::{Allocation, Buffer, Owner};
@@ -120,6 +120,7 @@ impl Allocator {
                 kind,
                 allocator: Arc::clone(self),
                 active: Mutex::default(),
+                partitioned: AtomicBool::new(false),
             }),
         })
     }

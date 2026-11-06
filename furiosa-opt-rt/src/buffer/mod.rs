@@ -1,6 +1,7 @@
 //! Owned device regions and borrowed read/write views.
 
 use std::ops::{Bound, RangeBounds};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(crate) mod access;
@@ -55,6 +56,16 @@ impl Buffer {
     /// [`crate::Error::Busy`].
     pub fn alias(&self, bytes: impl RangeBounds<usize>) -> Result<Self> {
         Ok(self.slice(bytes)?.retain())
+    }
+
+    /// Lets a launch hold overlapping views of this buffer's allocation, which a lease otherwise
+    /// refuses as racing writes; other work still waits for or refuses the bytes they cover.
+    ///
+    /// # Safety
+    /// Device code of any launch holding overlapping views of the allocation reaches each byte
+    /// through at most one of them.
+    pub unsafe fn partition(&self) {
+        self.allocation.partitioned.store(true, Ordering::Relaxed);
     }
 
     /// Extends this range by an adjacent range of the same allocation; aliases and gaps stay separate.
@@ -267,6 +278,8 @@ struct Allocation {
     kind: Kind,
     allocator: Arc<Allocator>,
     active: Mutex<access::Active>,
+    /// Whether its owner keeps the views of one launch apart, so a launch may hold overlapping ones.
+    partitioned: AtomicBool,
 }
 
 impl Drop for Allocation {

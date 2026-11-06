@@ -174,4 +174,9 @@ impl Allocation for rt::Buffer {
         let ready = rt::Buffer::ready(self, rt::Access::Read);
         async move { Ok(ready.await?) }
     }
+
+    unsafe fn partition(&self) {
+        // SAFETY: the caller keeps a launch's overlapping views apart, as this function requires.
+        unsafe { rt::Buffer::partition(self) }
+    }
 }

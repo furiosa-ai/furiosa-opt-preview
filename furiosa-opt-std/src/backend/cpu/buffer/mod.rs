@@ -186,6 +186,14 @@ impl Allocation for Buffer {
             false
         }
     }
+
+    /// A device function's own memory, which no device places, binds into no launch's holds.
+    unsafe fn partition(&self) {
+        if let Some(placement) = &self.memory.placement {
+            // SAFETY: the caller keeps a launch's overlapping views apart, as this function requires.
+            unsafe { placement.partition() }
+        }
+    }
 }
 
 #[cfg(test)]

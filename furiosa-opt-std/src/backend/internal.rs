@@ -40,6 +40,13 @@ pub trait Allocation: Debug + Send + Sync + Sized {
 
     /// Resolves once the device work submitted before this call that writes these bytes ended.
     fn ready(&self) -> impl Future<Output = Result<(), Error>> + Send + use<Self>;
+
+    /// Lets a launch hold overlapping views of this buffer's allocation.
+    ///
+    /// # Safety
+    /// Device code of any launch holding overlapping views of the allocation reaches each byte
+    /// through at most one of them.
+    unsafe fn partition(&self);
 }
 
 /// Where device functions run and their memory lives: opening a device, allocating and moving its

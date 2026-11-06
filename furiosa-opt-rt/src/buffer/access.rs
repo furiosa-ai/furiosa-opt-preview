@@ -6,6 +6,7 @@ use std::cell::{Cell, UnsafeCell};
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::ptr;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::{Poll, Waker};
 
@@ -183,7 +184,11 @@ impl Lease {
             return Ok(false);
         }
         let record = self.records.get(self.len).ok_or(Error::Capacity)?;
-        if active.refuses(&request, self.owner.on(request.memory)) {
+        let own = match request.memory.partitioned() {
+            true => &self.records[..self.len],
+            false => &[],
+        };
+        if active.refuses(&request, self.owner.on(request.memory), own) {
             return Err(Error::Busy);
         }
         let behind = active.blocker(&request, active.admitted).is_some();
@@ -414,8 +419,9 @@ unsafe impl Send for Active {}
 
 impl Active {
     /// Whether work admitted at once refuses `owner`'s `request` by conflicting with it, unless both
-    /// are distinct ordered owners of memory they order alike.
-    fn refuses(&self, request: &Request<'_>, owner: Owner) -> bool {
+    /// are distinct ordered owners of memory they order alike, or the conflicting record is one of
+    /// `own`, the request's batch's records on memory its owner partitions.
+    fn refuses(&self, request: &Request<'_>, owner: Owner, own: &[Record]) -> bool {
         let overlaps = match owner {
             Owner::Ordered(_) => match request.memory {
                 MemoryRef::Host(_, _) => overlap(&request.bytes, &self.bytes),
@@ -423,16 +429,18 @@ impl Active {
             },
             Owner::Unordered => overlap(&request.bytes, &self.bytes),
         };
+        let own = own.as_ptr_range();
         (request.access == Access::Write || self.writers != 0)
             && overlaps
-            && self.list(self.head).any(|region| {
+            && self.linked(self.head).any(|record| {
+                let region = record.region();
                 let exempt = match (owner, region.owner.get()) {
                     (Owner::Ordered(left), Owner::Ordered(right)) => {
                         left != right && request.memory.ordered(region.memory())
                     }
                     (Owner::Unordered, _) | (_, Owner::Unordered) => false,
                 };
-                !exempt && region.conflicts(request)
+                !exempt && !own.contains(&ptr::from_ref(record)) && region.conflicts(request)
             })
     }
 
@@ -510,12 +518,17 @@ impl Active {
 
     /// The regions of the records linked from `head`, newest first.
     fn list(&self, head: *const Record) -> impl Iterator<Item = &Region> {
+        self.linked(head).map(Record::region)
+    }
+
+    /// The records linked from `head`, newest first.
+    fn linked(&self, head: *const Record) -> impl Iterator<Item = &Record> {
         let mut next = head;
         std::iter::from_fn(move || {
-            // SAFETY: the allocation lock `self` is borrowed from keeps each linked record and region alive.
+            // SAFETY: the allocation lock `self` is borrowed from keeps each linked record alive.
             let record = unsafe { next.as_ref() }?;
             next = record.next.get();
-            Some(unsafe { &*record.region.get() }.as_ref().expect("linked access"))
+            Some(record)
         })
     }
 }
@@ -525,6 +538,14 @@ struct Record {
     region: UnsafeCell<Option<Region>>,
     prev: Cell<*const Record>,
     next: Cell<*const Record>,
+}
+
+impl Record {
+    /// The region of a linked record, which its allocation's lock, held by the caller, keeps.
+    fn region(&self) -> &Region {
+        // SAFETY: a linked record holds its region until it is unlinked under the same lock.
+        unsafe { &*self.region.get() }.as_ref().expect("linked access")
+    }
 }
 
 // SAFETY: records are published only in a boxed slice; moving Lease never moves a linked record.
@@ -629,7 +650,7 @@ impl<'a> Request<'a> {
             if active.poisoned {
                 return Err(Error::Poisoned);
             }
-            if !active.refuses(self, Owner::Unordered) && active.blocker(self, u64::MAX).is_none() {
+            if !active.refuses(self, Owner::Unordered, &[]) && active.blocker(self, u64::MAX).is_none() {
                 return Ok(());
             }
             active = idle.wait(active).unwrap_or_else(PoisonError::into_inner);
@@ -682,6 +703,14 @@ impl<'a> MemoryRef<'a> {
             (Self::Device(left), MemoryRef::Device(right)) => Arc::ptr_eq(left, right),
             (Self::Host(left, _), MemoryRef::Host(right, _)) => Arc::ptr_eq(left, right),
             (Self::Device(_), MemoryRef::Host(_, _)) | (Self::Host(_, _), MemoryRef::Device(_)) => false,
+        }
+    }
+
+    /// Whether the memory's owner keeps one launch's views of it apart.
+    fn partitioned(self) -> bool {
+        match self {
+            Self::Device(allocation) => allocation.partitioned.load(Ordering::Relaxed),
+            Self::Host(_, _) => false,
         }
     }
 
@@ -1232,6 +1261,24 @@ mod tests {
         ];
         let launch = Lease::acquire(behind.iter().map(|buffer| (buffer.slice(..).unwrap(), Write)));
         assert!(matches!(launch, Err(Error::Busy)));
+    }
+
+    /// A lease holds its own overlapping views of memory its owner partitions, and other work still
+    /// conflicts with every byte they cover; unpartitioned, the overlap is Busy.
+    #[test]
+    fn holds_its_own_overlapping_views_of_partitioned_memory() {
+        let buffer = allocation(1024);
+        let views = [0..512, 256..768].map(|bytes| buffer.alias(bytes).unwrap());
+        let launch = || Lease::acquire(views.iter().map(|view| (view.slice(..).unwrap(), Write)));
+        assert!(matches!(launch(), Err(Error::Busy)));
+        // SAFETY: no device code reaches the views.
+        unsafe { buffer.partition() };
+        let held = launch().unwrap();
+        let other = |bytes, access| Lease::acquire([(buffer.slice(bytes).unwrap(), access)]);
+        assert!(matches!(other(700..800, Read), Err(Error::Busy)));
+        assert!(other(768..1024, Write).is_ok());
+        drop(held);
+        assert!(other(0..1024, Write).is_ok());
     }
 
     /// Runs name every block they cover, across word edges, and nothing else; a difference keeps the

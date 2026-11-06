@@ -50,6 +50,18 @@ impl<B: Backend> HbmBuffer<B> {
         self.0.ready()
     }
 
+    /// Lets one launch bind overlapping views of the memory this buffer was allocated or aliased
+    /// from, which the runtime otherwise refuses as racing writes: the caller partitions the bytes
+    /// among the views. Other work still waits for, or is refused, every byte the views cover.
+    ///
+    /// # Safety
+    /// Device code of any launch binding overlapping views of the memory reaches each byte through
+    /// at most one of them.
+    pub unsafe fn partition(&self) {
+        // SAFETY: the caller's contract is this function's.
+        unsafe { self.0.partition() }
+    }
+
     /// Bytes on each chip (an `HbmTensor`'s `size()` counts every chip).
     pub fn size(&self) -> usize {
         self.0.size()

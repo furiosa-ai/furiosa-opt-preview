@@ -214,6 +214,10 @@ How entries are written:
 
 ### Fixed
 
+- A store after loops whose trips sync only the cores, such as a kernel's result into its output,
+  compiles when nothing read the stored memory since it was last written. One cluster's DMA there
+  stopped the compiler with "has inter-cluster write without reader synchronization". A store
+  that follows another cluster's read of its memory still waits for the reader.
 - A write through a tensor that a runtime index selects from an array, such as one layer's pool in
   a rolled loop, counts as a write of the array's tensors only. A gather whose prefix lengths are a
   tile of a parameter the kernel only reads compiles in such a kernel; it stopped with "lengths ...

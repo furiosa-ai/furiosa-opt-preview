@@ -19,6 +19,9 @@ How entries are written:
 
 ### Changed
 
+- Kernels whose loops issue many DMAs into DRAM compile in less time. The check that a kernel's
+  memory accesses are synchronized runs several times faster and beside code generation instead
+  of before it; it accepts and refuses the same kernels, with the same messages.
 - `fetch_table_lookup` stages and banks each table once a kernel, with one DMA and one StoTab, and
   every lookup of that table reads the banked copy, whatever loops, branch arms or scopes the
   lookups sit in. Each lookup staged the table again before, on every trip of a loop.

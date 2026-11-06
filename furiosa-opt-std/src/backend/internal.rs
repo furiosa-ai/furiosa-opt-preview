@@ -13,7 +13,7 @@ use crate::Error;
 use crate::cast::{ContractionAccumulator, ContractionCast};
 use crate::runtime::{
     DeviceOutput, DeviceSend, HbmBufferSlice, HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Kind,
-    Launched, Placement, Submitted, Topology, Usage,
+    Launched, Layout, Placement, Submitted, Topology, Usage,
 };
 use crate::scalar::{MaterializableScalar, Scalar};
 use crate::tensor::memory::{DmAllocError, DmTensor};
@@ -76,9 +76,9 @@ pub trait Runtime: Sized + 'static {
     /// Free bytes per chip on `device` now.
     fn usage(device: &Self::Device) -> Usage;
 
-    /// A buffer of `bytes` uninitialized bytes on every chip of `device`, of DRAM `kind`:
+    /// A buffer of `layout`'s uninitialized bytes on every chip of `device`, of DRAM `kind`:
     /// [`Kind::DramShared`] for memory another chip's device code writes, [`Kind::Dram`] otherwise.
-    fn alloc(device: &Self::Device, kind: Kind, bytes: usize) -> Result<Self::Buffer, Error>;
+    fn alloc(device: &Self::Device, kind: Kind, layout: impl Into<Layout>) -> Result<Self::Buffer, Error>;
 
     /// Submits a batch as one runtime write, each host's bytes chip after chip in rank order, and
     /// returns its completion, which borrows none of the pairs: pinned host bytes stay leased until

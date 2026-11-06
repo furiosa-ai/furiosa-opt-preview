@@ -7,7 +7,7 @@ use super::{Allocation, Buffer, Owner};
 use crate::arch::rngd;
 use crate::driver::dram::PAGE;
 use crate::driver::mailbox::IN_FLIGHT;
-use crate::memory::{Kind, Usage};
+use crate::memory::{Kind, Layout, Usage};
 use crate::{Error, Result, Topology};
 
 /// One device's memory allocator, over its DRAM and SRAM. DRAM grows up, shared inside the peer aperture and
@@ -65,10 +65,13 @@ impl Allocator {
         }
     }
 
-    /// `requested` bytes of `kind` memory at one offset on every chip, free again once the
-    /// buffer's last owner drops; [`Error::OutOfMemory`] when no free span holds them, and
-    /// [`Error::SramOverlap`] when an SRAM resident would reach a launch's temporaries.
-    pub fn alloc(self: &Arc<Self>, kind: Kind, requested: usize) -> Result<Buffer> {
+    /// `layout`'s bytes of `kind` memory at one offset on every chip, starting on a multiple of its
+    /// alignment, free again once the buffer's last owner drops; [`Error::OutOfMemory`] when no free
+    /// span holds them, and [`Error::SramOverlap`] when an SRAM resident would reach a launch's
+    /// temporaries.
+    pub fn alloc(self: &Arc<Self>, kind: Kind, layout: impl Into<Layout>) -> Result<Buffer> {
+        let layout = layout.into();
+        let requested = layout.size();
         let full = Error::OutOfMemory { kind, requested };
         let at = match kind {
             Kind::Dram | Kind::DramShared => {
@@ -76,7 +79,8 @@ impl Allocator {
                     .max(1)
                     .checked_next_multiple_of(DRAM_ALIGNMENT)
                     .ok_or(full.clone())?;
-                let alignment = if len >= DRAM_UNIT { DRAM_UNIT } else { DRAM_ALIGNMENT };
+                let unit = if len >= DRAM_UNIT { DRAM_UNIT } else { DRAM_ALIGNMENT };
+                let alignment = unit.max(layout.alignment());
                 let mut allocator = self.dram();
                 let at = if kind == Kind::DramShared {
                     allocator.gaps().find_map(|gap| {
@@ -99,7 +103,10 @@ impl Allocator {
                     .max(1)
                     .checked_next_multiple_of(sram.alignment)
                     .ok_or(full.clone())?;
-                let at = sram.spans.top(len).ok_or(full)?;
+                let at = sram
+                    .spans
+                    .top(len, sram.alignment.max(layout.alignment()))
+                    .ok_or(full)?;
                 let temporaries = sram.temporaries();
                 if at < temporaries {
                     return Err(Error::SramOverlap {
@@ -302,11 +309,14 @@ impl Spans {
         self.live.first_key_value().map_or(self.range.end, |(&at, _)| at)
     }
 
-    fn top(&self, len: usize) -> Option<usize> {
+    /// The highest `alignment`-aligned start of `len` free bytes.
+    fn top(&self, len: usize, alignment: usize) -> Option<usize> {
         self.gaps()
-            .filter(|gap| gap.len() >= len)
+            .filter_map(|gap| {
+                let at = gap.end.checked_sub(len)? / alignment * alignment;
+                (at >= gap.start).then_some(at)
+            })
             .last()
-            .map(|gap| gap.end - len)
     }
 
     /// The lowest `alignment`-aligned start of `len` free bytes among those that put the fewest of
@@ -374,6 +384,23 @@ mod tests {
                 assert!(last.addr().is_multiple_of(DRAM_ALIGNMENT));
                 drop((first, large, last));
             }
+        }
+    }
+
+    /// A buffer of every kind starts on the alignment its layout asks for, past the start the
+    /// allocator's own grain would give it after an earlier buffer.
+    #[test]
+    fn starts_on_the_alignment_a_layout_asks_for() {
+        const ALIGNMENT: usize = 16384;
+        for (kind, size) in [
+            (Kind::Dram, DRAM_UNIT),
+            (Kind::DramShared, DRAM_UNIT),
+            (Kind::Sram, 512),
+        ] {
+            let allocator = crate::test::allocator(0..65536, 65536);
+            let _earlier = allocator.alloc(kind, size).unwrap();
+            let addr = allocator.alloc(kind, Layout::new(size, ALIGNMENT)).unwrap().addr();
+            assert!(addr.is_multiple_of(ALIGNMENT), "{kind:?}: {addr:#x}");
         }
     }
 

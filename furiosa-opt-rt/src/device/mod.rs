@@ -6,7 +6,7 @@ use crate::arch::rngd;
 use crate::buffer::{Allocator, Buffer};
 use crate::driver::Driver;
 use crate::function::Launches;
-use crate::memory::{Kind, Usage};
+use crate::memory::{Kind, Layout, Usage};
 use crate::pinned::Registration;
 use crate::{Error, Pinned, Placement, Result, ToPlacements, Topology};
 
@@ -67,7 +67,8 @@ impl Device {
         Err(reserved.unwrap_or_else(|| Error::Invalid("no placement candidates".into())))
     }
 
-    /// Allocates `len` bytes of `kind` memory at one address on every chip.
+    /// Allocates `layout`'s bytes of `kind` memory at one address on every chip, a multiple of its
+    /// alignment.
     ///
     /// - `Dram` takes, among the free spans that fit, the lowest one that puts the fewest bytes in
     ///   the peer window at the bottom of DRAM; `DramShared` takes the lowest one inside it.
@@ -77,8 +78,8 @@ impl Device {
     ///   resident.
     /// - Dropped bytes are free again once their last owner, a running launch or transfer included,
     ///   lets go of them; [`Error::OutOfMemory`] when no free span fits.
-    pub fn alloc(&self, kind: Kind, len: usize) -> Result<Buffer> {
-        self.allocator.alloc(kind, len)
+    pub fn alloc(&self, kind: Kind, layout: impl Into<Layout>) -> Result<Buffer> {
+        self.allocator.alloc(kind, layout)
     }
 
     /// Registers pinned host memory for firmware-issued DMA on every cluster.

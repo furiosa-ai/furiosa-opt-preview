@@ -45,6 +45,9 @@ How entries are written:
 - Kernels whose DMA completion ids take many rounds to settle in a late loop compile in less time:
   each round analyzes the kernel again only from the first block whose DMAs took other ids. The
   compiled images are byte-identical.
+- A DMA after a runtime branch that reuses a completion id of an older DMA no longer waits for a
+  DMA that one arm issued on another of the older DMA's ids: the older DMA is waited for at the end
+  of the arm that leaves it in flight, and every DMA keeps its completion ids.
 - A multi-chip or multi-cluster kernel waits less around a transfer. A transfer's publication
   (data sync, returning syncs, cluster sync) moves from right after the transfer toward the first
   use of its result, also when a loop carries the result to the next trip; a remote write's
@@ -214,6 +217,9 @@ How entries are written:
 - `unsafe { blocks.pick(&indices) }` aliases the blocks of a `Slice` of HBM tensors that `indices`
   names, in that order and repeats included, as `alias` aliases a range of them; an index past the
   end is `Error::Invalid`.
+- `HbmBuffer::alloc(&device, Layout::new(bytes, alignment))` starts the buffer on a multiple of a
+  power of two, whatever earlier allocations left: a buffer whose device time follows its address
+  (pages many rows gather at once) can sit at one place. A size alone keeps the allocator's grain.
 
 ### Fixed
 

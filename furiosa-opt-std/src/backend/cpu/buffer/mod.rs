@@ -4,7 +4,7 @@ use std::ops::{Range, RangeBounds};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use furiosa_opt_rt as rt;
-use furiosa_opt_rt::memory::{Allocator, Kind};
+use furiosa_opt_rt::memory::{Allocator, Kind, Layout};
 
 use crate::Error;
 use crate::backend::Allocation;
@@ -34,12 +34,13 @@ struct Memory {
 }
 
 impl Buffer {
-    /// A fresh zeroed `len`-byte buffer of `kind` on every chip, placed by `allocator` as on a
+    /// A fresh zeroed buffer of `layout` and `kind` on every chip, placed by `allocator` as on a
     /// device; [`rt::Error::OutOfMemory`] when no free span holds it.
-    pub(super) fn alloc(allocator: &Arc<Allocator>, kind: Kind, len: usize) -> rt::Result<Self> {
-        let placement = allocator.alloc(kind, len)?;
+    pub(super) fn alloc(allocator: &Arc<Allocator>, kind: Kind, layout: impl Into<Layout>) -> rt::Result<Self> {
+        let layout = layout.into();
+        let placement = allocator.alloc(kind, layout)?;
         let chips = usize::from(placement.topology().chips);
-        Ok(Self::new(Some(placement), chips, len))
+        Ok(Self::new(Some(placement), chips, layout.size()))
     }
 
     /// A fresh zeroed `len`-byte buffer on each of `chips` chips that no device owns and no other

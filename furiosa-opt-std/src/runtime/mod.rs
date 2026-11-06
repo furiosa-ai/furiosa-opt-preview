@@ -82,6 +82,9 @@ pub use furiosa_opt_rt::memory::Kind;
 /// How much of a device's memory is free, as [`Memory::usage`] reports it.
 pub use furiosa_opt_rt::memory::Usage;
 
+/// The bytes an [`HbmBuffer`] holds on each chip and a power of two its start is a multiple of.
+pub use furiosa_opt_rt::memory::Layout;
+
 /// Why the runtime refused or failed a device operation, carried by [`Error::Device`].
 pub use furiosa_opt_rt::Error as DeviceError;
 

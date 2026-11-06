@@ -40,8 +40,12 @@ impl Runtime for Npu {
         device.device.usage(rt::memory::Kind::Dram)
     }
 
-    fn alloc(device: &Self::Device, kind: rt::memory::Kind, bytes: usize) -> Result<rt::Buffer, Error> {
-        Ok(device.device.alloc(kind, bytes)?)
+    fn alloc(
+        device: &Self::Device,
+        kind: rt::memory::Kind,
+        layout: impl Into<rt::memory::Layout>,
+    ) -> Result<rt::Buffer, Error> {
+        Ok(device.device.alloc(kind, layout)?)
     }
 
     fn write<'a>(

@@ -18,7 +18,7 @@ mod buffer;
 use buffer::{Buffer, Bytes};
 use furiosa_opt_abi::arch::rngd::{MAX_CHIPS, PES};
 use furiosa_opt_rt::Lease;
-use furiosa_opt_rt::memory::{Allocator, Kind};
+use furiosa_opt_rt::memory::{Allocator, Kind, Layout};
 use std::sync::Arc;
 
 /// Host backend: interprets device functions on the host, over host memory that stands in for
@@ -79,8 +79,8 @@ impl Runtime for Cpu {
         device.allocator.usage(Kind::Dram)
     }
 
-    fn alloc(device: &Host, kind: Kind, bytes: usize) -> Result<Buffer, Error> {
-        Ok(Buffer::alloc(&device.allocator, kind, bytes)?)
+    fn alloc(device: &Host, kind: Kind, layout: impl Into<Layout>) -> Result<Buffer, Error> {
+        Ok(Buffer::alloc(&device.allocator, kind, layout)?)
     }
 
     fn write<'a>(

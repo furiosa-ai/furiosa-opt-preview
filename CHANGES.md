@@ -59,6 +59,10 @@ How entries are written:
   reads, after the trip's last read of it: the rest of the trip, a loop nested in it included,
   can take its data memory. It stayed held for the whole trip unless the trip did not fit
   otherwise, so a nested loop that needed it could not compile.
+- A DMA into a fresh `DmTensor` that a kernel issues while commands before it still run, behind
+  other DMAs or right after a loop, takes data memory those commands no longer use, where some is
+  free. It could take theirs: it then waited for them where it was issued, and every command after
+  it waited too.
 - A gather in a loop whose runtime prefix reads its lengths from a tensor the loop captures stages
   the length table into SPM once, in the outermost enclosing scope whose SPM still holds it,
   instead of on every trip; the transfer issues as soon as the table's source exists.
@@ -210,6 +214,11 @@ How entries are written:
 
 ### Fixed
 
+- A write through a tensor that a runtime index selects from an array, such as one layer's pool in
+  a rolled loop, counts as a write of the array's tensors only. A gather whose prefix lengths are a
+  tile of a parameter the kernel only reads compiles in such a kernel; it stopped with "lengths ...
+  read in place are not an unwritten launch input". A gather or scatter there by a few offsets of
+  such a parameter holds them in its descriptors, as it does in a kernel without the selection.
 - A gather with a runtime prefix that writes into a view of a DM tensor compiles when the kernel
   wrote the prefix lengths itself, such as a tile it copied out of a length table. The lengths'
   transfer into SPM was left unlowered, and the compiler stopped with "Lowering Deadline Violation:

@@ -64,8 +64,8 @@ impl Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Records;
     use crate::frame::{self, MAX_RESPONSE_WORDS};
+    use crate::{Chunk, Records};
 
     /// Revision-one golden frames pin the status word and each reply's field order.
     #[test]
@@ -74,7 +74,13 @@ mod tests {
             status: -7,
             message: "xy".into(),
         };
-        let records: Records = alloc::vec![alloc::vec![1 | 100 << 16], alloc::vec![]];
+        let records: Records = alloc::vec![
+            Chunk {
+                attempted: 1,
+                hits: alloc::vec![1 | 100 << 16],
+            },
+            Chunk::default(),
+        ];
         let encoded = |encode: &dyn Fn(&mut [u64]) -> Result<usize, frame::Error>| {
             let mut frame = alloc::vec![0; MAX_RESPONSE_WORDS];
             let len = encode(&mut frame).unwrap();
@@ -91,7 +97,14 @@ mod tests {
         );
         assert_eq!(
             encoded(&|frame| frame::encode(&Answer(Ok(records.clone())), frame)),
-            [0x0000_0000_0005_0001, 2, 1, 0x0064_0001, 0]
+            [
+                0x0000_0000_0006_0001,
+                2,
+                0x0000_0001_0000_0001,
+                0x0064_0001_0000_0000,
+                0,
+                0
+            ]
         );
         assert_eq!(
             encoded(&|frame| frame::encode(&Answer::<()>(Err(failure.clone())), frame)),
@@ -106,7 +119,14 @@ mod tests {
             Ok(Answer(Ok(37)))
         );
         assert_eq!(
-            frame::decode::<Answer<Records>>(&[0x0000_0000_0005_0001, 2, 1, 0x0064_0001, 0]),
+            frame::decode::<Answer<Records>>(&[
+                0x0000_0000_0006_0001,
+                2,
+                0x0000_0001_0000_0001,
+                0x0064_0001_0000_0000,
+                0,
+                0
+            ]),
             Ok(Answer(Ok(records)))
         );
         assert_eq!(

@@ -2,28 +2,39 @@
 
 use std::sync::Once;
 
-use furiosa_opt_rt::registry::{Level, Profile, TARGET};
+use furiosa_opt_rt::registry::{Level, Profile, Selection, TARGET};
 
 /// The profile `FURIOSA_OPT_PROFILE` asks a function to load with, when a subscriber listens on
-/// [`TARGET`]. Without one, a warning says so once per process.
+/// [`TARGET`]. Without one, a warning says so once per process. The variable is a level, then
+/// optionally the part of each launch to record: `trace,156@20` records trip 20 of loop `156`.
 pub(super) fn requested() -> Option<Profile> {
     static WARNING: Once = Once::new();
     let spec = std::env::var_os("FURIOSA_OPT_PROFILE")?;
-    let level = match spec.to_str().and_then(|spec| spec.parse().ok()) {
-        Some(tracing::Level::INFO) => Level::Info,
-        Some(tracing::Level::DEBUG) => Level::Debug,
-        Some(tracing::Level::TRACE) => Level::Trace,
-        _ => {
-            eprintln!(
-                "furiosa-opt: invalid FURIOSA_OPT_PROFILE={spec:?}; \
-                 expected info, debug, or trace; profiling is disabled"
-            );
-            return None;
-        }
+    let parsed = spec.to_str().and_then(|spec| {
+        let (level, selection) = spec.split_once(',').unwrap_or((spec, ""));
+        let level = match level.parse().ok()? {
+            tracing::Level::INFO => Level::Info,
+            tracing::Level::DEBUG => Level::Debug,
+            tracing::Level::TRACE => Level::Trace,
+            _ => return None,
+        };
+        let selection = match selection {
+            "" => Selection::default(),
+            selection => selection.parse().ok()?,
+        };
+        Some((level, selection))
+    });
+    let Some((level, selection)) = parsed else {
+        eprintln!(
+            "furiosa-opt: invalid FURIOSA_OPT_PROFILE={spec:?}; expected info, debug or trace, \
+             optionally followed by `,<scope>[@<trips>]`; profiling is disabled"
+        );
+        return None;
     };
     if tracing::span_enabled!(target: TARGET, tracing::Level::INFO) {
         return Some(Profile {
             level,
+            selection,
             refused: |level, error| eprintln!("furiosa-opt: profiling at {level:?} is refused: {error}"),
         });
     }
@@ -79,10 +90,12 @@ mod tests {
         for (case, value) in [
             ("unset", None),
             ("invalid", Some("typo")),
+            ("invalid", Some("trace,156@x")),
             ("missing", Some("trace")),
             ("info", Some("info")),
             ("debug", Some("debug")),
             ("trace", Some("trace")),
+            ("trace", Some("trace,156.103@20..22")),
         ] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([

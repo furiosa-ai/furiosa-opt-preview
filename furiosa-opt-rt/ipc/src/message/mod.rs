@@ -16,7 +16,7 @@ mod request;
 mod tag;
 pub use answer::{Answer, Failure};
 pub use configure::{Configure, ConfigureOption, Identity};
-pub use profile::{Profile, Records};
+pub use profile::{Chunk, Profile, Records, Selection};
 pub use request::MAX_LAUNCH_ARGS;
 use tag::tagged;
 
@@ -55,11 +55,11 @@ pub struct Launch<'a> {
 /// A parameter a launch may go without.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchOption {
-    /// What every chunk records, which the reply carries back.
-    Profile(Profile),
+    /// What every chunk records, which the reply carries back. `Profile` named an earlier payload.
+    Record(Profile),
 }
 
-tagged! { LaunchOption { Profile } }
+tagged! { LaunchOption { Record } }
 
 /// Arguments borrowed from this frame or from device memory for one launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

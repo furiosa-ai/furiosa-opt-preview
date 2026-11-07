@@ -74,7 +74,7 @@ impl Driver {
                         len: executable.staging.len() as u64,
                         token: executable.token,
                     },
-                    options: profile.map(LaunchOption::Profile).into_iter().collect(),
+                    options: profile.map(LaunchOption::Record).into_iter().collect(),
                 })
                 .map_err(|why| Error::Device(format!("rank {cluster}: {why}")))?
             else {

@@ -1,6 +1,6 @@
 [package]
 name = "furiosa-opt-examples"
-version = "0.9.0+gcae51aa6"
+version = "0.9.0+g91a4df6f"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
@@ -15,7 +15,9 @@ criterion = { workspace = true }
 env_logger = { workspace = true }
 eyre = { workspace = true }
 futures-executor = { workspace = true }
+furiosa-opt-abi = { workspace = true }
 furiosa-opt-ipc = { path = "../furiosa-opt-rt/ipc", version = "0.9" }
+furiosa-opt-rt = { path = "../furiosa-opt-rt", version = "0.9.0" }
 rand = { workspace = true }
 safetensors = { workspace = true }
 serde_json = { workspace = true }

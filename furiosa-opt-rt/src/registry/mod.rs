@@ -6,7 +6,7 @@
 mod load;
 pub use furiosa_opt_abi::image::Level;
 pub use furiosa_opt_abi::registry::{Entry, Key};
-pub use load::load;
+pub use load::{Selection, load};
 
 /// The registry the link pass wrote, sorted by path then key.
 pub fn entries() -> &'static [Entry] {
@@ -28,10 +28,11 @@ pub fn find(path: &str, key: Key<'_>) -> Option<usize> {
         .ok()
 }
 
-/// The level a function's launches profile at. A level the image refuses goes to `refused` with
-/// the reason, and the function loads unprofiled.
+/// The level a function's launches profile at, and the part of each launch they record. A profile
+/// the image refuses goes to `refused` with the reason, and the function loads unprofiled.
 pub struct Profile {
     pub level: Level,
+    pub selection: Selection,
     pub refused: fn(Level, &crate::Error),
 }
 

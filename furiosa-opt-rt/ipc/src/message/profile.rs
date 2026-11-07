@@ -1,52 +1,45 @@
-//! A launch's TUC profile: what the request asks every chunk to record, and the hits the reply
-//! carries back.
+//! A launch's TUC profile: what the request asks every chunk to record, and what the reply carries
+//! back of each chunk.
 
 use alloc::vec::Vec;
 use bincode::de::{BorrowDecoder, Decoder};
 use bincode::error::DecodeError;
 use bincode::{BorrowDecode, Decode, Encode};
 
-/// Profiles a launch at the task library's `level`, `Info` (3) through `Trace` (5), with the TUC
-/// keeping up to `depth` hits of each chunk, at most [`Profile::QUEUE`]. Exists only in that range.
+/// Profiles a launch at the task library's `level`, `Info` (3) through `Trace` (5), recording the
+/// markers `selection` holds besides the Task's. Exists only in that level range.
 #[derive(Encode, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Profile {
     level: u8,
-    depth: u32,
+    selection: Selection,
 }
 
 impl Profile {
-    /// Hits the firmware's TUC profile queue holds.
+    /// Hits the firmware's TUC profile queue holds, every chunk's own.
     pub const QUEUE: u32 = 8192;
     /// Hits one reply carries, every chunk's together.
     pub const HITS: u32 = 8192;
     /// Chunks one reply carries the hits of.
     pub const CHUNKS: u32 = 256;
 
-    /// A profile at `level` keeping `depth` hits per chunk, or `None` outside the ranges the
-    /// firmware knows. A valid profile can still exceed one reply for a given executable; check
-    /// [`Self::fits`] with its chunk count, or the firmware refuses the launch with `BadArgs`.
-    pub fn new(level: u8, depth: u32) -> Option<Self> {
-        ((3..=5).contains(&level) && (1..=Self::QUEUE).contains(&depth)).then_some(Self { level, depth })
-    }
-
-    /// Whether one reply carries every hit a launch of `chunks` chunks keeps.
-    pub fn fits(self, chunks: usize) -> bool {
-        chunks <= Self::CHUNKS as usize && chunks * self.depth as usize <= Self::HITS as usize
+    /// A profile at `level`, or `None` outside the levels the firmware knows.
+    pub fn new(level: u8, selection: Selection) -> Option<Self> {
+        (3..=5).contains(&level).then_some(Self { level, selection })
     }
 
     pub fn level(self) -> u8 {
         self.level
     }
 
-    pub fn depth(self) -> u32 {
-        self.depth
+    pub fn selection(self) -> Selection {
+        self.selection
     }
 }
 
 impl<Context> Decode<Context> for Profile {
     fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-        let (level, depth) = Decode::decode(decoder)?;
-        Self::new(level, depth).ok_or(DecodeError::Other("a profile is level 3 to 5, keeping 1 to 8192 hits"))
+        let (level, selection) = Decode::decode(decoder)?;
+        Self::new(level, selection).ok_or(DecodeError::Other("a profile is level 3 to 5"))
     }
 }
 
@@ -56,10 +49,31 @@ impl<'de, Context> BorrowDecode<'de, Context> for Profile {
     }
 }
 
-/// Each chunk's TUC profile hits in chunk order: what a profiled launch replies with, and nothing
-/// for an unprofiled one. A hit holds its marker id in the low 14 bits and the TUC cycle count from
-/// bit 16 up.
-pub type Records = Vec<Vec<u64>>;
+/// The markers a launch records besides the Task's, as the device code tests them: ids
+/// `low..high`, while the loop whose trip marker is `trip` runs one of its trips
+/// `first..=last`. The default selects every marker.
+#[derive(Encode, Decode, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// `low..high` in the low and high halves; zero for every id.
+    pub range: u32,
+    /// The selected loop's trip marker; zero for none, every trip.
+    pub trip: u16,
+    pub first: u32,
+    pub last: u32,
+}
+
+/// One chunk's profile: the hits the reply carries, oldest first, and how many the chunk's code
+/// tried to record. A hit holds its marker id in the low 16 bits and the TUC cycle count from bit
+/// 16 up.
+#[derive(Encode, Decode, Debug, Clone, Default, PartialEq, Eq)]
+pub struct Chunk {
+    pub attempted: u32,
+    pub hits: Vec<u64>,
+}
+
+/// Each chunk's profile in chunk order: what a profiled launch replies with, and nothing for an
+/// unprofiled one.
+pub type Records = Vec<Chunk>;
 
 #[cfg(test)]
 mod tests {
@@ -69,25 +83,26 @@ mod tests {
     use crate::Answer;
     use crate::frame::{self, MAX_RESPONSE_WORDS};
 
-    /// A profile is level 3 to 5 and keeps 1 to `QUEUE` hits.
+    /// A profile is level 3 to 5.
     #[test]
     fn refuses_profiles_the_firmware_cannot_record() {
-        assert!(Profile::new(3, 1).is_some() && Profile::new(5, Profile::QUEUE).is_some());
-        for (level, depth) in [(2, 1), (6, 1), (3, 0), (5, Profile::QUEUE + 1)] {
-            assert_eq!(Profile::new(level, depth), None, "level {level}, depth {depth}");
+        assert!(Profile::new(3, Selection::default()).is_some());
+        assert!(Profile::new(5, Selection::default()).is_some());
+        for level in [2, 6] {
+            assert_eq!(Profile::new(level, Selection::default()), None, "level {level}");
         }
     }
 
-    /// Every profile a launch fits answers in one response, and the fullest fills it exactly.
+    /// The fullest reply, every chunk with its share of the hits one reply carries, answers in one
+    /// response.
     #[test]
     fn answers_a_full_profile_in_one_response() {
         let depth = Profile::HITS / Profile::CHUNKS;
-        let profile = Profile::new(5, depth).unwrap();
-        assert!(profile.fits(Profile::CHUNKS as usize));
-        assert!(!profile.fits(Profile::CHUNKS as usize + 1));
-        assert!(!Profile::new(5, depth + 1).unwrap().fits(Profile::CHUNKS as usize));
         let records: Records = (0..u64::from(Profile::CHUNKS))
-            .map(|chunk| vec![chunk; depth as usize])
+            .map(|chunk| Chunk {
+                attempted: u32::MAX,
+                hits: vec![chunk; depth as usize],
+            })
             .collect();
         let mut frame = vec![0; MAX_RESPONSE_WORDS];
         let len = frame::encode(&Answer(Ok(records.clone())), &mut frame).unwrap();

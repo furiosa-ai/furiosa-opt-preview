@@ -74,13 +74,14 @@ impl<'a> TryFrom<Parts<'a>> for Image<'a> {
         {
             return Err("argument slots do not match the signature".into());
         }
-        if parts.profile.spans.iter().any(|span| {
-            span.chunk as usize >= parts.executable.chunks()
-                || span.cluster as usize >= columns
-                || span.begin >= MARKER_IDS
-                || span.end >= MARKER_IDS
-        }) {
-            return Err("profile span names an invalid marker".into());
+        // A hit names one marker, so a marker id opens or closes one span; a trip's end is a bound.
+        let mut markers = parts.profile.spans.iter().flat_map(|span| match span.kind {
+            Kind::Trip | Kind::Command(_) => alloc::vec![span.begin],
+            _ => alloc::vec![span.begin, span.end],
+        });
+        let mut seen = alloc::collections::BTreeSet::new();
+        if !markers.all(|marker| seen.insert(marker)) {
+            return Err("profile markers name more than one span".into());
         }
         Ok(Self(parts))
     }
@@ -149,18 +150,13 @@ pub struct Slot {
     pub size: u64,
 }
 
+/// What a profiled launch can record: the span each marker of the device code opens or closes.
+/// A marker id is image-wide, the same in every chunk and cluster.
 #[derive(Encode, Decode, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Profile {
-    /// The most hits one chunk records at each of [`Level::ALL`].
-    pub depth: [u32; 3],
     pub spans: Vec<Span>,
-}
-
-impl Profile {
-    /// The most hits one chunk records at `level`.
-    pub fn depth(&self, level: Level) -> u32 {
-        self.depth[level as usize - Level::Info as usize]
-    }
+    /// Markers the compiler left without an id, so their commands are never recorded.
+    pub unmarked: u32,
 }
 
 /// Profile levels retain the compiler's `ProfileLevel` and libpe's `tuc_profile_level` values.
@@ -175,29 +171,54 @@ impl Level {
     pub const ALL: [Self; 3] = [Self::Info, Self::Debug, Self::Trace];
 }
 
-/// A span the device brackets with two markers, in one chunk of one cluster column.
+/// One command the device times with two markers, or a loop's trip marker.
 #[derive(Encode, Decode, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Span {
-    pub chunk: u32,
-    /// The cluster column across all chips.
-    pub cluster: u32,
-    /// The marker ids that open and close the span.
+    pub kind: Kind,
+    /// The marker the command processor reaches before the command, and the one [`Kind`] says.
     pub begin: u16,
     pub end: u16,
-    /// Whether `end` bounds the span's end from above instead of marking it, as for work on a
-    /// tensor-unit context.
-    pub upper_bound: bool,
     pub name: String,
     /// The LIR instruction the span profiles, as `DeepInstructionIndex` displays it.
     pub instruction: Option<String>,
+    /// The contexts a wait left idle when the processor reaches `begin`, so `begin`'s stamp bounds
+    /// when the last command on each of them ended.
+    pub idle: Vec<Context>,
 }
 
-/// Marker ids a profile hit can carry, its low 14 bits; the compiler's `MAX_PROFILE_UID` keeps
-/// the ids it assigns below this.
-pub const MARKER_IDS: u16 = 1 << 14;
+/// What a span times, and so what its `end` marker stamps.
+#[derive(Encode, Decode, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kind {
+    /// The launch's first and last markers.
+    #[default]
+    Task,
+    /// A tensor-unit command, by one marker (`begin`, equal to `end`) after its first hardware
+    /// command, which the processor passes once the context is idle: the command's start.
+    Command(Context),
+    /// A tensor DMA: `end` is its completion on the engine.
+    Dma,
+    /// A synchronization or a PCIe transfer: `end` follows its acquire or its wait.
+    Sync,
+    Pcie,
+    /// A loop body's start, recorded for the selected loop only: `begin` is its marker, and the
+    /// loop's body holds the markers from `begin + 1` up to `end`.
+    Trip,
+    /// A marker of the PE core library.
+    Core,
+}
 
-/// `FOPT` named the format earlier releases wrote.
-const MAGIC: &[u8; 4] = b"FOP2";
+/// A tensor unit's two contexts.
+#[derive(Encode, Decode, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Context {
+    Main,
+    Sub,
+}
+
+/// Marker ids a profile hit can carry: its low 16 bits.
+pub const MARKER_IDS: u32 = 1 << 16;
+
+/// `FOPT` and `FOP2` named the formats earlier releases wrote.
+const MAGIC: &[u8; 4] = b"FOP3";
 const CONFIG: bincode::config::Configuration = bincode::config::standard();
 
 #[cfg(test)]
@@ -226,16 +247,25 @@ mod tests {
             inputs: vec![],
             outputs: vec![0],
             profile: Profile {
-                depth: [2; 3],
-                spans: vec![Span {
-                    cluster: 3,
-                    name: "task".into(),
-                    begin: 1,
-                    end: 2,
-                    instruction: Some("7".into()),
-                    upper_bound: true,
-                    ..Default::default()
-                }],
+                spans: vec![
+                    Span {
+                        kind: Kind::Command(Context::Main),
+                        name: "task".into(),
+                        begin: 1,
+                        end: 1,
+                        instruction: Some("7".into()),
+                        idle: vec![Context::Sub],
+                    },
+                    Span {
+                        kind: Kind::Trip,
+                        name: "Trip".into(),
+                        begin: 3,
+                        end: 3,
+                        instruction: Some("8".into()),
+                        idle: vec![],
+                    },
+                ],
+                unmarked: 0,
             },
             sram_end: 1024,
         }
@@ -255,8 +285,10 @@ mod tests {
         bytes.push(0);
         assert!(Image::parse(&bytes).is_err());
         bytes.pop();
-        bytes[..4].copy_from_slice(b"FOPT");
-        assert!(Image::parse(&bytes).is_err());
+        for earlier in [b"FOPT", b"FOP2"] {
+            bytes[..4].copy_from_slice(earlier);
+            assert!(Image::parse(&bytes).is_err());
+        }
         bytes[0] = b'X';
         assert!(Image::parse(&bytes).is_err());
     }
@@ -276,8 +308,8 @@ mod tests {
         assert!(bincode::borrow_decode_from_slice::<Executable<'_>, _>(&encoded, CONFIG).is_err());
     }
 
-    /// No image holds slots outside the signature, spans naming no cluster or marker, or empty
-    /// initial data.
+    /// No image holds slots outside the signature, a marker of two spans, or empty initial data;
+    /// a trip's end bounds its body and a command's repeats its begin, so neither names a marker.
     #[test]
     fn rejects_invalid_bindings_and_markers() {
         let refused = |edit: fn(&mut Parts<'static>)| {
@@ -287,11 +319,12 @@ mod tests {
         };
         let reason = |reason: &str| Some(reason.to_string());
         let slots = reason("argument slots do not match the signature");
-        let marker = reason("profile span names an invalid marker");
+        let marker = reason("profile markers name more than one span");
         assert_eq!(refused(|parts| parts.outputs = vec![1]), slots);
         assert_eq!(refused(|parts| parts.outputs = vec![]), slots);
-        assert_eq!(refused(|parts| parts.profile.spans[0].cluster = 4), marker);
-        assert_eq!(refused(|parts| parts.profile.spans[0].end = MARKER_IDS), marker);
+        assert_eq!(refused(|parts| parts.profile.spans[1].begin = 1), marker);
+        assert_eq!(refused(|parts| parts.profile.spans[0].end = 3), None);
+        assert_eq!(refused(|parts| parts.profile.spans[1].end = 1), None);
         assert_eq!(
             refused(|parts| {
                 parts.weight = Some(Weight {

@@ -82,8 +82,9 @@ const LAUNCH_ARGS_AT: usize = HEADER_BYTES + 3 * size_of::<u32>();
 const _: () = assert!(LAUNCH_ARGS_AT.is_multiple_of(size_of::<u64>()));
 // Fixed-integer encoding writes the three staged-image u64 fields without padding.
 const _: () = assert!(size_of::<Staged>() == 3 * size_of::<u64>());
-/// A launch's options at their largest: the count, then the profile's tag, level and depth.
-const OPTIONS_BYTES: usize = size_of::<u32>() + size_of::<u32>() + size_of::<u8>() + size_of::<u32>();
+/// A launch's options at their largest: the count, then the profile's tag, level and selection.
+const OPTIONS_BYTES: usize =
+    size_of::<u32>() + size_of::<u32>() + size_of::<u8>() + 3 * size_of::<u32>() + size_of::<u16>();
 
 #[cfg(test)]
 mod tests {
@@ -92,7 +93,7 @@ mod tests {
 
     use super::*;
     use crate::frame::{self, Error};
-    use crate::{Clock, Copy, LaunchOption, Profile, Request};
+    use crate::{Clock, Copy, LaunchOption, Profile, Request, Selection};
 
     fn launch(args: Args<'_>, options: Vec<LaunchOption>) -> Request<'_> {
         Request::Launch(Launch {
@@ -107,23 +108,32 @@ mod tests {
     }
 
     /// The profiled launch of `preserves_request_frames`.
-    const PROFILED: [u64; 9] = [
-        0x37cb_b286_0009_0001,
+    const PROFILED: [u64; 10] = [
+        0x37cb_b286_000a_0001,
         0x0000_0002_ef92_1554,
         41,
         43,
         17,
         19,
         23,
-        0xcd17_328e_0000_0001,
-        0x0000_0000_0000_1004,
+        0x9f45_65ec_0000_0001,
+        0x0100_0200_0500_0304,
+        0x0000_0000_0200_0000,
     ];
+
+    /// The selection of `PROFILED`: trips 1 and 2 of the loop whose trip marker is 2.
+    const SELECTION: Selection = Selection {
+        range: 3 | 5 << 16,
+        trip: 2,
+        first: 1,
+        last: 2,
+    };
 
     /// Revision-one golden frames pin every call's tag and fields, both argument modes, and a launch
     /// with and without the profile option.
     #[test]
     fn preserves_request_frames() {
-        let profile = vec![LaunchOption::Profile(Profile::new(4, 16).unwrap())];
+        let profile = vec![LaunchOption::Record(Profile::new(4, SELECTION).unwrap())];
         let cases: [(Request<'_>, &[u64]); 5] = [
             (
                 launch(Args::Inline(&[41, 43]), vec![]),
@@ -172,7 +182,7 @@ mod tests {
     #[test]
     fn refuses_unknown_options() {
         let mut frame = PROFILED;
-        frame[7] = u64::from(tag::of("Trace")) << 32 | 1;
+        frame[7] = u64::from(tag::of("Profile")) << 32 | 1;
         assert!(matches!(frame::decode::<Request<'_>>(&frame), Err(Error::Malformed(_))));
     }
 
@@ -186,7 +196,7 @@ mod tests {
         assert!(matches!(frame::decode::<Request<'_>>(&frame), Err(Error::Malformed(_))));
         // The profiled frame asking for level 6.
         let mut frame = PROFILED;
-        frame[8] = 0x0000_0000_0000_1006;
+        frame[8] = 0x0100_0200_0500_0306;
         assert!(matches!(frame::decode::<Request<'_>>(&frame), Err(Error::Malformed(_))));
     }
 
@@ -195,7 +205,7 @@ mod tests {
     #[test]
     fn preserves_argument_frames() {
         let inline = core::array::from_fn::<_, MAX_LAUNCH_ARGS, _>(|index| index as u64 + 7);
-        let every = vec![LaunchOption::Profile(Profile::new(5, Profile::QUEUE).unwrap())];
+        let every = vec![LaunchOption::Record(Profile::new(5, SELECTION).unwrap())];
         for options in [vec![], every.clone()] {
             for count in [0, 1, MAX_LAUNCH_ARGS, MAX_LAUNCH_ARGS + 1, 4097] {
                 let args = match count {

@@ -116,8 +116,9 @@ pub const MAX_SUBMISSION_WORDS: usize = 1008 / size_of::<u64>() - 1;
 /// every hit its profile may record.
 pub const MAX_RESPONSE_WORDS: usize = {
     let failure = HEADER_BYTES + size_of::<i32>() + size_of::<u64>() + DIAGNOSTIC_BYTES;
-    // The chunk count, then each chunk's hit count and hits.
-    let records = size_of::<u64>() * (1 + Profile::CHUNKS as usize + Profile::HITS as usize);
+    // The chunk count, then each chunk's attempted count, hit count and hits.
+    let chunk = size_of::<u32>() + size_of::<u64>();
+    let records = size_of::<u64>() * (1 + Profile::HITS as usize) + chunk * Profile::CHUNKS as usize;
     let launch = HEADER_BYTES + size_of::<i32>() + records;
     (if failure > launch { failure } else { launch }).div_ceil(size_of::<u64>())
 };

@@ -14,8 +14,8 @@ mod status;
 
 pub use frame::{Error, MAX_RESPONSE_WORDS, MAX_SUBMISSION_WORDS};
 pub use message::{
-    Answer, Args, Call, Clock, Configure, ConfigureOption, Copy, Failure, Identity, Launch, LaunchOption,
-    MAX_LAUNCH_ARGS, Payload, Profile, Records, Request, Staged,
+    Answer, Args, Call, Chunk, Clock, Configure, ConfigureOption, Copy, Failure, Identity, Launch, LaunchOption,
+    MAX_LAUNCH_ARGS, Payload, Profile, Records, Request, Selection, Staged,
 };
 pub use status::Status;
 

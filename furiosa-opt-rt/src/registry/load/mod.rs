@@ -11,6 +11,7 @@ use crate::memory::Kind;
 use crate::{Argument, Arguments, Buffer, Device, Error, Function, Result};
 
 mod profile;
+pub use profile::Selection;
 use profile::{Profile, Report};
 
 /// Loads `entry`'s image onto `device` and registers every launch through host completion. A
@@ -60,7 +61,7 @@ pub async unsafe fn load(entry: &Entry, device: &Arc<Device>, profile: Option<su
             ),
             Key::Type(instance) => instance.to_string(),
         };
-        Profile::new(&image, profile.level, name)
+        Profile::new(&image, profile.level, &profile.selection, name)
             .inspect_err(|error| (profile.refused)(profile.level, error))
             .ok()?
             .map(Arc::new)

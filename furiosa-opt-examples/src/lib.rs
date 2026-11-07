@@ -48,6 +48,7 @@ pub mod padded_axis_tile;
 pub mod param;
 pub mod pe_count;
 pub mod prefix_lengths_loop;
+pub mod profiled;
 pub mod reduce_span;
 pub mod reshape;
 pub mod root_view;

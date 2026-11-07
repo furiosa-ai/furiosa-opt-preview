@@ -19,6 +19,9 @@ How entries are written:
 
 ### Changed
 
+- A kernel's core code compiles without the C compiler's loop vectorizer. The bounds scan of a
+  slice gather's indices runs a few indices a call, where its vector loop cost more than the
+  scalar trips it replaced, so a decode step over many rows runs faster.
 - Kernels whose loops issue many DMAs into DRAM compile in less time. The check that a kernel's
   memory accesses are synchronized runs several times faster and beside code generation instead
   of before it; it accepts and refuses the same kernels, with the same messages.

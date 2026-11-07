@@ -19,6 +19,10 @@ How entries are written:
 
 ### Changed
 
+- A kernel's core code issues a transfer of many DMA requests from a table of them, about 13 to 16
+  bytes a descriptor instead of about 50 bytes of code a descriptor, so kernels with large
+  transfers fit the core's code region beside other kernels where they did not; the requests,
+  their order, waits and completion ids are unchanged.
 - A kernel's core code compiles without the C compiler's loop vectorizer. The bounds scan of a
   slice gather's indices runs a few indices a call, where its vector loop cost more than the
   scalar trips it replaced, so a decode step over many rows runs faster.

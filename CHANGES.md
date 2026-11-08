@@ -19,6 +19,10 @@ How entries are written:
 
 ### Changed
 
+- A `DmTensor` value a loop carries from trip to trip, which the body reads and then replaces with
+  a tensor of its own, lends its data memory to the loops nested in the body between its last read
+  and its replacement, so their tensors fit where they were refused. A value written in place
+  keeps its memory for the whole trip, as before.
 - A kernel's core code issues a transfer of many DMA requests from a table of them, about 13 to 16
   bytes a descriptor instead of about 50 bytes of code a descriptor, so kernels with large
   transfers fit the core's code region beside other kernels where they did not; the requests,

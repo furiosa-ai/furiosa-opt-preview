@@ -19,6 +19,11 @@ How entries are written:
 
 ### Changed
 
+- A gather by byte offsets and a `prefix` count that the kernel stored, such as a step's block
+  table, reads them where they lie once their store is published, as it reads a launch input's:
+  the core syncs on the table once, before its first reader, instead of before every gather, and a
+  gather no longer copies its counts into SPM. The core then sizes and checks a gather while the
+  one before it lands, so back-to-back gathers by such a table run as fast as by an input table.
 - A transfer of more than eight DMA requests queues them in blocks of at most half the TUC's
   registers. A block of sixteen requests took all of them, so the core filled it only after the
   TUC had run every command before it, the wait right before the transfer included, and the

@@ -19,6 +19,11 @@ How entries are written:
 
 ### Changed
 
+- A transfer of more than eight DMA requests queues them in blocks of at most half the TUC's
+  registers. A block of sixteen requests took all of them, so the core filled it only after the
+  TUC had run every command before it, the wait right before the transfer included, and the
+  transfer's first requests waited for the core: such a transfer now takes as long as the DMA
+  engine does, up to a quarter less.
 - A data-memory tile at a constant start, such as `view().tile::<A, 1, _>(1)`, is addressed at a
   static offset of its tensor: the core no longer computes its index and the address of each
   command that reads it, which a loop reading the tile paid on every trip. A tile the kernel writes

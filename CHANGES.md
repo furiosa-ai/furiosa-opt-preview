@@ -32,6 +32,10 @@ How entries are written:
   where its data is first read, so the DMAs and loops issued between the write and that read no
   longer wait for it. The view's write-back counted as a read and held the publication, and the
   copying cluster's wait for the DMA, right behind the write.
+- A second gather or scatter by the same SPM positions (`by_positions`), such as an expert's codes
+  after its scales, issues right after the first one instead of after the first one's transfer
+  lands. The core copies the positions into each payload descriptor as it issues the transfer, so
+  nothing later waits for that transfer to read them, and the commands queued meanwhile run.
 - A `DmTensor` value a loop carries from trip to trip, which the body reads and then replaces with
   a tensor of its own, lends its data memory to the loops nested in the body between its last read
   and its replacement, so their tensors fit where they were refused. A value written in place
@@ -251,6 +255,10 @@ How entries are written:
 
 ### Fixed
 
+- An inter-slice reduce whose result keeps fewer slices than its input, the others padding, such
+  as `vector_inter_slice_reduce::<m![1 # 256], _>` over slices that also hold lanes of the summed
+  axis, compiles again; it stopped with "visa: while lowering TensorUnit / failed to find
+  dummy(256)". The padding slices take copies of the result.
 - A store after loops whose trips sync only the cores, such as a kernel's result into its output,
   compiles when nothing read the stored memory since it was last written. One cluster's DMA there
   stopped the compiler with "has inter-cluster write without reader synchronization". A store

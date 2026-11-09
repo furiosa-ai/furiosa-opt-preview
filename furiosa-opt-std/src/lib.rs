@@ -3,6 +3,7 @@
 #![expect(incomplete_features)]
 #![feature(adt_const_params)]
 #![feature(float_erf)]
+#![feature(float_minimum_maximum)]
 #![feature(inherent_associated_types)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(once_cell_try)]

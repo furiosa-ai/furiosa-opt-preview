@@ -32,6 +32,10 @@ fn apply_float_operation(value: f32, operation: impl FnOnce(f32) -> f32) -> f32 
     normalize_float(operation(normalize_float(value)))
 }
 
+fn apply_float_binary_operation(a: f32, b: f32, operation: impl FnOnce(f32, f32) -> f32) -> f32 {
+    normalize_float(operation(normalize_float(a), normalize_float(b)))
+}
+
 fn erf(value: f32) -> f32 {
     apply_float_operation(value, f32::erf)
 }
@@ -122,7 +126,10 @@ impl FxpBinaryOp {
             Self::SubFxp => |a, b| a.wrapping_sub(b),
             Self::SubFxpSat => |a, b| a.saturating_sub(b),
             Self::LeftShift => |a, b| a << (b as u32),
-            Self::LeftShiftSat => |a, b| a.saturating_mul(1 << (b as u32)),
+            Self::LeftShiftSat => |a, b| {
+                let shifted = i64::from(a) << ((b as u32) & 0x1f);
+                shifted.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+            },
             Self::MulFxp => |a, b| {
                 // Q31 fixed-point multiply with rounding (hardware MulFxp).
                 // Operands are interpreted as Q31 (2^31 ≈ 1.0), so the raw product is
@@ -168,10 +175,10 @@ impl FpBinaryOp {
     /// Returns the raw binary operation function.
     pub fn op_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
-            Self::AddF => |a, b| a + b,
-            Self::SubF => |a, b| a - b,
-            Self::MulF(_) => |a, b| a * b,
-            Self::DivF => |a, b| a / b,
+            Self::AddF => |a, b| apply_float_binary_operation(a, b, |a, b| a + b),
+            Self::SubF => |a, b| apply_float_binary_operation(a, b, |a, b| a - b),
+            Self::MulF(_) => |a, b| apply_float_binary_operation(a, b, |a, b| a * b),
+            Self::DivF => |a, b| apply_float_binary_operation(a, b, |a, b| a / b),
         }
     }
 }
@@ -180,7 +187,12 @@ impl FpTernaryOp {
     /// Returns the raw ternary operation function.
     pub fn op_fn(&self) -> fn(f32, f32, f32) -> f32 {
         match self {
-            Self::FmaF => |a, b, c| a.mul_add(b, c),
+            Self::FmaF => |a, b, c| {
+                let a = normalize_float(a);
+                let b = normalize_float(b);
+                let c = normalize_float(c);
+                normalize_float(a.mul_add(b, c))
+            },
         }
     }
 }
@@ -197,8 +209,15 @@ impl ClipBinaryOpI32 {
             Self::AddFxpSat => |a, b| a.saturating_add(b),
             Self::Min => |a, b| a.min(b),
             Self::Max => |a, b| a.max(b),
-            Self::AbsMin => |a, b| if a.abs() < b.abs() { a } else { b },
-            Self::AbsMax => |a, b| if a.abs() > b.abs() { a } else { b },
+            Self::AbsMin => |a, b| {
+                let magnitude = i64::from(a).abs().min(i64::from(b).abs());
+                (if a >= 0 { magnitude } else { -magnitude }) as i32
+            },
+            Self::AbsMax => |a, b| {
+                let magnitude = i64::from(a).abs().max(i64::from(b).abs());
+                let signed = magnitude * i64::from(a.signum());
+                signed.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+            },
         }
     }
 }
@@ -207,11 +226,20 @@ impl ClipBinaryOpF32 {
     /// Returns the raw binary operation function.
     pub fn op_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
-            Self::Add => |a, b| a + b,
-            Self::Min => |a, b| a.min(b),
-            Self::Max => |a, b| a.max(b),
-            Self::AbsMin => |a, b| if a.abs() < b.abs() { a } else { b },
-            Self::AbsMax => |a, b| if a.abs() > b.abs() { a } else { b },
+            Self::Add => |a, b| apply_float_binary_operation(a, b, |a, b| a + b),
+            Self::Min => |a, b| apply_float_binary_operation(a, b, f32::minimum),
+            Self::Max => |a, b| apply_float_binary_operation(a, b, f32::maximum),
+            Self::AbsMin => |a, b| apply_float_binary_operation(a, b, |a, b| a.abs().minimum(b.abs()).copysign(a)),
+            Self::AbsMax => |a, b| {
+                apply_float_binary_operation(a, b, |a, b| {
+                    // A zero lhs remains zero, including its sign.
+                    if a == 0.0 {
+                        a
+                    } else {
+                        a.abs().maximum(b.abs()).copysign(a)
+                    }
+                })
+            },
         }
     }
 }
@@ -362,7 +390,7 @@ impl FpDivBinaryOp {
     /// Returns the raw binary operation function.
     pub fn op_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
-            Self::DivF => |a, b| a / b,
+            Self::DivF => |a, b| apply_float_binary_operation(a, b, |a, b| a / b),
         }
     }
 }

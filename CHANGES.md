@@ -19,6 +19,10 @@ How entries are written:
 
 ### Changed
 
+- A DMA that writes another cluster's DM through a view (`cluster_tile`, `slice_tile`) is published
+  where its data is first read, so the DMAs and loops issued between the write and that read no
+  longer wait for it. The view's write-back counted as a read and held the publication, and the
+  copying cluster's wait for the DMA, right behind the write.
 - A `DmTensor` value a loop carries from trip to trip, which the body reads and then replaces with
   a tensor of its own, lends its data memory to the loops nested in the body between its last read
   and its replacement, so their tensors fit where they were refused. A value written in place

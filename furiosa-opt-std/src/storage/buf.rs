@@ -24,6 +24,7 @@ impl<T> Buf for T where T: From<Vec<u8>> + Into<Vec<u8>> + Deref<Target = [u8]> 
 /// Layout-free: ops take their mapping(s) from type parameters. Reads parallelize via [`Self::par_iter`];
 /// a parallel write partitions the byte image into disjoint chunks ([`Self::par_chunks_mut`]).
 #[derive(Clone, Debug)]
+#[repr(transparent)]
 pub struct BufStorage<D: Scalar, B: crate::storage::Buf> {
     bytes: B,
     _marker: PhantomData<D>,
@@ -90,6 +91,12 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
 
     pub(crate) fn inner(&self) -> &B {
         &self.bytes
+    }
+
+    /// The same bytes read as `D2` cells.
+    pub(crate) fn reinterpret<D2: Scalar>(&self) -> &BufStorage<D2, B> {
+        // SAFETY: `repr(transparent)` over `B`, so the storages of every scalar share one layout.
+        unsafe { &*(self as *const Self).cast::<BufStorage<D2, B>>() }
     }
 
     pub(crate) fn inner_mut(&mut self) -> &mut B {

@@ -19,6 +19,10 @@ How entries are written:
 
 ### Changed
 
+- A data-memory tile at a constant start, such as `view().tile::<A, 1, _>(1)`, is addressed at a
+  static offset of its tensor: the core no longer computes its index and the address of each
+  command that reads it, which a loop reading the tile paid on every trip. A tile the kernel writes
+  keeps its index.
 - A DMA that writes another cluster's DM through a view (`cluster_tile`, `slice_tile`) is published
   where its data is first read, so the DMAs and loops issued between the write and that read no
   longer wait for it. The view's write-back counted as a read and held the publication, and the
@@ -183,6 +187,10 @@ How entries are written:
 
 ### Added
 
+- `DmTensorView::reinterpret::<D2, Element2>()` reads a view's bytes as another scalar, each
+  slice's laid out as `Element2`, without moving data: one landing of bytes can hold a weight's
+  codes and its scales, each read as its own scalar. The two layouts must span the same bytes of a
+  slice; the view must be its whole tensor's, and a tile of the result picks the cells to read.
 - A task chunk may span up to the device's 2-MiB task code region (`TASK_CODE`), so an instruction
   whose code alone exceeds the 1-MiB chunk the compiler splits at, such as a loop with a long
   body, compiles into a chunk of its own instead of stopping the compile. Two consecutive chunks run

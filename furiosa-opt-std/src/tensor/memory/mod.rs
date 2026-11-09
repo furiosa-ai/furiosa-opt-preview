@@ -1692,6 +1692,29 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         }
     }
 
+    /// Reads the view's bytes as `D2`, each slice's laid out as `Element2`: one landing of bytes is
+    /// then read as several scalars, such as a weight's codes and its scales. Moves no data, as a
+    /// [`Self::reshape`] moves none.
+    ///
+    /// # Safety
+    ///
+    /// The bytes are asserted at compile time: `Element` cells of `D` and `Element2` cells of `D2`
+    /// span the same bytes of a slice. The genuine precondition is that `Element2` lays out each
+    /// `D2` cell where its bytes sit, a cell's bytes in order. The view covers its whole owner
+    /// (asserted on the host): a tile of the reinterpreted view picks the cells it reads.
+    #[primitive(DmTensorView::reinterpret)]
+    pub unsafe fn reinterpret<D2: Scalar, Element2: M>(
+        self,
+    ) -> DmTensorView<'l, D2, Chip, Cluster, Slice, Element2, B> {
+        constraints::assert_bytes_preserved::<D, Element, D2, Element2>();
+        DmTensorView {
+            inner: unsafe {
+                self.inner
+                    .reinterpret::<D2, m![{ Chip }, { Cluster }, { Slice }, { Element2 }]>()
+            },
+        }
+    }
+
     /// Views the same cells inside the wider buffer they sit in, restating `Element` with one
     /// outermost padding factor: `m![L4, B % 64]` as `m![L4 # 512, B % 64]`. The inverse of the
     /// [`Self::tile`] that reads a padded tensor's live rows (see [`TensorView::pad`] for why it is

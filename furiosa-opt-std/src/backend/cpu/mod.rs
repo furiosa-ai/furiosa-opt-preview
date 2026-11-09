@@ -357,6 +357,10 @@ impl internal::Backend for Cpu {
         src.reshape::<Src, Dst>()
     }
 
+    fn reinterpret<D: Scalar, D2: Scalar>(storage: &Self::Storage<D>) -> &Self::Storage<D2> {
+        storage.reinterpret()
+    }
+
     fn transmute<D: MaterializableScalar, Src: M, Dst: M>(
         storage: Self::Storage<D>,
         src_map: &Mapping,

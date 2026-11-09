@@ -50,6 +50,7 @@ pub mod pe_count;
 pub mod prefix_lengths_loop;
 pub mod profiled;
 pub mod reduce_span;
+pub mod reinterpret;
 pub mod reshape;
 pub mod root_view;
 pub mod runtime_dm;

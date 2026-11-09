@@ -417,6 +417,25 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
         }
     }
 
+    /// Reads the whole view's bytes as `D2` cells laid out as `E2`, consuming `self`: a rewrap of the
+    /// same borrow under another scalar, no data copied.
+    ///
+    /// # Safety
+    ///
+    /// `E2` must lay out each `D2` cell where its bytes sit in `E`'s layout of `D`. The view must
+    /// cover its whole owner, as a tiled view's offset counts `D` cells (asserted).
+    pub(crate) unsafe fn reinterpret<D2: Scalar, E2: M>(self) -> TensorView<'l, D2, E2, B> {
+        assert!(
+            self.window.window_base() == 0 && self.window.base_len() == E::SIZE,
+            "only a view of its whole owner reads its bytes as another scalar"
+        );
+        TensorView {
+            inner: B::reinterpret(self.inner),
+            window: Window::new(),
+            marker: PhantomData,
+        }
+    }
+
     /// Views the same cells inside the wider buffer they sit in: `m![A, B]` as `m![A # n, B]`. Safe for
     /// the reason a `Top` pad is: the added cells are declared don't-care, so a read never resolves one.
     ///

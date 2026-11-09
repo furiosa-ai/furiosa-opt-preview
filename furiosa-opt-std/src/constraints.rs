@@ -245,6 +245,17 @@ fn assert_element_preserved<Element: M, Element2: M>() {
     const { assert!(Element::SIZE == Element2::SIZE, "Element size must be preserved") };
 }
 
+/// Asserts a reinterpretation as another scalar keeps the bytes it names: `Element` cells of `D`
+/// span as many bytes as `Element2` cells of `D2`.
+pub(crate) fn assert_bytes_preserved<D: Scalar, Element: M, D2: Scalar, Element2: M>() {
+    const {
+        assert!(
+            size_in_bytes(D::BITS, Element::SIZE) == size_in_bytes(D2::BITS, Element2::SIZE),
+            "a reinterpretation must keep the bytes of each slice's elements"
+        )
+    };
+}
+
 /// Byte size of `length` elements of a `bits`-wide scalar.
 ///
 /// `const fn` twin of [`Scalar::size_in_bytes_from_length`](crate::scalar::Scalar::size_in_bytes_from_length),

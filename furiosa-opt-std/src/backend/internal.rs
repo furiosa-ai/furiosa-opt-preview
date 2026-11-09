@@ -349,6 +349,9 @@ pub trait Backend: Runtime {
     /// does NOT and must use `transpose`. This method itself only guarantees memory safety.
     fn reshape<D: Scalar, Src: M, Dst: M>(src: &Self::Storage<D>) -> Self::Storage<D>;
 
+    /// `storage`'s bytes read as `D2` cells, for a view of the same bytes as another scalar.
+    fn reinterpret<D: Scalar, D2: Scalar>(storage: &Self::Storage<D>) -> &Self::Storage<D2>;
+
     /// Relabels `storage` from `src_map` to `dst_map` (`Tensor::transmute`). Unlike `reshape`, the two
     /// maps may differ in size: the vector engine relabels a padded read down to its compact slot
     /// (`…tile(k).read().transmute()`), so `dst_map.size() <= src_map.size()` is intended.

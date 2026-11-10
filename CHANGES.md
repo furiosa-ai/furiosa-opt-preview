@@ -269,6 +269,11 @@ How entries are written:
 
 ### Fixed
 
+- A gather or scatter of a slice by byte offsets, checked or `unchecked`, waits for its index list
+  to land before its payload reads it, as a gather of a tensor does. It relied on the DMA queue
+  running the list's copy first, which does not order the payload's read of the list after the
+  copy's writes, so the payload could read the previous transfer's offsets. A checked transfer
+  still checks its offsets while the list lands.
 - A multi-chip kernel whose chips run different trip counts of a runtime loop whose trip holds a
   loop, such as `for _ in 0..count { for _ in 0..2 { .. } }`, or take different arms of a runtime
   branch whose arm loops, and then exchange data, runs to the end. The branch balance counted no

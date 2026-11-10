@@ -19,6 +19,20 @@ How entries are written:
 
 ### Changed
 
+- A run of DMA waits that a kernel queues back to back costs the core one call for up to eight
+  completion ids, and none for an id with no transfer in flight, where it made one call an id.
+- A wait for a DMA's result ends with that DMA, or at once where it landed already or never ran:
+  after a runtime branch or a 0/1-trip loop, a path that skipped the DMA, or already waited for it,
+  no longer waits for whichever transfer has taken its completion ids since. A branch whose arm
+  issues a DMA on the id of an older one no longer makes the other arm wait for the older one
+  where it ends, and a read of the older one's result after the branch waits for it only on the
+  path that still has it in flight. A DMA waited for on an id that another DMA may hold then costs
+  the core a few instructions where it issues and one check a run of waits for it.
+- A store to HBM from one cluster's DM, such as a gather's index list the kernel stores before the
+  gather, that only that cluster's DMAs read back is no longer published to the other cluster: its
+  reader waits for the store on its own cluster, and neither cluster stops at a cluster sync for it.
+  A store that the other cluster reads, or whose bytes a core reads where they lie (a gather's
+  `prefix` counts or checked slice offsets), stays published.
 - A function whose deepest chain of task calls needs more stack than the firmware's task stack fails
   to compile, naming the chain, instead of overwriting the firmware's memory when it runs: the
   driver bounds the chain, a call through a pointer counted at its reserve, where it bounded each
@@ -88,8 +102,10 @@ How entries are written:
   each round analyzes the kernel again only from the first block whose DMAs took other ids. The
   compiled images are byte-identical.
 - A DMA after a runtime branch that reuses a completion id of an older DMA no longer waits for a
-  DMA that one arm issued on another of the older DMA's ids: the older DMA is waited for at the end
-  of the arm that leaves it in flight, and every DMA keeps its completion ids.
+  DMA that one arm issued on another of the older DMA's ids, and the path that skips the arm no
+  longer waits for the older DMA where the arm ends: the reusing DMA waits only on the older DMA's
+  ids that no arm's DMA may hold. A loop whose last trip lands a transfer on such an id no longer
+  holds its other trips behind the transfers they just issued. Every DMA keeps its completion ids.
 - A multi-chip or multi-cluster kernel waits less around a transfer. A transfer's publication
   (data sync, returning syncs, cluster sync) moves from right after the transfer toward the first
   use of its result, also when a loop carries the result to the next trip; a remote write's

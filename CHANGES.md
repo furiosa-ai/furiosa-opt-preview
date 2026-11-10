@@ -19,6 +19,12 @@ How entries are written:
 
 ### Changed
 
+- A gather or scatter copies each PE's index list in the order its index tensor stores the list: a
+  gather read the list in the order of the slices it fills, and a scatter whose tensor stores a
+  dimension's positions apart read it against that order. A list stored row by row, such as a
+  windowed slice gather's rows of a paging table, now copies in runs instead of one offset at a
+  time: at 64 to 256 offsets a PE the gather lands 3.2-5.8 us sooner and lets the next command
+  issue 2.4-5.3 us sooner. Every gather and scatter moves the same bytes to the same places.
 - A gather or scatter whose index list a PE issues as several requests, such as a windowed slice
   gather under `prefix`, lands every request's offsets first, each in lists of its own, then issues
   the requests' payloads back to back: each payload waits for its own offsets, no longer for the

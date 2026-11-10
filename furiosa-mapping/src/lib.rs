@@ -29,6 +29,7 @@ mod sys {
         pub(super) fn mapping_index(slf: &Mapping, position: usize) -> Cell;
         pub(super) fn mapping_indexes(slf: &Mapping) -> RVec<Cell>;
         pub(super) fn mapping_axes(slf: &Mapping) -> RVec<AxisTerm>;
+        pub(super) fn mapping_has_padding(slf: &Mapping, bottom_only: bool) -> bool;
         pub(super) fn mapping_iter(
             slf: &Mapping,
             axes: RSlice<'_, AxisTerm>,
@@ -73,9 +74,9 @@ pub trait MappingExt: Sized {
     fn axes(&self) -> Vec<AxisTerm>;
     /// Whether every position reads the same cell across this mapping's extent.
     fn is_broadcast(&self) -> bool;
-    /// Whether this mapping contains non-writable [`PaddingKind::Bottom`] cells.
+    /// Whether any physical position resolves to non-writable [`PaddingKind::Bottom`] padding.
     fn has_bottom_pad(&self) -> bool;
-    /// Whether every position of this mapping holds a cell of its own: no padding of any kind.
+    /// Whether every physical position resolves to a live cell, after combining composite contributions.
     fn has_no_padding(&self) -> bool;
     /// A lazy iterator over where this mapping's cells land in a buffer laid out by `axes`, each offset
     /// shifted by `base`: one `Option<usize>` per physical cell in canonical order (`Some(off)` live,
@@ -241,25 +242,11 @@ impl MappingExt for Mapping {
     }
 
     fn has_bottom_pad(&self) -> bool {
-        match self {
-            Mapping::Padding { inner, kind, .. } => *kind == PaddingKind::Bottom || inner.has_bottom_pad(),
-            Mapping::Stride { inner, .. } | Mapping::Modulo { inner, .. } | Mapping::Resize { inner, .. } => {
-                inner.has_bottom_pad()
-            }
-            Mapping::Pair { left, right } => left.has_bottom_pad() || right.has_bottom_pad(),
-            Mapping::Symbol { .. } | Mapping::Broadcast { .. } => false,
-        }
+        unsafe { sys::mapping_has_padding(self, true) }
     }
 
     fn has_no_padding(&self) -> bool {
-        match self {
-            Mapping::Padding { .. } => false,
-            Mapping::Stride { inner, .. } | Mapping::Modulo { inner, .. } | Mapping::Resize { inner, .. } => {
-                inner.has_no_padding()
-            }
-            Mapping::Pair { left, right } => left.has_no_padding() && right.has_no_padding(),
-            Mapping::Symbol { .. } | Mapping::Broadcast { .. } => true,
-        }
+        !unsafe { sys::mapping_has_padding(self, false) }
     }
 
     fn iter(&self, axes: &[AxisTerm], base: &Index, padding: bool) -> MappingIter {

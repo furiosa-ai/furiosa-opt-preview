@@ -34,8 +34,17 @@ pub const ATU_ENTRIES: usize = 16;
 /// Bytes one translation entry maps.
 pub const ATU_ENTRY: usize = 4 << 30;
 
-/// Scratchpad region reserved for task instructions by the firmware linker.
-pub const CODE: Range<usize> = 0x10_0000..0x31_0000;
+/// Scratchpad region reserved for task instructions by the firmware linker: everything above the
+/// task library's shared fields, up to the scratchpad's end.
+pub const CODE: Range<usize> = 0x10_0000..0x38_0000;
+
+/// The scratchpad stack a task runs on, apart from the firmware's own. The compiler bounds every
+/// task's deepest call chain by its length.
+pub const TASK_STACK: Range<usize> = 0xa_e000..0xc_e000;
+
+/// Bytes of the task stack a call through a pointer uses at most below the caller's frame: a
+/// firmware syscall, or an output function of the task library's `printf`.
+pub const SYSCALL_STACK: usize = 16 << 10;
 
 /// The device's DRAM aperture in a PE's address space, per the RNGD memory map.
 pub const DEVICE_MEMORY: Range<u64> = 0xc0_0000_0000..0xd0_0000_0000;

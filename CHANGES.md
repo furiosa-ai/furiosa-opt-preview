@@ -19,6 +19,15 @@ How entries are written:
 
 ### Changed
 
+- A function whose deepest chain of task calls needs more stack than the firmware's task stack fails
+  to compile, naming the chain, instead of overwriting the firmware's memory when it runs: the
+  driver bounds the chain, a call through a pointer counted at its reserve, where it bounded each
+  frame alone. The task library no longer formats floats, which no task does.
+- A function runs as one chunk while its task code takes up to 2,621,440 B a cluster, up from
+  2,162,688 B: the firmware keeps its task stack, TUC profile queue and translation tables below the
+  task library's shared fields, and task code takes the scratchpad from them to its end. A function
+  between the two sizes no longer splits into chunks that the firmware copies around each launch.
+  The task stack is 128 KiB, of which the deepest task measured takes 30 KB.
 - A gather by byte offsets and a `prefix` count that the kernel stored, such as a step's block
   table, reads them where they lie once their store is published, as it reads a launch input's:
   the core syncs on the table once, before its first reader, instead of before every gather, and a

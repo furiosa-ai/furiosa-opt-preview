@@ -19,6 +19,10 @@ How entries are written:
 
 ### Changed
 
+- A gather or scatter whose index list a PE issues as several requests, such as a windowed slice
+  gather under `prefix`, lands every request's offsets first, each in lists of its own, then issues
+  the requests' payloads back to back: each payload waits for its own offsets, no longer for the
+  payload before it, and no request's offsets overwrite a list an earlier request still reads.
 - A run of DMA waits that a kernel queues back to back costs the core one call for up to eight
   completion ids, and none for an id with no transfer in flight, where it made one call an id.
 - A wait for a DMA's result ends with that DMA, or at once where it landed already or never ran:

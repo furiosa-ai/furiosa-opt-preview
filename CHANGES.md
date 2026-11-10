@@ -269,6 +269,13 @@ How entries are written:
 
 ### Fixed
 
+- A multi-chip kernel whose chips run different trip counts of a runtime loop whose trip holds a
+  loop, such as `for _ in 0..count { for _ in 0..2 { .. } }`, or take different arms of a runtime
+  branch whose arm loops, and then exchange data, runs to the end. The branch balance counted no
+  loop whose trips sync, so the chips' base timestamps parted by the syncs of the trips one ran
+  and the other skipped, and one waited for a release its peer never made ("rank N left request M
+  unanswered"). A loop now counts its body's syncs on each trip of its limit, which the trips a
+  chip skips reserve.
 - An inter-slice reduce whose result keeps fewer slices than its input, the others padding, such
   as `vector_inter_slice_reduce::<m![1 # 256], _>` over slices that also hold lanes of the summed
   axis, compiles again; it stopped with "visa: while lowering TensorUnit / failed to find

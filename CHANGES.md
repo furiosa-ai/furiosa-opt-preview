@@ -19,6 +19,20 @@ How entries are written:
 
 ### Changed
 
+- Kernels with thousands of DMAs compile faster: the completion-id analysis, which reruns once per
+  coloring round, no longer redoes work an earlier test decides, lowers no code on its visits and
+  keeps the DMA-holding entries indexed. The emitted images are unchanged.
+- Inserting an impl above the impls a kernel reaches, or adding a written impl to a module whose
+  other impls macros make, no longer recompiles the kernel to the same image: its cache key names
+  each input by what it is, not by its position among the module's impls. Editing an impl body still
+  recompiles exactly the kernels that reach it.
+- On the fixed schedule a kernel's compile-time constant loads (staged snoop bitmaps, fetch bases,
+  decode tables) issue before its other transfers, so the reader of one no longer waits for every
+  transfer queued ahead of it.
+- A transfer that a loop of runtime count issues every trip into the tile at the loop's counter,
+  reading memory no trip writes, no longer waits for its previous trip: its trips take up to four
+  windows of completion ids, a trip waits only for its own window, and a reader after the loop
+  waits for all of them.
 - A gather or scatter copies each PE's index list in the order its index tensor stores the list: a
   gather read the list in the order of the slices it fills, and a scatter whose tensor stores a
   dimension's positions apart read it against that order. A list stored row by row, such as a
@@ -292,6 +306,15 @@ How entries are written:
 - `HbmBuffer::alloc(&device, Layout::new(bytes, alignment))` starts the buffer on a multiple of a
   power of two, whatever earlier allocations left: a buffer whose device time follows its address
   (pages many rows gather at once) can sit at one place. A size alone keeps the allocator's grain.
+- A transfer into or out of a data-memory tile of slices at a runtime index, such as
+  `rows.view_mut().slice_tile::<A, 1, _>(g)` in `for g in 0..count`, compiles: the core reads the
+  index as it issues the transfer, and the PE of each block of the tiled axis that holds the tile
+  moves its descriptor there. Use it to fill or read a tensor's slices a tile at a time from a loop
+  of runtime count; the tiled axis steps by a divisor of a PE's 64 slices, in blocks that divide a
+  PE or fill whole PEs. It failed with `a Partitioning tile requires a constant physical offset`.
+- A loop of static count whose vector pass reads a loop-carried value in the vector registers as
+  its register operand and writes the next version compiles: its trips alternate two register
+  areas. It failed with an allocation that waited for the current version to die.
 
 ### Fixed
 

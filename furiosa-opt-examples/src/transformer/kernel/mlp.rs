@@ -43,7 +43,9 @@ pub(crate) fn forward(
         .contract_packet::<m![1]>()
         .contract_time::<m![L / 8 % 3]>()
         .contract_lane::<m![L / 8 % 3], m![L % 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![L % 8 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![L % 8 # 16]>()
+        .vector_final()
         .commit_trim::<m![L % 8]>()
         .commit();
 
@@ -64,7 +66,9 @@ pub(crate) fn forward(
         .contract_packet::<m![1]>()
         .contract_time::<m![L / 8 % 3]>()
         .contract_lane::<m![L / 8 % 3], m![L % 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![L % 8 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![L % 8 # 16]>()
+        .vector_final()
         .commit_trim::<m![L % 8]>()
         .commit();
 
@@ -103,8 +107,8 @@ pub(crate) fn forward(
         .vector_narrow_split::<m![L / 4 % 6], m![L % 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul1), &silu_vrf)
         .vector_widen_concat::<m![L / 8 % 3], m![L % 8]>()
+        .vector_cast::<bf16, m![L % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![L % 8 # 16]>()
         .commit_trim::<m![L % 8]>()
         .commit();
 
@@ -145,7 +149,9 @@ pub(crate) fn forward(
         .fetch::<m![1], m![H % 8]>()
         .switch::<SliceP4, m![H / 8]>(SwitchConfig::Broadcast1 { slice1: 128, slice0: 2 })
         .collect::<m![H / 8], m![H % 8]>()
-        .cast::<bf16, m![H % 8 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![H % 8 # 16]>()
+        .vector_final()
         .commit_trim::<m![H % 8]>()
         .commit()
 }

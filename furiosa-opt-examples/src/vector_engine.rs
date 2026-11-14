@@ -23,15 +23,25 @@ axes![
     S = 15,
     T = 4,
     P = 8,
-    W = 64
+    W = 64,
+    U = 2,
+    V = 32,
+    R8 = 8,
+    X = 128
 ];
 
 mod branch;
+mod cast;
+mod fma_operand;
+mod inter_slice_reduce;
 mod normal;
 mod reduce;
 mod zip;
 
 pub use branch::*;
+pub use cast::*;
+pub use fma_operand::*;
+pub use inter_slice_reduce::*;
 pub use normal::*;
 pub use reduce::*;
 pub use zip::*;

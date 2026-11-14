@@ -154,15 +154,7 @@ impl<
 impl<'l, P: CanApplyCommitCast, D: MaterializableScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
     TuTensor<'l, { Tu::Main }, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
-    /// Runs the Commit Adapter's type-casting stage.
-    ///
-    /// Folds the `f32` → `bf16` cast into the commit path, leaving the
-    /// [Cast Engine](crate::engine::cast) free for sub-context Vector Engine
-    /// work. See [`CommitCast`](crate::prelude::CommitCast) for why this is the
-    /// only conversion, and [`commit_cast_relu`](Self::commit_cast_relu) for the
-    /// variant that fuses a ReLU.
-    ///
-    /// Available only in the main context.
+    /// Casts `f32` to `bf16` on the main commit path, leaving the Vector Engine free.
     #[primitive(TuTensor::commit_cast)]
     pub fn commit_cast<OutD: Scalar>(
         self,

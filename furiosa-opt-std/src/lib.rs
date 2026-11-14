@@ -85,8 +85,8 @@ pub use tensor::pseudo;
 pub mod prelude {
     pub use super::backend::{Backend, Cpu, IndexUnit, IndexValueError, Npu};
     pub use super::cast::{
-        Cast, CastEngineCast, CommitCast, ContractionAccumulator, ContractionCast, ContractionWeight, FetchCast,
-        FetchZeroPointSub, TableLookupCast,
+        Cast, CommitCast, ContractionAccumulator, ContractionCast, ContractionWeight, FetchCast, FetchZeroPointSub,
+        TableLookupCast, VectorCast,
     };
     pub use super::context::{Dma, DmaContext, Tu, TuContext};
     pub use super::engine::vector::stash_slot::*;

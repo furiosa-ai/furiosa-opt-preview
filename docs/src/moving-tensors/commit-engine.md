@@ -34,12 +34,12 @@ axes![P = 256, M = 16, N = 8];
 fn cast_commit<'l, const T: Tu>(
     input: ContractTensor<'l, T, f32, m![1], m![1 # 2], m![P], m![M], m![N]>,
 ) -> DmTensor<bf16, m![1], m![1 # 2], m![P], m![M, N # 16]> {
-    // Cast f32 to bf16 (Cast Engine), then commit to DM (Commit Engine).
+    // Cast f32 to bf16 (Vector Engine cast compaction), then commit to DM (Commit Engine).
     // Input: M = 16 time steps, N = 8 f32 elements per packet (32 bytes).
     // After cast: N = 8 bf16 elements padded to 16 (32 bytes).
     // After trim: N # 16 trimmed into N = 8.
     // The sequencer writes across P = 256 slices.
-    input.cast::<bf16, m![N # 16]>().commit_trim::<m![N]>().commit()
+    input.vector_init().vector_cast::<bf16, m![N # 16]>().vector_final().commit_trim::<m![N]>().commit()
 }
 #
 # fn main() -> Result<(), Error> {
@@ -81,7 +81,7 @@ axes![M = 4, K = 2, W = 8, N = 16, L = 32];
 // ] : 8
 // access_size = 64; valid_size = 8; write_size = gcd(64, 8) = 8; writes per packet = 1
 fn no_transpose<'l, const T: Tu>(
-    input: CastTensor<'l, T, i8, m![1], m![1 # 2], m![1 # 256], m![M, K], m![L]>,
+    input: VectorFinalTensor<'l, T, i8, m![1], m![1 # 2], m![1 # 256], m![M, K], m![L]>,
 ) -> DmTensor<i8, m![1], m![1 # 2], m![1 # 256], m![M, K, L]> {
     input.commit_trim::<m![L]>().commit()
 }
@@ -105,7 +105,7 @@ fn transpose<'l, const T: Tu>(
 // ] : 16
 // access_size = 8; valid_size = 8 (trimmed from 16); write_size = gcd(8, 8) = 8; writes per packet = 1
 fn transpose_with_trimming<'l, const T: Tu>(
-    input: CastTensor<'l, T, i8, m![1], m![1 # 2], m![1 # 256], m![M, K], m![N # 32]>,
+    input: VectorFinalTensor<'l, T, i8, m![1], m![1 # 2], m![1 # 256], m![M, K], m![N # 32]>,
 ) -> DmTensor<i8, m![1], m![1 # 2], m![1 # 256], m![K, M, N]> {
     input.commit_trim::<m![N]>().commit()
 }
@@ -113,11 +113,11 @@ fn transpose_with_trimming<'l, const T: Tu>(
 #
 # fn main() -> Result<(), Error> {
 # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
-# let a: CastTensor<'_, _, i8, m![1], m![1 # 2], m![1 # 256], m![M, K], m![L]> = CastTensor::new(&mut device.main, Tensor::zero());
+# let a: VectorFinalTensor<'_, _, i8, m![1], m![1 # 2], m![1 # 256], m![M, K], m![L]> = VectorFinalTensor::new(&mut device.main, Tensor::zero());
 # let _o = no_transpose(a);
 # let b: ContractTensor<'_, _, f32, m![1], m![1 # 2], m![1 # 256], m![M, K], m![W]> = ContractTensor::new(&mut device.main, Tensor::zero());
 # let _o = transpose(b);
-# let c: CastTensor<'_, _, i8, m![1], m![1 # 2], m![1 # 256], m![M, K], m![N # 32]> = CastTensor::new(&mut device.main, Tensor::zero());
+# let c: VectorFinalTensor<'_, _, i8, m![1], m![1 # 2], m![1 # 256], m![M, K], m![N # 32]> = VectorFinalTensor::new(&mut device.main, Tensor::zero());
 # let _o = transpose_with_trimming(c);
 #
 # Ok(())

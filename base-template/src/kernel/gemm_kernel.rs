@@ -41,7 +41,9 @@ pub fn gemm_kernel(
         .contract_packet::<m![1]>()
         .contract_time::<m![I % 32, J / 8 % 4]>()
         .contract_lane::<m![I % 32, J / 8 % 4], m![J % 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![J % 8 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![J % 8 # 16]>()
+        .vector_final()
         .commit_trim::<m![J % 8]>()
         .commit();
 

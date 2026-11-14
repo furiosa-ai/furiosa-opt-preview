@@ -49,8 +49,8 @@ pub fn intertranspose_blocking_flits_18_dim1_2_fpp9(
         .contract_lane::<m![Dim1, PacketNine / 16], m![OutputLane]>(LaneMode::Interleaved)
         .vector_init()
         .vector_inter_slice_reduce::<ReducedSlice, m![Dim1, PacketNine / 16]>(InterSliceReduceOpF32::Add)
+        .vector_cast::<bf16, m![OutputLane # 16]>()
         .vector_final()
-        .cast::<bf16, m![OutputLane # 16]>()
         .commit_trim::<m![OutputLane]>()
         .commit();
 
@@ -88,8 +88,8 @@ pub fn intertranspose_blocking_flits_18_dim0_chunk_3_fpp3(
         .contract_lane::<m![Chunk, Dim1, PacketThree / 16], m![OutputLane]>(LaneMode::Interleaved)
         .vector_init()
         .vector_inter_slice_reduce::<ReducedSlice, m![Chunk, Dim1, PacketThree / 16]>(InterSliceReduceOpF32::Add)
+        .vector_cast::<bf16, m![OutputLane # 16]>()
         .vector_final()
-        .cast::<bf16, m![OutputLane # 16]>()
         .commit_trim::<m![OutputLane]>()
         .commit();
 

@@ -10,7 +10,7 @@
 //!   implement `Commitable`, preventing accidental commits of intermediate group states.
 //!
 //! # Pipeline order
-//! Tag → Logic → Fxp → FxpToFp → Narrow → Fp → IntraSliceReduce → FpDiv → Widen → FpToFxp → Clip → Output
+//! Tag → Logic → Fxp → FxpToFp → Narrow → Fp → IntraSliceReduce → FpDiv → Widen → FpToFxp → Clip → Filter → Cast → Output
 
 use std::marker::ConstParamTy;
 
@@ -214,7 +214,12 @@ impl InterSliceStage for InterSliceReduce {}
 pub struct Filter;
 impl Stage for Filter {}
 
-/// Output configuration stage (filter, write_branch).
+/// Vector Engine cast-compaction stage.
+#[derive(Debug, Clone, Copy)]
+pub struct Cast;
+impl Stage for Cast {}
+
+/// Finalized Vector Engine output stage.
 #[derive(Debug, Clone, Copy)]
 pub struct Output;
 impl Stage for Output {}
@@ -325,7 +330,23 @@ impl CanTransitionTo<Filter> for Widen {}
 impl CanTransitionTo<Filter> for FpToFxp {}
 impl CanTransitionTo<Filter> for Clip {}
 
-// Output transitions (all stages can transition to Output for commit)
+// Cast transitions
+impl CanTransitionTo<Cast> for Tag {}
+impl CanTransitionTo<Cast> for Logic {}
+impl CanTransitionTo<Cast> for Fxp {}
+impl CanTransitionTo<Cast> for FxpToFp {}
+impl CanTransitionTo<Cast> for Narrow {}
+impl CanTransitionTo<Cast> for Fp {}
+impl CanTransitionTo<Cast> for IntraSliceReduce {}
+impl CanTransitionTo<Cast> for FpDiv {}
+impl CanTransitionTo<Cast> for Widen {}
+impl CanTransitionTo<Cast> for FpToFxp {}
+impl CanTransitionTo<Cast> for Clip {}
+impl CanTransitionTo<Cast> for InterSliceReduce {}
+impl CanTransitionTo<Cast> for Filter {}
+
+// Output transitions
+impl CanTransitionTo<Output> for Cast {}
 impl CanTransitionTo<Output> for Tag {}
 impl CanTransitionTo<Output> for Logic {}
 impl CanTransitionTo<Output> for Fxp {}

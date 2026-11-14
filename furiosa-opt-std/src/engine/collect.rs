@@ -18,7 +18,6 @@ use std::marker::PhantomData;
 use crate::backend::Backend;
 use crate::constraints;
 use crate::context::*;
-use crate::engine::vector::scalar::VeScalar;
 use crate::engine::{CanApplyCollect, CanApplyToTrf, CanApplyToVrf};
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
@@ -105,7 +104,7 @@ impl<'l, P: CanApplyToTrf, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Pa
 // ANCHOR_END: collect_to_trf
 
 // ANCHOR: collect_to_vrf
-impl<'l, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+impl<'l, P: CanApplyToVrf, D: VrfScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
     TuTensor<'l, { Tu::Sub }, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Stores to the vector register file.
@@ -123,7 +122,7 @@ impl<'l, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, 
     }
 }
 
-impl<'l, P: CanApplyToVrf, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+impl<'l, P: CanApplyToVrf, D: VrfScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
     TuTensor<'l, { Tu::Main }, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Stores to the vector register file, occupying the sub context the write runs through.

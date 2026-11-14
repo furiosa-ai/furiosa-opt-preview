@@ -32,8 +32,8 @@ pub fn matmul_wo_broadcast(
         .contract_lane::<m![1], m![1 # 8]>(LaneMode::Interleaved)
         .vector_init()
         .vector_inter_slice_reduce::<m![1 # 256], m![1]>(InterSliceReduceOpI32::Add)
+        .vector_cast::<i8, m![1 # 32]>()
         .vector_final()
-        .cast::<i8, m![1 # 32]>()
         .commit_trim::<m![1 # 8]>()
         .commit();
 

@@ -21,6 +21,6 @@ The host oracle and test are included in the examples test target.
 
 Run `cargo furiosa-opt test --test fetch_commit_tests` to execute the canonical case.
 The host oracle checks every `output[b, a]` value against the widened `input[a, b]` value.
-The streaming path is input DM, Fetch, Cast, Collect, Commit, and output DM with the original `[A, B]` DM layout.
+The streaming path is input DM, Fetch, Fetch Adapter, Collect, Commit, and output DM with the original `[A, B]` DM layout.
 The [Fetch Engine](./fetch-engine.md), [Collect Engine](../computing-tensors/collect-engine.md), and [Commit Engine](./commit-engine.md) document the APIs used here.
 

@@ -1,4 +1,4 @@
-//! Cast engine: a one-flit input recast to `out_bits` and repadded to a one-flit output.
+//! VE cast compaction: a one-flit input recast to `out_bits` and repadded to a one-flit output.
 
 use furiosa_mapping::{Mapping, MappingExt, PaddingKind};
 
@@ -6,7 +6,7 @@ use crate::verify::{
     ElementSizeError, FLIT_BYTES, OneFlitPacketError, PacketSide, length_from_bytes, require_one_flit, size_in_bytes,
 };
 
-/// A conversion supported by the Cast engine.
+/// A conversion supported by the VE cast compaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastKind {
     I32ToI4,
@@ -17,7 +17,7 @@ pub enum CastKind {
     F32ToBf16,
 }
 
-/// Why a cast is not realizable on the Cast engine.
+/// Why a cast is not realizable on the VE cast compaction.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CastError {
     /// The element width cannot describe a whole byte sequence.
@@ -36,8 +36,8 @@ pub enum CastError {
     },
 }
 
-/// Inputs used to configure the Cast engine.
-pub struct CastInput {
+/// Inputs used to configure the VE cast compaction.
+pub struct VectorCastInput {
     pub in_packet: Mapping,
     pub out_packet: Mapping,
     pub kind: CastKind,
@@ -55,8 +55,8 @@ impl CastKind {
 }
 
 /// Checks the one-flit input and output mappings for a supported Cast conversion.
-pub fn config_cast(input: CastInput) -> Result<(), CastError> {
-    let CastInput {
+pub fn config_vector_cast(input: VectorCastInput) -> Result<(), CastError> {
+    let VectorCastInput {
         in_packet,
         out_packet,
         kind,
@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn accepts_a_supported_conversion() {
         assert_eq!(
-            config_cast(CastInput {
+            config_vector_cast(VectorCastInput {
                 in_packet: <m![Packet]>::to_value(),
                 out_packet: <m![Packet # 64]>::to_value(),
                 kind: CastKind::I32ToI4,
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn reports_the_output_element_and_byte_counts() {
         assert_eq!(
-            config_cast(CastInput {
+            config_vector_cast(VectorCastInput {
                 in_packet: <m![Packet]>::to_value(),
                 out_packet: <m![Packet]>::to_value(),
                 kind: CastKind::F32ToBf16,

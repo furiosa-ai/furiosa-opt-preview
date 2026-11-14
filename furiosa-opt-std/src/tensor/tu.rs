@@ -24,8 +24,6 @@ use crate::scalar::*;
 use crate::tensor::Tensor;
 
 /// Marker trait for pipeline position of Tensor Unit tensors.
-///
-/// Position does not contain Vector Engine position: VectorTensor has its own typestate.
 pub trait Position: std::fmt::Debug + 'static {}
 
 /// After beginning the pipeline.

@@ -9,7 +9,7 @@
 //! The widen happens *entering* Outer: `contract_outer` takes storage-typed operands `D` and stashes
 //! them cast to the widened accumulator [`ContractionCast::Output`]. That widened type is the carrier's
 //! *own* type parameter, so every downstream stage carries the accumulator width verbatim; the narrow
-//! back to a storage dtype happens at the next [`crate::engine::cast::CastTensor`] the consumer applies.
+//! back to a storage dtype happens at the next [`crate::engine::vector::cast::VectorCastTensor`] the consumer applies.
 
 pub(super) mod stream_adapter;
 pub(super) mod trf_sequencer;

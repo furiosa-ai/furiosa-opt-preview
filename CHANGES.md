@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Changed
+
+- `.cast()` becomes `.vector_cast()`, a Vector Engine stage between `vector_init()` and
+  `vector_final()`. For a cast-only pass, replace `.cast::<OutD, OutPacket>()` with
+  `.vector_init().vector_cast::<OutD, OutPacket>().vector_final()`.
+- `CastEngineCast`, `CastTensor`, and `PositionCast` become `VectorCast`, `VectorCastTensor`, and
+  `PositionVectorCast`, respectively.
+- Generic VRF storage code uses `D: VrfScalar` instead of `D: VeScalar`; VRF operand code uses
+  `D: VrfOperandScalar`. Vector Engine stream bounds remain `D: VeScalar`.
+
+### Added
+
+- `to_vrf` and `to_vrf_view` support `i4` storage alongside `f32` and `i32`, including from
+  finalized Vector Engine output. VRF operand reads still accept only `f32` and `i32`.
+
 ## [v0.10.0]
 
 ### Changed

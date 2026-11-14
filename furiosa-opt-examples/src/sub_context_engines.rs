@@ -21,7 +21,9 @@ pub fn sub_cast(device: &mut Device, input: &HbmTensor<i32, Chip, m![S, R, KV]>)
         .fetch::<m![R], m![KV]>()
         .fetch_cast::<i32>()
         .collect::<m![R], m![KV]>()
-        .cast::<i8, m![KV # 32]>()
+        .vector_init()
+        .vector_cast::<i8, m![KV # 32]>()
+        .vector_final()
         .commit_trim::<m![KV]>()
         .commit();
 

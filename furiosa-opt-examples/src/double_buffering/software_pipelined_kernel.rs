@@ -43,7 +43,9 @@ pub fn software_pipelined(
             .contract_packet::<m![1]>()
             .contract_time::<m![1]>()
             .contract_lane::<m![1], m![Out]>(LaneMode::Interleaved)
-            .cast::<bf16, m![Out # 16]>()
+            .vector_init()
+            .vector_cast::<bf16, m![Out # 16]>()
+            .vector_final()
             .commit_trim::<m![Out]>()
             .commit_view(output.view_mut().tile::<m![Group], 1, m![1 #{!} 20, Out]>(first));
         device
@@ -55,7 +57,9 @@ pub fn software_pipelined(
             .contract_packet::<m![1]>()
             .contract_time::<m![1]>()
             .contract_lane::<m![1], m![Out]>(LaneMode::Interleaved)
-            .cast::<bf16, m![Out # 16]>()
+            .vector_init()
+            .vector_cast::<bf16, m![Out # 16]>()
+            .vector_final()
             .commit_trim::<m![Out]>()
             .commit_view(output.view_mut().tile::<m![Group], 1, m![1 #{!} 20, Out]>(second));
     }

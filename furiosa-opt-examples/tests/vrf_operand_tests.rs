@@ -1,5 +1,7 @@
 use furiosa_opt_examples::vrf_operand::{
-    B, N, V, W, X, Y, vrf_group_scale, vrf_slice_regroup, vrf_slice_rename, vrf_slice_reshape, vrf_slice_reshape_64,
+    B, N, V, W, X, Y, vrf_slice_regroup, vrf_slice_rename, vrf_slice_reshape, vrf_slice_reshape_64,
+    way4_packet_broadcast, way4_packet_consecutive, way8_packet_broadcast, way8_packet_broadcast_span,
+    way8_packet_consecutive,
 };
 use furiosa_opt_std::prelude::*;
 
@@ -94,12 +96,9 @@ async fn test_vrf_slice_rename() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A coarse operand: each scale covers 16 stream elements, so the four lanes of one access read it
-/// as a single address. Every group carries a different scale, so a read that stepped the operand
-/// per lane, or per access, lands on the wrong one and the answer key says so.
 #[tokio::test]
-async fn test_vrf_group_scale() -> eyre::Result<()> {
-    let mut device = Device::new(vrf_group_scale.topology())?;
+async fn test_way4_packet_broadcast() -> eyre::Result<()> {
+    let mut device = Device::new(way4_packet_broadcast.topology())?;
 
     // Powers of two: the division is exact, so the comparison needs no tolerance.
     let scale_of = |group: usize| (1 << (group % 4)) as f32;
@@ -110,10 +109,188 @@ async fn test_vrf_group_scale() -> eyre::Result<()> {
     let input_hbm = input.to_hbm::<m![1], m![V, N]>(&mut device.pdma).await?;
     let scale_hbm = scale.to_hbm::<m![1], m![V, N / 16]>(&mut device.pdma).await?;
 
-    let output = launch(vrf_group_scale, (&mut device, &input_hbm, &scale_hbm)).await?;
+    let output = launch(way4_packet_broadcast, (&mut device, &input_hbm, &scale_hbm)).await?;
 
     let expected: Vec<f32> = (0..<m![V, N]>::SIZE).map(|i| i as f32 / scale_of(i / 16)).collect();
     assert_eq!(output.to_host::<m![V, N]>(&mut device.pdma).await?.into_vec(), expected);
 
     Ok(())
+}
+
+#[tokio::test]
+async fn test_way4_packet_consecutive() -> eyre::Result<()> {
+    let mut device = Device::new(way4_packet_consecutive.topology())?;
+
+    // Power-of-two divisors make the comparison exact.
+    let scale_of = |i: usize| (1 << (i % 4)) as f32;
+    let input = HostTensor::<f32, m![V, N]>::from_vec((0..<m![V, N]>::SIZE).map(|i| i as f32).collect::<Vec<_>>());
+    let scale = HostTensor::<f32, m![V, N]>::from_vec((0..<m![V, N]>::SIZE).map(scale_of).collect::<Vec<_>>());
+
+    let input_hbm = input.to_hbm::<m![1], m![V, N]>(&mut device.pdma).await?;
+    let scale_hbm = scale.to_hbm::<m![1], m![V, N]>(&mut device.pdma).await?;
+
+    let output = launch(way4_packet_consecutive, (&mut device, &input_hbm, &scale_hbm)).await?;
+
+    let expected: Vec<f32> = (0..<m![V, N]>::SIZE).map(|i| i as f32 / scale_of(i)).collect();
+    assert_eq!(output.to_host::<m![V, N]>(&mut device.pdma).await?.into_vec(), expected);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_way8_packet_consecutive() -> eyre::Result<()> {
+    let mut device = Device::new(way8_packet_consecutive.topology())?;
+
+    let bias_of = |i: usize| i as i32 * 1000 + 1;
+    let input = HostTensor::<i32, m![V, N]>::from_vec((0..<m![V, N]>::SIZE as i32).collect::<Vec<_>>());
+    let bias = HostTensor::<i32, m![V, N]>::from_vec((0..<m![V, N]>::SIZE).map(bias_of).collect::<Vec<_>>());
+
+    let input_hbm = input.to_hbm::<m![1], m![V, N]>(&mut device.pdma).await?;
+    let bias_hbm = bias.to_hbm::<m![1], m![V, N]>(&mut device.pdma).await?;
+
+    let output = launch(way8_packet_consecutive, (&mut device, &input_hbm, &bias_hbm)).await?;
+
+    let expected: Vec<i32> = (0..<m![V, N]>::SIZE).map(|i| i as i32 + bias_of(i)).collect();
+    assert_eq!(output.to_host::<m![V, N]>(&mut device.pdma).await?.into_vec(), expected);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_way8_packet_broadcast() -> eyre::Result<()> {
+    let mut device = Device::new(way8_packet_broadcast.topology())?;
+
+    let bias_of = |group: usize| group as i32 * 1000 + 1;
+    let input = HostTensor::<i32, m![V, N]>::from_vec((0..<m![V, N]>::SIZE as i32).collect::<Vec<_>>());
+    let bias = HostTensor::<i32, m![V, N / 8]>::from_vec((0..<m![V, N / 8]>::SIZE).map(bias_of).collect::<Vec<_>>());
+
+    let input_hbm = input.to_hbm::<m![1], m![V, N]>(&mut device.pdma).await?;
+    let bias_hbm = bias.to_hbm::<m![1], m![V, N / 8]>(&mut device.pdma).await?;
+
+    let output = launch(way8_packet_broadcast, (&mut device, &input_hbm, &bias_hbm)).await?;
+
+    let expected: Vec<i32> = (0..<m![V, N]>::SIZE).map(|i| i as i32 + bias_of(i / 8)).collect();
+    assert_eq!(output.to_host::<m![V, N]>(&mut device.pdma).await?.into_vec(), expected);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_way8_packet_broadcast_span() -> eyre::Result<()> {
+    let mut device = Device::new(way8_packet_broadcast_span.topology())?;
+
+    let bias_of = |group: usize| group as i32 * 1000 + 1;
+    let input = HostTensor::<i32, m![V, N]>::from_vec((0..<m![V, N]>::SIZE as i32).collect::<Vec<_>>());
+    let bias = HostTensor::<i32, m![V, N / 16]>::from_vec((0..<m![V, N / 16]>::SIZE).map(bias_of).collect::<Vec<_>>());
+
+    let input_hbm = input.to_hbm::<m![1], m![V, N]>(&mut device.pdma).await?;
+    let bias_hbm = bias.to_hbm::<m![1], m![V, N / 16]>(&mut device.pdma).await?;
+
+    let output = launch(way8_packet_broadcast_span, (&mut device, &input_hbm, &bias_hbm)).await?;
+
+    let expected: Vec<i32> = (0..<m![V, N]>::SIZE).map(|i| i as i32 + bias_of(i / 16)).collect();
+    assert_eq!(output.to_host::<m![V, N]>(&mut device.pdma).await?.into_vec(), expected);
+
+    Ok(())
+}
+
+/// Checks multi-axis VRF reads against host-computed values.
+mod multi_axis {
+    use furiosa_opt_examples::vrf_operand::multi_axis::{
+        A, B, C, S, T, way4_axes_broadcast, way4_axes_consecutive, way8_axes_broadcast, way8_axes_consecutive,
+    };
+    use furiosa_opt_std::prelude::*;
+
+    #[tokio::test]
+    async fn test_way8_axes_consecutive() -> eyre::Result<()> {
+        let mut device = Device::new(way8_axes_consecutive.topology())?;
+
+        let bias_of = |i: usize| i as i32 % 7 - 3;
+        let input =
+            HostTensor::<i32, m![S, T, A, B, C]>::from_vec((0..<m![S, T, A, B, C]>::SIZE as i32).collect::<Vec<_>>());
+        let bias = HostTensor::<i32, m![S, T, A, B, C]>::from_vec(
+            (0..<m![S, T, A, B, C]>::SIZE).map(bias_of).collect::<Vec<_>>(),
+        );
+
+        let input_hbm = input.to_hbm::<m![1], m![S, T, A, B, C]>(&mut device.pdma).await?;
+        let bias_hbm = bias.to_hbm::<m![1], m![S, T, A, B, C]>(&mut device.pdma).await?;
+
+        let output = launch(way8_axes_consecutive, (&mut device, &input_hbm, &bias_hbm)).await?;
+
+        let expected: Vec<i32> = (0..<m![S, T, A, B, C]>::SIZE).map(|i| i as i32 + bias_of(i)).collect();
+        let host = output.to_host::<m![S, T, A, B, C]>(&mut device.pdma).await?;
+        assert_eq!(host.into_vec(), expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_way8_axes_broadcast() -> eyre::Result<()> {
+        let mut device = Device::new(way8_axes_broadcast.topology())?;
+
+        let bias_of = |i: usize| i as i32 % 5 - 2;
+        let input =
+            HostTensor::<i32, m![S, T, A, B, C]>::from_vec((0..<m![S, T, A, B, C]>::SIZE as i32).collect::<Vec<_>>());
+        let bias = HostTensor::<i32, m![S, T]>::from_vec((0..<m![S, T]>::SIZE).map(bias_of).collect::<Vec<_>>());
+
+        let input_hbm = input.to_hbm::<m![1], m![S, T, A, B, C]>(&mut device.pdma).await?;
+        let bias_hbm = bias.to_hbm::<m![1], m![S, T]>(&mut device.pdma).await?;
+
+        let output = launch(way8_axes_broadcast, (&mut device, &input_hbm, &bias_hbm)).await?;
+
+        let packet = <m![A, B, C]>::SIZE;
+        let expected: Vec<i32> = (0..<m![S, T, A, B, C]>::SIZE)
+            .map(|i| i as i32 + bias_of(i / packet))
+            .collect();
+        let host = output.to_host::<m![S, T, A, B, C]>(&mut device.pdma).await?;
+        assert_eq!(host.into_vec(), expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_way4_axes_consecutive() -> eyre::Result<()> {
+        let mut device = Device::new(way4_axes_consecutive.topology())?;
+
+        let scale_of = |i: usize| (1u32 << (i % 13)) as f32;
+        let input = HostTensor::<f32, m![S, T, A, B, C]>::from_vec(
+            (0..<m![S, T, A, B, C]>::SIZE).map(|i| i as f32).collect::<Vec<_>>(),
+        );
+        let scale = HostTensor::<f32, m![S, T, A, B, C]>::from_vec(
+            (0..<m![S, T, A, B, C]>::SIZE).map(scale_of).collect::<Vec<_>>(),
+        );
+
+        let input_hbm = input.to_hbm::<m![1], m![S, T, A, B, C]>(&mut device.pdma).await?;
+        let scale_hbm = scale.to_hbm::<m![1], m![S, T, A, B, C]>(&mut device.pdma).await?;
+
+        let output = launch(way4_axes_consecutive, (&mut device, &input_hbm, &scale_hbm)).await?;
+
+        let expected: Vec<f32> = (0..<m![S, T, A, B, C]>::SIZE).map(|i| i as f32 / scale_of(i)).collect();
+        let host = output.to_host::<m![S, T, A, B, C]>(&mut device.pdma).await?;
+        assert_eq!(host.into_vec(), expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_way4_axes_broadcast() -> eyre::Result<()> {
+        let mut device = Device::new(way4_axes_broadcast.topology())?;
+
+        let scale_of = |i: usize| (1u32 << (i % 13)) as f32;
+        let input = HostTensor::<f32, m![S, T, A, B, C]>::from_vec(
+            (0..<m![S, T, A, B, C]>::SIZE).map(|i| i as f32).collect::<Vec<_>>(),
+        );
+        let scale =
+            HostTensor::<f32, m![S, T, A]>::from_vec((0..<m![S, T, A]>::SIZE).map(scale_of).collect::<Vec<_>>());
+
+        let input_hbm = input.to_hbm::<m![1], m![S, T, A, B, C]>(&mut device.pdma).await?;
+        let scale_hbm = scale.to_hbm::<m![1], m![S, T, A]>(&mut device.pdma).await?;
+
+        let output = launch(way4_axes_broadcast, (&mut device, &input_hbm, &scale_hbm)).await?;
+
+        let packet = <m![B, C]>::SIZE;
+        let expected: Vec<f32> = (0..<m![S, T, A, B, C]>::SIZE)
+            .map(|i| i as f32 / scale_of(i / packet))
+            .collect();
+        let host = output.to_host::<m![S, T, A, B, C]>(&mut device.pdma).await?;
+        assert_eq!(host.into_vec(), expected);
+        Ok(())
+    }
 }

@@ -25,8 +25,8 @@ pub(crate) fn forward<Cluster: M, Slice: M>(
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
         .vector_clip(ClipBinaryOpF32::Add, &residual_vrf)
+        .vector_cast::<bf16, m![H % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![H % 8 # 16]>()
         .commit_trim::<m![H % 8]>()
         .commit()
 }

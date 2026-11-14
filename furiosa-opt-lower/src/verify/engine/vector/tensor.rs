@@ -88,8 +88,8 @@ pub enum VectorError {
         /// Declared output packet.
         got: Mapping,
     },
-    /// `vector_widen_pad` input packet is not the trimmed half.
-    #[error("vector_widen_pad: input Packet must have 4 elements (after vector_narrow_trim), got {0}.")]
+    /// `vector_widen_pad` input packet is not Way4.
+    #[error("vector_widen_pad: input Packet must have 4 elements (Way4), got {0}.")]
     PadInputSize(usize),
     /// `vector_widen_pad` output packet is not one flit.
     #[error("vector_widen_pad: output Packet2 must have 8 elements (one flit), got {0}.")]
@@ -312,7 +312,7 @@ pub fn config_vector_narrow_trim(input: VectorNarrowTrimInput) -> Result<(), Vec
     Ok(())
 }
 
-/// `vector_widen_pad`: restore the back-4 dummy lanes stripped by `vector_narrow_trim` (4 -> 8).
+/// `vector_widen_pad`: append four dummy lanes to a Way4 packet to produce a Way8 packet.
 pub fn config_vector_widen_pad(input: VectorWidenPadInput) -> Result<(), VectorError> {
     let VectorWidenPadInput { in_packet, out_packet } = input;
     if in_packet.size() != HALF_FLIT_ELEMENTS {

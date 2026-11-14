@@ -29,7 +29,9 @@ fn fc1_matmul(
         .contract_packet::<m![1]>()
         .contract_time::<m![1]>()
         .contract_lane::<m![1], m![1 # 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![1 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![1 # 16]>()
+        .vector_final()
         .commit_trim::<m![1 # 16]>()
         .commit()
 }
@@ -84,8 +86,8 @@ fn fc1_relu(
         .vector_intra_slice_unzip::<I, m![1]>()
         .vector_clip_zip(ClipBinaryOpF32::Add)
         .vector_clip(ClipBinaryOpF32::Max, 0.0f32)
+        .vector_cast::<bf16, m![1 # 16]>()
         .vector_final()
-        .cast::<bf16, m![1 # 16]>()
         .commit_trim::<m![1 # 4]>()
         .commit()
 }
@@ -114,7 +116,9 @@ fn fc2_matmul(
         .contract_packet::<m![1]>()
         .contract_time::<m![1]>()
         .contract_lane::<m![1], m![1 # 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![1 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![1 # 16]>()
+        .vector_final()
         .commit_trim::<m![1 # 16]>()
         .commit()
 }
@@ -174,8 +178,8 @@ fn fc2(
         .vector_init()
         .vector_intra_slice_unzip::<I, m![1]>()
         .vector_clip_zip(ClipBinaryOpF32::Add)
+        .vector_cast::<bf16, m![1 # 16]>()
         .vector_final()
-        .cast::<bf16, m![1 # 16]>()
         .commit_trim::<m![1 # 16]>()
         .commit();
 

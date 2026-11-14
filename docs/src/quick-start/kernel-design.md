@@ -78,7 +78,7 @@ A tiled kernel uses them together, as in `m![B / 2048 = 1 # 2, B % 2048]`, which
 See [Tiling](../mapping-tensors/mapping-expressions.md#tiling) for the general rule.
 
 Tensor Unit tensors also use `Time` for pipeline iterations and `Packet` for elements within an iteration.
-The Tensor Unit pipeline is Fetch → Switch → Collect → Contraction → Vector → Cast → Transpose → Commit.
+The Tensor Unit pipeline is Fetch → Switch → Collect → Contraction → Vector → Transpose → Commit.
 The Switch Engine connects slices while most stages operate independently within a slice.
 
 | Type | Location | Capacity (RNGD) | Role |
@@ -173,7 +173,7 @@ Both operands feed the per-lane multiplier.
 `.contract_packet()` reduces products spatially through the hardware reduction tree.
 `.contract_time::<m![1]>()` accumulates across time and produces one scalar per slice.
 `.contract_lane()` folds the lanes, which is trivial when `Lane = m![1]`.
-`.cast()` converts the `f32` accumulator to `bf16`.
+`.vector_cast()` converts the `f32` accumulator to `bf16`.
 
 Contraction performs multiply-and-accumulate over many terms and needs a widened type.
 Contraction widens `i4` and `i8` to `i32`, and it widens `fp8` and `bf16` to `f32`.

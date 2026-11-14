@@ -10,7 +10,7 @@
 //!   - `vector_init()`, then `vector_intra_slice_tag(TagMode)` → intra-slice (single stream)
 //!   - `vector_init()`, then `vector_intra_slice_unzip(...)` → intra-slice (two-group)
 //!   - `vector_init()`, then `vector_inter_slice_reduce(...)` → inter-slice reduce
-//! - Exit: `vector_final()` → `VectorFinalTensor` → commit/cast/transpose
+//! - Exit: `vector_final()` → `VectorFinalTensor` → commit/transpose
 //!
 //! # VeOrder (VE_ORDER)
 //! Tracks which unit was entered first. Set once, never changes after.
@@ -34,6 +34,8 @@ use crate::engine::vector::branch::{
     BinaryBranchedOperand, ExecutionId, RfPort, TagGuard, TagMode, TernaryBranchedOperand, VeOperandLayout,
     apply_branch_config,
 };
+use crate::engine::vector::cast::VectorCast;
+use crate::engine::vector::cast::{VectorCastTensor, cast_stream};
 use crate::engine::vector::layer::{FpToFxp, FxpToFp, Reinterpret};
 use crate::engine::vector::op::semantics::HasConversionOp;
 use crate::engine::vector::op::semantics::{HasBinaryOp, HasTernaryOp, HasUnaryOp};
@@ -43,9 +45,12 @@ use crate::engine::vector::op::{
     LogicBinaryOpI32, TernaryArgMode,
 };
 use crate::runtime::CurrentBackend;
+use crate::scalar::Scalar;
 use crate::tensor::*;
 
-use crate::engine::vector::operand::{IntoBranchedOperand, IntoGuardedUnaryOp, IntoTernaryOperand, StashTransition};
+use crate::engine::vector::operand::{
+    IntoBranchedOperand, IntoGuardedUnaryOp, IntoTernaryOperand, StashTransition, verify_ternary_immediate_budget,
+};
 use crate::engine::vector::scalar::VeScalar;
 use crate::engine::vector::stage::markers as stage;
 use crate::engine::vector::stage::markers::CanTransitionTo;
@@ -70,6 +75,19 @@ pub struct VectorInitTensor<'l, const T: Tu, D: VeScalar, Chip: M, Cluster: M, S
 impl<'l, const T: Tu, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
     VectorInitTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet>
 {
+    /// Casts and packs the stream.
+    #[primitive(VectorTensor::vector_cast)]
+    // ANCHOR: cast_impl
+    pub fn vector_cast<OutD: Scalar, OutPacket: M>(
+        self,
+    ) -> VectorCastTensor<'l, T, OutD, Chip, Cluster, Slice, Time, OutPacket>
+    where
+        D: VectorCast<OutD>,
+        // ANCHOR_END: cast_impl
+    {
+        cast_stream(self.device, self.inner)
+    }
+
     /// Creates a new VectorInitTensor.
     pub fn new(
         device: &'l mut TuContext<{ T }>,
@@ -460,10 +478,41 @@ impl<
 > VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
 {
     /// Exits the Vector Engine pipeline and returns a stream tensor.
-    /// After this, commit/cast/transpose are available through the stream tensor API.
+    /// After this, commit/transpose are available through the stream tensor API.
     #[primitive(VectorTensor::vector_final)]
     pub fn vector_final(self) -> VectorFinalTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet> {
         VectorFinalTensor::new(self.device, self.data.inner)
+    }
+}
+
+// ============================================================================
+// Cast compaction
+// ============================================================================
+
+impl<
+    'l,
+    const T: Tu,
+    S: stage::Stage + CanTransitionTo<stage::Cast>,
+    D: VeScalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    Stash: StashState,
+    FS: stage::Commitable,
+    const VE_ORDER: VeOrder,
+> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+{
+    /// Casts and packs the stream.
+    #[primitive(VectorTensor::vector_cast)]
+    pub fn vector_cast<OutD: Scalar, OutPacket: M>(
+        self,
+    ) -> VectorCastTensor<'l, T, OutD, Chip, Cluster, Slice, Time, OutPacket>
+    where
+        D: VectorCast<OutD>,
+    {
+        cast_stream(self.device, self.data.inner)
     }
 }
 
@@ -990,6 +1039,7 @@ pub(super) fn apply_unary_op_where<D: VeScalar, Mapping: M>(
 /// Applies a ternary operation with branch-conditional execution: [`apply_slots`] with each slot's
 /// own `operand1`, which the hardware selects per branch just like `operand0`. Ternary operations are
 /// only supported for f32 tensors.
+#[track_caller]
 pub(super) fn apply_ternary_op<Mapping: M>(
     data: &Tensor<f32, Mapping>,
     tag: &Tensor<u8, Mapping>,
@@ -997,6 +1047,8 @@ pub(super) fn apply_ternary_op<Mapping: M>(
     operand: &TernaryBranchedOperand<'_, f32, Mapping>,
     stash_data: Option<&Tensor<f32, Mapping>>,
 ) -> Tensor<f32, Mapping> {
+    // Every ternary application passes through here, so the RF addend rule runs in one place.
+    verify_ternary_immediate_budget(operand);
     apply_slots(data, tag, operand, stash_data, op)
 }
 

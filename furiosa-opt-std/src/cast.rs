@@ -1,6 +1,6 @@
 use std::ops::RangeInclusive;
 
-use furiosa_opt_lower::CastKind;
+pub use crate::engine::vector::cast::VectorCast;
 
 use crate::scalar::{bf16, f4e2m1, f8e4m3, f8e5m2, i4, i5, i9};
 
@@ -9,7 +9,7 @@ use super::scalar::{MaterializableScalar, Scalar};
 /// Host-side value conversion between scalar types: what a conversion computes, not a claim that
 /// hardware performs it. Some impls match no hardware conversion at all (`i32 -> u8`, `i32 -> i5`),
 /// existing only for the contraction fold's round trip. Each converting stage names its own legal
-/// subset in a subtrait its primitive binds instead ([`FetchCast`], [`CastEngineCast`],
+/// subset in a subtrait its primitive binds instead ([`FetchCast`], [`VectorCast`],
 /// [`CommitCast`]); only `contract_outer` still binds `Cast`, gated by [`ContractionCast`].
 pub trait Cast<D: Scalar> {
     /// Casts self to target type D.
@@ -119,45 +119,13 @@ impl FetchZeroPointSub<i9> for i8 {
     }
 }
 
-/// Output element types the Cast Engine narrows an `i32` / `f32` packet to, one impl per RNGD
-/// cast-compaction conversion. No identity impl: a width-preserving cast is not a compaction and
-/// the stage rejects it. See `computing-tensors/cast-engine.md`.
-#[diagnostic::on_unimplemented(
-    message = "cannot apply `cast()` from `{Self}` to `{D}`",
-    label = "unsupported Cast Engine conversion",
-    note = "supported conversions: i32 -> i4/i8/i16 and f32 -> f8e4m3/f8e5m2/bf16; use `.fetch_cast::<...>()` for widening"
-)]
-pub trait CastEngineCast<D: Scalar>: Cast<D> {
-    /// Hardware conversion represented by this scalar pair.
-    const KIND: CastKind;
-}
-
-impl CastEngineCast<i4> for i32 {
-    const KIND: CastKind = CastKind::I32ToI4;
-}
-impl CastEngineCast<i8> for i32 {
-    const KIND: CastKind = CastKind::I32ToI8;
-}
-impl CastEngineCast<i16> for i32 {
-    const KIND: CastKind = CastKind::I32ToI16;
-}
-impl CastEngineCast<f8e4m3> for f32 {
-    const KIND: CastKind = CastKind::F32ToF8E4M3;
-}
-impl CastEngineCast<f8e5m2> for f32 {
-    const KIND: CastKind = CastKind::F32ToF8E5M2;
-}
-impl CastEngineCast<bf16> for f32 {
-    const KIND: CastKind = CastKind::F32ToBf16;
-}
-
 /// The one cast the Commit Adapter folds in on the way to DM: `f32 -> bf16`
-/// (ReLU optionally fused). Anything else narrows in [`CastEngineCast`]; a plain `commit()`
+/// (ReLU optionally fused). Anything else narrows in [`VectorCast`]; a plain `commit()`
 /// performs no type conversion. See `computing-tensors/commit-adapter.md`.
 #[diagnostic::on_unimplemented(
     message = "cannot apply `commit_cast()` from `{Self}` to `{D}`",
     label = "unsupported Commit Adapter conversion",
-    note = "supported conversion: f32 -> bf16; use `.cast::<..., OutPacket>()` for Cast Engine narrowing"
+    note = "supported conversion: f32 -> bf16; use `.vector_cast::<..., OutPacket>()` for Vector Engine narrowing"
 )]
 pub trait CommitCast<D: Scalar>: Cast<D> {
     /// The fused-ReLU form of the same conversion: negatives clamp to zero on the way through.

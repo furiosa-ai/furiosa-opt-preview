@@ -1,6 +1,6 @@
 # Collect Engine
 
-All downstream engines ([Contraction Engine](./contraction-engine/index.md), [Vector Engine](./vector-engine/index.md), [Cast Engine](./cast-engine.md), [Transpose Engine](./transpose-engine.md), and [Commit Engine](../moving-tensors/commit-engine.md)) consume exactly 32-byte *flits*.
+All downstream engines ([Contraction Engine](./contraction-engine/index.md), [Vector Engine](./vector-engine/index.md), [Transpose Engine](./transpose-engine.md), and [Commit Engine](../moving-tensors/commit-engine.md)) consume exactly 32-byte *flits*.
 The Collect Engine normalizes arbitrary-sized packets to one flit in two steps:
 1. **Pad** the input packet up to the next 32-byte boundary.
    Skipped if the packet is already 32-byte aligned.

@@ -102,49 +102,32 @@ It retains the same `Chip`, `Cluster`, and `Slice` dimensions as the SRAM types,
 `Time` is the temporal dimension: it sequences the delivery iterations.
 Unlike the spatial dimensions, `Time` has no hardware-imposed size limit and grows with the amount of data to process.
 `Packet` is an additional spatial dimension that determines how many elements each slice receives per temporal iteration.
+`TuTensor` also carries an execution context `T` and a stage marker `P: Position`.
+`Position` is a marker trait for the stream's current pipeline stage.
+Each engine defines the Position markers for its output stages:
+
+| Engine / entry | Position markers |
+| --- | --- |
+| Pipeline entry | `PositionBegin` |
+| [Fetch Engine](../moving-tensors/fetch-engine.md) | `PositionFetch`, `PositionFetchChipLift`, `PositionFetchClusterLift`, `PositionFetchSliceLift` |
+| [Fetch Adapter](../computing-tensors/fetch-adapter.md) | `PositionFetchMask`, `PositionFetchTableLookup`, `PositionFetchCast`, `PositionFetchZeroPointSub` |
+| [Switch Engine](../computing-tensors/switch-engine.md) | `PositionSwitch` |
+| [Collect Engine](../computing-tensors/collect-engine.md) | `PositionCollect` |
+| [Contraction Engine](../computing-tensors/contraction-engine/index.md) | `PositionContraction` |
+| [Vector Engine](../computing-tensors/vector-engine/index.md) | `PositionVectorCast`, `PositionVectorFinal` |
+| [Transpose Engine](../computing-tensors/transpose-engine.md) | `PositionTranspose` |
+| [Commit Adapter](../computing-tensors/commit-adapter.md) | `PositionCommitTrim`, `PositionCommitCast`, `PositionCommitValidCountPack` |
 
 ```rust
 # #![feature(adt_const_params)]
 # extern crate furiosa_opt_std;
 # use furiosa_opt_std::prelude::*;
-# use std::marker::ConstParamTy;
-# use std::marker::PhantomData;
 axes![N = 4, C = 64, H = 32, W = 32];
-
-/// Pipeline stage.
-/// `Vector` is intentionally absent: the Vector Engine uses a separate typestate
-/// (`VectorBranchTensor` and friends) that tracks branch, ALU, and other Vector-specific state.
-/// `Commit` is intentionally absent: once the Commit Engine writes results back to DM,
-/// the data is at rest and the type becomes `DmTensor`, not `TuTensor`.
-# #[derive(PartialEq, Eq, ConstParamTy)]
-enum Position {
-    Begin,       // After the start of the pipeline
-    Fetch,       // After the Fetch Engine
-    Switch,      // After the Switch Engine
-    Collect,     // After the Collect Engine
-    Contraction, // After the Contraction Engine
-    Reduce,      // After the Reduce Engine
-    Cast,        // After the Cast Engine
-    Transpose,   // After the Transpose Engine
-}
-
-struct TuTensor<
-    'l,                // Lifetime tied to the Tensor Unit context
-    const P: Position,
-    D: Scalar,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    Time: M,
-    Packet: M,
-> {
-    /* ... */
-    #  _marker: PhantomData<&'l (D, Chip, Cluster, Slice, Time, Packet)>,
-}
 
 type T<'l> = TuTensor<
     'l,
-    { Position::Fetch }, // Fetch Engine's output
+    { Tu::Main },
+    PositionFetch,
     bf16,
     m![1],           // Chip: single chip
     m![1],           // Cluster: single cluster

@@ -35,7 +35,9 @@ pub(crate) fn forward(
             .contract_packet::<m![1]>()
             .contract_time::<m![Wp / 8 % 2]>()
             .contract_lane::<m![Wp / 8 % 2], m![Wp % 8]>(LaneMode::Interleaved)
-            .cast::<bf16, m![Wp % 8 # 16]>()
+            .vector_init()
+            .vector_cast::<bf16, m![Wp % 8 # 16]>()
+            .vector_final()
             .commit_trim::<m![Wp % 8]>()
             .commit_view(logits.view_mut().tile::<m![Wp / 8192], 1, m![1 #{!} 19, Wp % 16]>(i));
     }

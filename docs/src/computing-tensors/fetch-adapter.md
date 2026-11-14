@@ -89,7 +89,7 @@ RNGD supports the conversions below and no others: every widening lands in the `
 | `f32` | `bf16` |
 
 In particular the Fetch Adapter has no cast from an 8-bit float to `bf16`, and none from `f32` to an 8-bit float.
-To land an `f8e4m3` stream in `bf16`, decode it through the non-paired [Table Lookup](#table-lookup) table instead; to reach an 8-bit float, narrow with the [Cast Engine](./cast-engine.md) later in the pipeline.
+To land an `f8e4m3` stream in `bf16`, decode it through the non-paired [Table Lookup](#table-lookup) table instead; to reach an 8-bit float, narrow with the [VE cast compaction](./vector-engine/cast-compaction.md) later in the pipeline.
 
 The example below fetches an 8-element `i8` stream and casts it to `i32`.
 The `Time` and `Packet` mapping is unchanged across the call.

@@ -46,7 +46,6 @@ The five transpose stages below are illustrated using the running example from [
 
 `valid_size` is the number of valid elements the Transpose Engine reads per cycle from its 32-byte input bus, and every input flit arrives in `bit-width × valid_size` form, with any remaining bytes of the 32-byte flit treated as padding and discarded by the Unpack stage.
 For 8-bit and 16-bit elements, the engine can select doubled input packing and read 16 valid elements from each flit instead of the base 8. Doubled packing is not supported for 4-bit or 32-bit elements.
-Data reaches the Transpose Engine via `CollectTensor::transpose()` (after `Fetch → [Switch →] Collect → [Cast →] Transpose`) or `VectorFinalTensor::transpose()` (directly from the [Vector Engine](./vector-engine/index.md)).
 The [Contraction Engine](./contraction-engine/index.md) emits `32b × 8` only, while the [Vector Engine](./vector-engine/index.md) and [Fetch Engine](../moving-tensors/fetch-engine.md) emit any combination from the table below.
 
 `in_cols`, `in_rows`, and `out_rows` are fixed by the kernel writer's `OutTime` and `OutPacket` choices.

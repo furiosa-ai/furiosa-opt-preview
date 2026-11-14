@@ -71,8 +71,8 @@ fn contraction_over_b_2048(
         // Reduce the sixteen B chunks assigned to each cluster.
         .vector_init()
         .vector_inter_slice_reduce::<m![A / 128 % 8, 1 # 32], m![C % 8, A % 128]>(InterSliceReduceOpI32::Add)
+        .vector_cast::<i8, m![C / 8 % 8 # 32]>()
         .vector_final()
-        .cast::<i8, m![C / 8 % 8 # 32]>()
         .commit_trim::<m![C / 8 % 8]>()
         .commit_view(out);
 }
@@ -105,8 +105,8 @@ fn add_split_contractions(
         .vector_init()
         .vector_intra_slice_unzip::<I, m![C % 8, A % 128]>()
         .vector_clip_zip(ClipBinaryOpI32::AddFxp)
+        .vector_cast::<i8, m![C / 8 % 8 # 32]>()
         .vector_final()
-        .cast::<i8, m![C / 8 % 8 # 32]>()
         .commit_trim::<m![C / 8 % 8]>()
         .commit_view(out)
 }
@@ -137,8 +137,8 @@ fn reduce_over_cluster(
         .vector_init()
         .vector_intra_slice_unzip::<I, m![C % 4, A % 128]>()
         .vector_clip_zip(ClipBinaryOpI32::AddFxp)
+        .vector_cast::<i8, m![C / 8 % 8 # 32]>()
         .vector_final()
-        .cast::<i8, m![C / 8 % 8 # 32]>()
         .commit_trim::<m![C / 8 % 8]>()
         .commit_view(reduced.view_mut());
 

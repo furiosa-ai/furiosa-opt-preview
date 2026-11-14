@@ -6,8 +6,6 @@ use crate::scalar::MaterializableScalar;
 /// Only i32 and f32 are supported.
 ///
 /// Sealed: i32 and f32 are the only VE scalars, so every impl round-trips its bits.
-/// `MaterializableScalar` is a supertrait so that the VE-generic whole-tensor ops stay callable
-/// under a bare `D: VeScalar` bound.
 pub trait VeScalar: MaterializableScalar + sealed::Sealed {
     /// The 32 bits the Vector Engine holds for `self`.
     fn to_raw_bits(self) -> u32;

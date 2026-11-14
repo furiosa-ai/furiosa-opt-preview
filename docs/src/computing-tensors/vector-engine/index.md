@@ -1,6 +1,6 @@
 # Vector Engine
 
-The Vector Engine performs elementwise computation and reduction.
+The Vector Engine performs elementwise computation, reduction, filtering, and output cast compaction.
 Examples include activations (GELU, SiLU), normalizations (softmax, layer norm), binary operations, and intra- and inter-slice reductions.
 
 The engine accepts only 32-bit types, `i32` and `f32`.
@@ -10,14 +10,16 @@ When that engine is bypassed, the [Fetch Adapter](../fetch-adapter.md#type-casti
 ## Interface
 
 In a single Tensor Unit invocation, the Vector Engine portion is the method chain from `vector_init()` to `vector_final()`.
-The engine has two sub-pieces: the [Intra-Slice Chain](./intra-slice-chain.md) (elementwise / binary / per-slice reduce stages) and the [Inter-Slice Reducer](./inter-slice-reducer.md) (reduces across the 256 slices in a cluster).
-Between `vector_init()` and `vector_final()`, the chain alone, the reducer alone, or both can run.
+The computation stages have two parts: the [Intra-Slice Chain](./intra-slice-chain.md) (elementwise / binary / per-slice reduce stages) and the [Inter-Slice Reducer](./inter-slice-reducer.md) (reduces across the 256 slices in a cluster).
+Between `vector_init()` and `vector_final()`, the chain alone, the reducer alone, or both can run, followed by optional filtering and cast compaction.
 When both run, the order is `IntraFirst` (chain then reducer) or `InterFirst` (reducer then chain).
 
 The intra-slice chain is entered via `vector_intra_slice_tag()`, or `vector_intra_slice_unzip()` when the input carries a 2-way grouping axis to split into two parallel streams (see [Pair Mode](./intra-slice-chain.md#pair-mode)).
 Either entry point fires right after `vector_init()` or on the inter-slice reducer's output.
 The inter-slice reducer is entered via `vector_inter_slice_reduce()`, either right after `vector_init()` or from a [compatible intra-slice stage](./intra-slice-chain.md#transitioning-to-the-inter-slice-reducer).
 For stage-by-stage API coverage, see [Intra-Slice Chain](./intra-slice-chain.md) and [Inter-Slice Reducer](./inter-slice-reducer.md).
+
+For the `vector_cast()` API, see [Cast Compaction](./cast-compaction.md).
 
 The signatures below cover the `vector_init()`-side entry methods only.
 The same method names (`vector_intra_slice_tag`, `vector_inter_slice_reduce`) also exist on chain and reducer tensors for the chain↔reducer transitions; those are documented in the child pages.

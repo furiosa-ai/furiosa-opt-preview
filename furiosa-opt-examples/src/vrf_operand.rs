@@ -155,17 +155,9 @@ pub fn vrf_slice_rename(
     add_operand(device, &input_dm, &operand_vrf).to_hbm(&mut device.tdma)
 }
 
-/// Divides every element by the scale its group of 16 shares.
-///
-/// The operand is COARSER than the stream: `m![N / 16]` steps once per 16 stream elements, so the
-/// four lanes of one `vector_narrow_split` access all land on the same operand cell and the indexer
-/// reads one address. Nothing is reshaped here, unlike the kernels above; the operand names the
-/// stream's partition already and it is the `Element` axis that differs.
-///
-/// One PE at the 64-slice topology, like [`vrf_slice_reshape_64`], so the EDF comparison runs in a
-/// default config.
+/// Divides by one scale per 16 elements using Way4 broadcast reads.
 #[device(chip = 1, pe = 1)]
-pub fn vrf_group_scale(
+pub fn way4_packet_broadcast(
     device: &mut Device,
     input: &HbmTensor<f32, Chip, m![V, N]>,
     scale: &HbmTensor<f32, Chip, m![V, N / 16]>,
@@ -194,4 +186,269 @@ pub fn vrf_group_scale(
         .commit_trim::<m![N % 8]>()
         .commit::<m![N]>()
         .to_hbm(&mut device.tdma)
+}
+
+/// Divides by a separate scale for each element using Way4 consecutive reads.
+#[device(chip = 1, pe = 1)]
+pub fn way4_packet_consecutive(
+    device: &mut Device,
+    input: &HbmTensor<f32, Chip, m![V, N]>,
+    scale: &HbmTensor<f32, Chip, m![V, N]>,
+) -> HbmTensor<f32, Chip, m![V, N]> {
+    let input_dm = input.to_dm::<Cluster1, Slice64, m![N]>(&mut device.tdma);
+    let scale_dm = scale.to_dm::<Cluster1, Slice64, m![N]>(&mut device.tdma);
+
+    let scale_vrf: VrfTensor<f32, Chip, Cluster1, Slice64, m![N]> = device
+        .sub
+        .begin(scale_dm.view())
+        .fetch::<m![N / 8], m![N % 8]>()
+        .collect::<m![N / 8], m![N % 8]>()
+        .to_vrf();
+
+    device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![N / 8], m![N % 8]>()
+        .collect::<m![N / 8], m![N % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_narrow_split::<m![N / 4], m![N % 4]>()
+        .vector_fp_div(&scale_vrf)
+        .vector_widen_concat::<m![N / 8], m![N % 8]>()
+        .vector_final()
+        .commit_trim::<m![N % 8]>()
+        .commit::<m![N]>()
+        .to_hbm(&mut device.tdma)
+}
+
+/// Adds one bias per eight-element packet using Way8 broadcast reads.
+#[device(chip = 1, pe = 1)]
+pub fn way8_packet_broadcast(
+    device: &mut Device,
+    input: &HbmTensor<i32, Chip, m![V, N]>,
+    bias: &HbmTensor<i32, Chip, m![V, N / 8]>,
+) -> HbmTensor<i32, Chip, m![V, N]> {
+    let input_dm = input.to_dm::<Cluster1, Slice64, m![N]>(&mut device.tdma);
+    let bias_dm = bias.to_dm::<Cluster1, Slice64, m![N / 8]>(&mut device.tdma);
+
+    let bias_vrf: VrfTensor<i32, Chip, Cluster1, Slice64, m![N / 8]> = device
+        .sub
+        .begin(bias_dm.view())
+        .fetch::<m![N / 64], m![N / 8 % 8]>()
+        .collect::<m![N / 64], m![N / 8 % 8]>()
+        .to_vrf();
+
+    device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![N / 8], m![N % 8]>()
+        .collect::<m![N / 8], m![N % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_fxp(FxpBinaryOp::AddFxp, &bias_vrf)
+        .vector_final()
+        .commit_trim::<m![N % 8]>()
+        .commit::<m![N]>()
+        .to_hbm(&mut device.tdma)
+}
+
+/// Adds a separate bias to each element using Way8 consecutive reads.
+#[device(chip = 1, pe = 1)]
+pub fn way8_packet_consecutive(
+    device: &mut Device,
+    input: &HbmTensor<i32, Chip, m![V, N]>,
+    bias: &HbmTensor<i32, Chip, m![V, N]>,
+) -> HbmTensor<i32, Chip, m![V, N]> {
+    let input_dm = input.to_dm::<Cluster1, Slice64, m![N]>(&mut device.tdma);
+    let bias_dm = bias.to_dm::<Cluster1, Slice64, m![N]>(&mut device.tdma);
+
+    let bias_vrf: VrfTensor<i32, Chip, Cluster1, Slice64, m![N]> = device
+        .sub
+        .begin(bias_dm.view())
+        .fetch::<m![N / 8], m![N % 8]>()
+        .collect::<m![N / 8], m![N % 8]>()
+        .to_vrf();
+
+    device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![N / 8], m![N % 8]>()
+        .collect::<m![N / 8], m![N % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_fxp(FxpBinaryOp::AddFxp, &bias_vrf)
+        .vector_final()
+        .commit_trim::<m![N % 8]>()
+        .commit::<m![N]>()
+        .to_hbm(&mut device.tdma)
+}
+
+/// Adds one bias per 16 elements, holding its VRF address across two Way8 packets.
+#[device(chip = 1, pe = 1)]
+pub fn way8_packet_broadcast_span(
+    device: &mut Device,
+    input: &HbmTensor<i32, Chip, m![V, N]>,
+    bias: &HbmTensor<i32, Chip, m![V, N / 16]>,
+) -> HbmTensor<i32, Chip, m![V, N]> {
+    let input_dm = input.to_dm::<Cluster1, Slice64, m![N]>(&mut device.tdma);
+    let bias_dm = bias.to_dm::<Cluster1, Slice64, m![N / 16]>(&mut device.tdma);
+
+    let bias_vrf: VrfTensor<i32, Chip, Cluster1, Slice64, m![N / 16]> = device
+        .sub
+        .begin(bias_dm.view())
+        .fetch::<m![N / 128], m![N / 16 % 8]>()
+        .collect::<m![N / 128], m![N / 16 % 8]>()
+        .to_vrf();
+
+    device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![N / 8], m![N % 8]>()
+        .collect::<m![N / 8], m![N % 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_fxp(FxpBinaryOp::AddFxp, &bias_vrf)
+        .vector_final()
+        .commit_trim::<m![N % 8]>()
+        .commit::<m![N]>()
+        .to_hbm(&mut device.tdma)
+}
+
+/// Multi-axis VRF packets with contiguous and broadcast reads in Way8 and Way4.
+pub mod multi_axis {
+    use furiosa_opt_std::prelude::*;
+
+    axes![S = 64, T = 16, A = 2, B = 2, C = 2];
+
+    type Chip = m![1];
+    type Cluster = m![1];
+    type Slice = m![S];
+
+    /// Adds per-element bias through a Way8 read of the `A, B, C` packet.
+    #[device(chip = 1, pe = 1)]
+    pub fn way8_axes_consecutive(
+        device: &mut Device,
+        input: &HbmTensor<i32, Chip, m![S, T, A, B, C]>,
+        bias: &HbmTensor<i32, Chip, m![S, T, A, B, C]>,
+    ) -> HbmTensor<i32, Chip, m![S, T, A, B, C]> {
+        let input_dm = input.to_dm::<Cluster, Slice, m![T, A, B, C]>(&mut device.tdma);
+        let bias_dm = bias.to_dm::<Cluster, Slice, m![T, A, B, C]>(&mut device.tdma);
+
+        let bias_vrf: VrfTensor<i32, Chip, Cluster, Slice, m![T, A, B, C]> = device
+            .sub
+            .begin(bias_dm.view())
+            .fetch::<m![T], m![A, B, C]>()
+            .collect::<m![T], m![A, B, C]>()
+            .to_vrf();
+
+        device
+            .main
+            .begin(input_dm.view())
+            .fetch::<m![T], m![A, B, C]>()
+            .collect::<m![T], m![A, B, C]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_fxp(FxpBinaryOp::AddFxp, &bias_vrf)
+            .vector_final()
+            .commit_trim::<m![A, B, C]>()
+            .commit::<m![T, A, B, C]>()
+            .to_hbm(&mut device.tdma)
+    }
+
+    /// Adds one broadcast bias per Way8 packet.
+    #[device(chip = 1, pe = 1)]
+    pub fn way8_axes_broadcast(
+        device: &mut Device,
+        input: &HbmTensor<i32, Chip, m![S, T, A, B, C]>,
+        bias: &HbmTensor<i32, Chip, m![S, T]>,
+    ) -> HbmTensor<i32, Chip, m![S, T, A, B, C]> {
+        let input_dm = input.to_dm::<Cluster, Slice, m![T, A, B, C]>(&mut device.tdma);
+        let bias_dm = bias.to_dm::<Cluster, Slice, m![T]>(&mut device.tdma);
+
+        let bias_vrf: VrfTensor<i32, Chip, Cluster, Slice, m![T]> = device
+            .sub
+            .begin(bias_dm.view())
+            .fetch::<m![T / 8], m![T % 8]>()
+            .collect::<m![T / 8], m![T % 8]>()
+            .to_vrf();
+
+        device
+            .main
+            .begin(input_dm.view())
+            .fetch::<m![T], m![A, B, C]>()
+            .collect::<m![T], m![A, B, C]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_fxp(FxpBinaryOp::AddFxp, &bias_vrf)
+            .vector_final()
+            .commit_trim::<m![A, B, C]>()
+            .commit::<m![T, A, B, C]>()
+            .to_hbm(&mut device.tdma)
+    }
+
+    /// Divides by per-element scales through Way4 reads of `B, C`, with `A` in time.
+    #[device(chip = 1, pe = 1)]
+    pub fn way4_axes_consecutive(
+        device: &mut Device,
+        input: &HbmTensor<f32, Chip, m![S, T, A, B, C]>,
+        scale: &HbmTensor<f32, Chip, m![S, T, A, B, C]>,
+    ) -> HbmTensor<f32, Chip, m![S, T, A, B, C]> {
+        let input_dm = input.to_dm::<Cluster, Slice, m![T, A, B, C]>(&mut device.tdma);
+        let scale_dm = scale.to_dm::<Cluster, Slice, m![T, A, B, C]>(&mut device.tdma);
+
+        let scale_vrf: VrfTensor<f32, Chip, Cluster, Slice, m![T, A, B, C]> = device
+            .sub
+            .begin(scale_dm.view())
+            .fetch::<m![T], m![A, B, C]>()
+            .collect::<m![T], m![A, B, C]>()
+            .to_vrf();
+
+        device
+            .main
+            .begin(input_dm.view())
+            .fetch::<m![T], m![A, B, C]>()
+            .collect::<m![T], m![A, B, C]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_narrow_split::<m![T, A], m![B, C]>()
+            .vector_fp_div(&scale_vrf)
+            .vector_widen_concat::<m![T], m![A, B, C]>()
+            .vector_final()
+            .commit_trim::<m![A, B, C]>()
+            .commit::<m![T, A, B, C]>()
+            .to_hbm(&mut device.tdma)
+    }
+
+    /// Divides by one broadcast scale per Way4 packet.
+    #[device(chip = 1, pe = 1)]
+    pub fn way4_axes_broadcast(
+        device: &mut Device,
+        input: &HbmTensor<f32, Chip, m![S, T, A, B, C]>,
+        scale: &HbmTensor<f32, Chip, m![S, T, A]>,
+    ) -> HbmTensor<f32, Chip, m![S, T, A, B, C]> {
+        let input_dm = input.to_dm::<Cluster, Slice, m![T, A, B, C]>(&mut device.tdma);
+        let scale_dm = scale.to_dm::<Cluster, Slice, m![T, A]>(&mut device.tdma);
+
+        let scale_vrf: VrfTensor<f32, Chip, Cluster, Slice, m![T, A]> = device
+            .sub
+            .begin(scale_dm.view())
+            .fetch::<m![T / 4], m![T % 4, A]>()
+            .collect::<m![T / 4], m![T % 4, A]>()
+            .to_vrf();
+
+        device
+            .main
+            .begin(input_dm.view())
+            .fetch::<m![T], m![A, B, C]>()
+            .collect::<m![T], m![A, B, C]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_narrow_split::<m![T, A], m![B, C]>()
+            .vector_fp_div(&scale_vrf)
+            .vector_widen_concat::<m![T], m![A, B, C]>()
+            .vector_final()
+            .commit_trim::<m![A, B, C]>()
+            .commit::<m![T, A, B, C]>()
+            .to_hbm(&mut device.tdma)
+    }
 }

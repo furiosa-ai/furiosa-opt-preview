@@ -132,7 +132,6 @@ Off the `collect`, the Fetch Network hands the flits to the register file and no
 Off a `vector_final`, the pass ends at the Vector Engine's own write port, so the value that lands in the register is the one the pass computed: `Element2` flattens the *post-pass* `Time` / `Packet`, which a reduce or a widen may have reshaped along the way.
 
 That is the only way a computed value reaches the VRF, since the [DM-direct](#from-data-memory) store and the collect-position store both read Data Memory.
-Nothing after the Vector Engine can run in the same command, so a store cannot be combined with a cast, a transpose, or a commit.
 
 #### Which context a store occupies
 
@@ -204,7 +203,7 @@ Wide reads (64 bytes) occupy both banks every cycle, so each cache miss blocks t
 
 ## Vector Register File
 
-The VRF is written either from the [Collect Engine](./collect-engine.md) or directly from Data Memory, and read by the [Vector Engine](./vector-engine/index.md).
+The VRF is written from the [Collect Engine](./collect-engine.md), the [Vector Engine](./vector-engine/index.md) output, or directly from Data Memory, and read by the Vector Engine.
 
 ### Interface
 
@@ -213,6 +212,8 @@ A `VrfTensor` is a tensor stored in the VRF:
 ```rust,ignore
 {{#include ../../../furiosa-opt-std/src/tensor/memory/register_file.rs:vrf_tensor_def}}
 ```
+
+`VrfScalar` permits `f32`, `i32`, and `i4` storage; Vector Engine operand reads require `i32` or `f32`.
 
 `Chip` / `Cluster` / `Slice` pass through from the source.
 `Element` holds the per-(slice) layout.
@@ -267,6 +268,10 @@ A store issued from the main context takes `device.sub` as an argument, because 
 `.to_vrf()` returns a fresh tensor; `.to_vrf_view()` writes into an existing one through `view_mut()`.
 Both collect-only and vector-engine stores support `.to_vrf_view()`.
 `VrfTensor::new()` declares uninitialized device storage; write it before reading it.
+
+#### From Vector Engine
+
+After `vector_final()`, `.to_vrf()` and `.to_vrf_view()` store Vector Engine output.
 
 #### From Data Memory
 

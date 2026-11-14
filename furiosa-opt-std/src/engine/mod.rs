@@ -79,26 +79,23 @@
 //!     ├── contract_outer(trf)
 //!     │     →  ContractOuterTensor  ─contract_packet→  ContractPacketTensor
 //!     │     ─contract_time→  ContractTimeTensor  ─contract_lane→  ContractTensor
-//!     ├── cast                     →  CastTensor
 //!     ├── transpose                →  TransposeTensor
 //!     ├── vector_init              →  VectorInitTensor   (handed to `crate::engine::vector`)
 //!     └── commit_trim              →  CommitTrimTensor
 //!
 //! ContractTensor           (PositionContraction)
-//!     ├── cast                     →  CastTensor
 //!     ├── transpose                →  TransposeTensor
 //!     ├── vector_init              →  VectorInitTensor
 //!     └── commit_trim              →  CommitTrimTensor
 //!
-//! VectorFinalTensor        (PositionVectorFinal — produced by `VectorTensor::vector_final`)
-//!     ├── cast                     →  CastTensor
+//! VectorFinalTensor        (PositionVectorFinal — produced by `vector_final`)
 //!     ├── transpose                →  TransposeTensor
 //!     ├── to_vrf                   →  VrfTensor
+//!     ├── to_vrf_view              →  (writes to existing view)
 //!     └── commit_trim              →  CommitTrimTensor
 //!
-//! CastTensor               (PositionCast)
-//!     ├── transpose                →  TransposeTensor
-//!     └── commit_trim              →  CommitTrimTensor
+//! VectorCastTensor         (PositionVectorCast)
+//!     └── vector_final             →  VectorFinalTensor
 //!
 //! TransposeTensor          (PositionTranspose)
 //!     └── commit_trim              →  CommitTrimTensor
@@ -123,7 +120,6 @@
 //! holds, so off a `vector_final` the register takes the pass output, and it takes `device.sub` as an
 //! argument when the stream runs in the main context, whose write goes through that context.
 
-pub mod cast;
 pub mod collect;
 pub mod commit;
 pub mod commit_adapter;
@@ -136,7 +132,6 @@ pub mod vector;
 
 // Re-exports so `use crate::engine::*` (and the prelude) bring engine-facing
 // types into scope.
-pub use cast::*;
 pub use collect::*;
 pub use commit_adapter::{
     CommitCastTensor, CommitTrimTensor, CommitValidCountPackTensor, PositionCommitCast, PositionCommitTrim,
@@ -147,6 +142,7 @@ pub use fetch::*;
 pub use fetch_adapter::*;
 pub use switch::*;
 pub use transpose::*;
+pub use vector::cast::*;
 
 use crate::engine::vector::tensor::PositionVectorFinal;
 use crate::tensor::tu::{Position, PositionBegin};
@@ -217,9 +213,6 @@ pub trait CanApplyContractOuter: Position {}
 
 /// Source positions that can enter the Vector Engine.
 pub trait CanApplyVectorInit: Position {}
-
-/// Source positions that can enter the Cast Engine.
-pub trait CanApplyCast: Position {}
 
 /// Source positions that can enter the Transpose Engine.
 pub trait CanApplyTranspose: Position {}
@@ -310,14 +303,9 @@ impl CanApplyContractOuter for PositionCollect {}
 impl CanApplyVectorInit for PositionCollect {}
 impl CanApplyVectorInit for PositionContraction {}
 
-impl CanApplyCast for PositionCollect {}
-impl CanApplyCast for PositionContraction {}
-impl CanApplyCast for PositionVectorFinal {}
-
 impl CanApplyTranspose for PositionCollect {}
 impl CanApplyTranspose for PositionContraction {}
 impl CanApplyTranspose for PositionVectorFinal {}
-impl CanApplyTranspose for PositionCast {}
 
 // Commit Adapter pipeline (per HW spec):
 //   Main: trim → cast(+ReLU) → commit
@@ -330,7 +318,6 @@ impl CanApplyTranspose for PositionCast {}
 impl CanApplyCommitTrim for PositionCollect {}
 impl CanApplyCommitTrim for PositionContraction {}
 impl CanApplyCommitTrim for PositionVectorFinal {}
-impl CanApplyCommitTrim for PositionCast {}
 impl CanApplyCommitTrim for PositionTranspose {}
 
 impl CanApplyCommitCast for PositionCommitTrim {}

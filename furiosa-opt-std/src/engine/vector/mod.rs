@@ -6,6 +6,7 @@
 
 pub mod alu;
 pub mod branch;
+pub mod cast;
 pub mod layer;
 pub mod op;
 pub mod operand;

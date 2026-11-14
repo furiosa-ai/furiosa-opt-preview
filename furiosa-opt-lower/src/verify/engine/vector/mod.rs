@@ -1,8 +1,10 @@
 //! Vector-engine verifications, mirroring `furiosa-opt-std/src/engine/vector`.
 
+mod cast;
 mod operand;
 mod tensor;
 
+pub use cast::{CastError, CastKind, VectorCastInput, config_vector_cast};
 pub use operand::{UnreadableCause, VrfOperandError, VrfOperandInput, config_vrf_operand};
 pub use tensor::{
     ReduceLabelInput, VectorError, VectorIntraSliceUnzipInput, VectorNarrowSplitInput, VectorNarrowTrimInput,

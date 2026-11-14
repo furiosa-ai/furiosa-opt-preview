@@ -7,9 +7,8 @@ use furiosa_opt_macro::primitive;
 
 use crate::backend::Backend;
 use crate::constraints;
-use crate::engine::vector::scalar::VeScalar;
 use crate::runtime::CurrentBackend;
-use crate::scalar::Scalar;
+use crate::scalar::{Scalar, VrfScalar};
 use crate::tensor::Tensor;
 use crate::tensor::view::{TensorView, TensorViewMut};
 
@@ -62,14 +61,14 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Lane: M, Element: M, B: Backend>
 /// Tensor stored in the vector register file (VRF).
 #[primitive(VrfTensor)]
 #[derive(Debug, Clone)]
-pub struct VrfTensor<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend = CurrentBackend> {
+pub struct VrfTensor<D: VrfScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend = CurrentBackend> {
     pub(crate) inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Element>>>, B>,
     _marker: PhantomData<(D, Chip, Cluster, Slice, Element)>,
 }
 
 // ANCHOR_END: vrf_tensor_def
 
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
+impl<D: VrfScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     VrfTensor<D, Chip, Cluster, Slice, Element, B>
 {
     /// Logical shape (mapping) of this tensor.
@@ -100,7 +99,7 @@ impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     }
 }
 
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
+impl<D: VrfScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     VrfTensor<D, Chip, Cluster, Slice, Element, B>
 {
     /// Restates the operand under a different mapping over the same register, consuming `self`. Its
@@ -171,18 +170,18 @@ impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
 /// Mutable view of a vector register-file tensor.
 #[primitive(VrfTensorViewMut)]
 #[derive(Debug)]
-pub struct VrfTensorViewMut<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend = CurrentBackend> {
+pub struct VrfTensorViewMut<'l, D: VrfScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend = CurrentBackend> {
     pub(crate) inner: TensorViewMut<'l, D, Pair<Chip, Pair<Cluster, Pair<Slice, Element>>>, B>,
 }
 
 /// View of a vector register-file tensor.
 #[primitive(VrfTensorView)]
 #[derive(Debug, Clone)]
-pub struct VrfTensorView<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend = CurrentBackend> {
+pub struct VrfTensorView<'l, D: VrfScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend = CurrentBackend> {
     pub(crate) inner: TensorView<'l, D, Pair<Chip, Pair<Cluster, Pair<Slice, Element>>>, B>,
 }
 
-impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
+impl<'l, D: VrfScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     From<VrfTensorViewMut<'l, D, Chip, Cluster, Slice, Element, B>>
     for VrfTensorView<'l, D, Chip, Cluster, Slice, Element, B>
 {
@@ -193,7 +192,7 @@ impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     }
 }
 
-impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
+impl<'l, D: VrfScalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     VrfTensorView<'l, D, Chip, Cluster, Slice, Element, B>
 {
     /// Logical shape (mapping) of this tensor.

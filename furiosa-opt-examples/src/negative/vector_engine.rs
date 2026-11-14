@@ -120,10 +120,12 @@
 //! ```
 
 use furiosa_opt_std::prelude::*;
+// Bit requirements read best unqualified inside a pattern literal.
+use furiosa_opt_std::prelude::BitReq::{Ignore, One, Zero};
 
 pub use crate::vector_engine::{A, I};
 
-axes![G = 8, D = 8];
+axes![G = 8, D = 8, NP = 256, NA = 4, NT = 8];
 
 type Chip = m![1];
 type Cluster = m![1 # 2];
@@ -223,6 +225,200 @@ pub fn ve_group_pair_over_cache(
         .vector_clip_zip(ClipBinaryOpI32::AddFxp)
         .vector_final()
         .commit_trim::<m![A % 8]>()
+        .commit();
+
+    result.to_hbm(&mut device.tdma)
+}
+
+/// Multi-axis VRF layouts that cannot feed a single 8-element access.
+pub mod multi_axis {
+    use furiosa_opt_std::prelude::*;
+
+    axes![S = 64, T = 16, A = 2, B = 2, C = 2];
+
+    type Chip = m![1];
+    type Cluster = m![1];
+    type Slice = m![S];
+
+    /// Rejects reversed packet axes in an 8-element VRF read.
+    #[device(chip = 1, pe = 1)]
+    pub fn way8_axes_reversed(
+        device: &mut Device,
+        input: &HbmTensor<i32, Chip, m![S, T, A, B, C]>,
+        bias: &HbmTensor<i32, Chip, m![S, T, C, B, A]>,
+    ) -> HbmTensor<i32, Chip, m![S, T, A, B, C]> {
+        let input_dm = input.to_dm::<Cluster, Slice, m![T, A, B, C]>(&mut device.tdma);
+        let bias_dm = bias.to_dm::<Cluster, Slice, m![T, C, B, A]>(&mut device.tdma);
+
+        let bias_vrf: VrfTensor<i32, Chip, Cluster, Slice, m![T, C, B, A]> = device
+            .sub
+            .begin(bias_dm.view())
+            .fetch::<m![T], m![C, B, A]>()
+            .collect::<m![T], m![C, B, A]>()
+            .to_vrf();
+
+        device
+            .main
+            .begin(input_dm.view())
+            .fetch::<m![T], m![A, B, C]>()
+            .collect::<m![T], m![A, B, C]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_fxp(FxpBinaryOp::AddFxp, &bias_vrf)
+            .vector_final()
+            .commit_trim::<m![A, B, C]>()
+            .commit::<m![T, A, B, C]>()
+            .to_hbm(&mut device.tdma)
+    }
+
+    /// Rejects a partial packet broadcast in an 8-element VRF read.
+    #[device(chip = 1, pe = 1)]
+    pub fn way8_axes_partial_broadcast(
+        device: &mut Device,
+        input: &HbmTensor<i32, Chip, m![S, T, A, B, C]>,
+        bias: &HbmTensor<i32, Chip, m![S, T, A, C]>,
+    ) -> HbmTensor<i32, Chip, m![S, T, A, B, C]> {
+        let input_dm = input.to_dm::<Cluster, Slice, m![T, A, B, C]>(&mut device.tdma);
+        let bias_dm = bias.to_dm::<Cluster, Slice, m![T, A, C]>(&mut device.tdma);
+
+        let bias_vrf: VrfTensor<i32, Chip, Cluster, Slice, m![T, A, C]> = device
+            .sub
+            .begin(bias_dm.view())
+            .fetch::<m![T / 2], m![T % 2, A, C]>()
+            .collect::<m![T / 2], m![T % 2, A, C]>()
+            .to_vrf();
+
+        device
+            .main
+            .begin(input_dm.view())
+            .fetch::<m![T], m![A, B, C]>()
+            .collect::<m![T], m![A, B, C]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_fxp(FxpBinaryOp::AddFxp, &bias_vrf)
+            .vector_final()
+            .commit_trim::<m![A, B, C]>()
+            .commit::<m![T, A, B, C]>()
+            .to_hbm(&mut device.tdma)
+    }
+
+    /// Rejects packet lanes split into two runs by an intervening `T` axis.
+    #[device(chip = 1, pe = 1)]
+    pub fn way8_axes_two_runs(
+        device: &mut Device,
+        input: &HbmTensor<i32, Chip, m![S, T, A, B, C]>,
+        bias: &HbmTensor<i32, Chip, m![S, A, T, B, C]>,
+    ) -> HbmTensor<i32, Chip, m![S, T, A, B, C]> {
+        let input_dm = input.to_dm::<Cluster, Slice, m![T, A, B, C]>(&mut device.tdma);
+        let bias_dm = bias.to_dm::<Cluster, Slice, m![A, T, B, C]>(&mut device.tdma);
+
+        let bias_vrf: VrfTensor<i32, Chip, Cluster, Slice, m![A, T, B, C]> = device
+            .sub
+            .begin(bias_dm.view())
+            .fetch::<m![A, T / 2], m![T % 2, B, C]>()
+            .collect::<m![A, T / 2], m![T % 2, B, C]>()
+            .to_vrf();
+
+        device
+            .main
+            .begin(input_dm.view())
+            .fetch::<m![T], m![A, B, C]>()
+            .collect::<m![T], m![A, B, C]>()
+            .vector_init()
+            .vector_intra_slice_tag(TagMode::Zero)
+            .vector_fxp(FxpBinaryOp::AddFxp, &bias_vrf)
+            .vector_final()
+            .commit_trim::<m![A, B, C]>()
+            .commit::<m![T, A, B, C]>()
+            .to_hbm(&mut device.tdma)
+    }
+}
+
+/// Three immediate branches and an RF branch reading the stash, where the RF branch adds a value no
+/// immediate branch declares. The RF branch reads the first immediate register, so a value of its
+/// own takes that register and leaves two for the three immediate branches.
+///
+/// Expected: `has to add what the first immediate branch adds`, pinned by the snapshot. Declaring
+/// that value on the first immediate branch is the fix: the two branches then read one register and
+/// all four stand.
+#[device(chip = 1)]
+pub fn ve_ternary_stash_over_immediate_budget(
+    device: &mut Device,
+    input: &HbmTensor<f32, Chip, m![A]>,
+) -> HbmTensor<f32, Chip, m![A]> {
+    let input_dm = input.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut device.tdma);
+
+    let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![1], m![A % 2]>()
+        .fetch_cast::<f32>()
+        .collect::<m![1], m![A % 2 # 8]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Comparison([
+            Cmp::Equal(0.0),
+            Cmp::Greater(0.0),
+            Cmp::Less(0.0),
+            Cmp::Greater(100.0),
+        ]))
+        .vector_narrow_trim::<m![A % 2 # 4]>()
+        .vector_stash()
+        .vector_fp_ternary(
+            FpTernaryOp::FmaF,
+            Branched::imm(TagGuard::matches([One, Ignore, Ignore, Ignore]), (0.0f32, 7.0f32))
+                .imm(TagGuard::matches([Zero, Zero, One, Ignore]), (-3.0f32, 100.0f32))
+                .imm(TagGuard::matches([Zero, One, Ignore, One]), (5.0f32, 50.0f32))
+                .rf(TagGuard::matches([Zero, One, Ignore, Zero]), (Stash, 1000.0f32)),
+        )
+        .vector_widen_pad::<m![A % 2 # 8]>()
+        .vector_final()
+        .commit_trim::<m![A % 2]>()
+        .commit();
+
+    result.to_hbm(&mut device.tdma)
+}
+
+/// The [`ve_ternary_stash_over_immediate_budget`] layout with a VRF read in place of the stash, so
+/// the rejection is pinned for both ports the rf slot can name.
+#[device(chip = 1)]
+pub fn ve_ternary_vrf_over_immediate_budget(
+    device: &mut Device,
+    input: &HbmTensor<f32, Chip, m![NP, NA, NT]>,
+    scale: &HbmTensor<f32, Chip, m![NP, NT]>,
+) -> HbmTensor<f32, Chip, m![NP, NA, NT]> {
+    let input_dm = input.to_dm::<Cluster, m![NP], m![NA, NT]>(&mut device.tdma);
+    let scale_dm = scale.to_dm::<Cluster, m![NP], m![NT]>(&mut device.tdma);
+
+    let scale_vrf: VrfTensor<f32, Chip, Cluster, m![NP], m![NT]> = device
+        .sub
+        .begin(scale_dm.view())
+        .fetch::<m![1], m![NT]>()
+        .collect::<m![1], m![NT]>()
+        .to_vrf();
+
+    let result: DmTensor<f32, Chip, Cluster, m![NP], m![NA, NT]> = device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![NA], m![NT]>()
+        .collect::<m![NA], m![NT]>()
+        .vector_init()
+        .vector_intra_slice_tag(TagMode::Comparison([
+            Cmp::Equal(0.0),
+            Cmp::Greater(0.0),
+            Cmp::Less(0.0),
+            Cmp::Greater(100.0),
+        ]))
+        .vector_narrow_split::<m![NA, NT / 4], m![NT % 4]>()
+        .vector_fp_ternary(
+            FpTernaryOp::FmaF,
+            Branched::imm(TagGuard::matches([One, Ignore, Ignore, Ignore]), (0.0f32, 7.0f32))
+                .imm(TagGuard::matches([Zero, Zero, One, Ignore]), (-3.0f32, 100.0f32))
+                .imm(TagGuard::matches([Zero, One, Ignore, One]), (5.0f32, 50.0f32))
+                .rf(TagGuard::matches([Zero, One, Ignore, Zero]), (&scale_vrf, 1000.0f32)),
+        )
+        .vector_widen_concat::<m![NA], m![NT]>()
+        .vector_final()
+        .commit_trim::<m![NT]>()
         .commit();
 
     result.to_hbm(&mut device.tdma)

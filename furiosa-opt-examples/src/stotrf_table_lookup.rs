@@ -115,8 +115,8 @@ pub fn stotrf_table_lookup_gemm(
             .vector_narrow_split::<m![Out / 4 % 2], m![Out % 4]>()
             .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &scale_vrf)
             .vector_widen_concat::<m![1], m![Out % 8]>()
+            .vector_cast::<bf16, m![Out % 8 # 16]>()
             .vector_final()
-            .cast::<bf16, m![Out % 8 # 16]>()
             .commit_trim::<m![Out % 8]>()
             .commit_view(
                 out_dm

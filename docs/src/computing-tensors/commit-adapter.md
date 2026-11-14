@@ -47,7 +47,7 @@ The two are fully separate.
 axes![M = 4, K = 2, W = 8, N = 16, J = 64];
 
 fn commit_trim_i8_padding<'l, const T: Tu>(
-    input: CastTensor<'l, T, i8, m![1], m![1], m![1], m![M, K], m![W # 32]>,
+    input: VectorFinalTensor<'l, T, i8, m![1], m![1], m![1], m![M, K], m![W # 32]>,
 ) -> CommitTrimTensor<'l, T, i8, m![1], m![1], m![1], m![M, K], m![W]> {
     // 8 valid i8 out of 32 padded; OutPacket drops the `# 32` padding.
     input.commit_trim::<m![W]>()
@@ -61,14 +61,14 @@ fn commit_trim_f32_non_padding<'l, const T: Tu>(
 }
 
 fn commit_trim_bf16_with_transpose<'l, const T: Tu>(
-    input: CastTensor<'l, T, bf16, m![1], m![1], m![1], m![M, K], m![N]>,
+    input: VectorFinalTensor<'l, T, bf16, m![1], m![1], m![1], m![M, K], m![N]>,
 ) -> CommitTrimTensor<'l, T, bf16, m![1], m![1], m![1], m![M, K], m![N = 8]> {
     // 8 valid bf16 out of 16; OutPacket resizes `N` to 8.
     input.commit_trim::<m![N = 8]>()
 }
 
 fn commit_trim_i4_no_trim<'l, const T: Tu>(
-    input: CastTensor<'l, T, i4, m![1], m![1], m![1], m![M, K], m![J]>,
+    input: VectorFinalTensor<'l, T, i4, m![1], m![1], m![1], m![M, K], m![J]>,
 ) -> CommitTrimTensor<'l, T, i4, m![1], m![1], m![1], m![M, K], m![J]> {
     // No trimming; `OutPacket == Packet`.
     input.commit_trim::<m![J]>()
@@ -76,13 +76,13 @@ fn commit_trim_i4_no_trim<'l, const T: Tu>(
 #
 # fn main() -> Result<(), Error> {
 # let mut device = Device::new(Topology { chips: 1, pes: 8 })?;
-# let a: CastTensor<'_, _, i8, m![1], m![1], m![1], m![M, K], m![W # 32]> = CastTensor::new(&mut device.main, Tensor::zero());
+# let a: VectorFinalTensor<'_, _, i8, m![1], m![1], m![1], m![M, K], m![W # 32]> = VectorFinalTensor::new(&mut device.main, Tensor::zero());
 # let _o = commit_trim_i8_padding(a);
 # let b: ContractTensor<'_, _, f32, m![1], m![1], m![1], m![M, K], m![W]> = ContractTensor::new(&mut device.main, Tensor::zero());
 # let _o = commit_trim_f32_non_padding(b);
-# let c: CastTensor<'_, _, bf16, m![1], m![1], m![1], m![M, K], m![N]> = CastTensor::new(&mut device.main, Tensor::zero());
+# let c: VectorFinalTensor<'_, _, bf16, m![1], m![1], m![1], m![M, K], m![N]> = VectorFinalTensor::new(&mut device.main, Tensor::zero());
 # let _o = commit_trim_bf16_with_transpose(c);
-# let d: CastTensor<'_, _, i4, m![1], m![1], m![1], m![M, K], m![J]> = CastTensor::new(&mut device.main, Tensor::zero());
+# let d: VectorFinalTensor<'_, _, i4, m![1], m![1], m![1], m![M, K], m![J]> = VectorFinalTensor::new(&mut device.main, Tensor::zero());
 # let _o = commit_trim_i4_no_trim(d);
 #
 # Ok(())
@@ -91,15 +91,10 @@ fn commit_trim_i4_no_trim<'l, const T: Tu>(
 
 ## Type Casting
 
-Type casting converts `f32` data to `bf16` format on the commit path, optionally fusing a ReLU activation into the same pass.
-The [Cast Engine](./cast-engine.md) handles most type conversions in the Tensor Unit pipeline.
-Commit Adapter type casting exists for one specific case, running main-context contraction in parallel with sub-context Vector Engine work.
-The Cast Engine sits on top of the Vector Engine and so occupies it during a conversion.
-If the main-context performed its `f32` → `bf16` conversion through the Cast Engine, the Vector Engine would be busy and the sub-context could not run in parallel.
-Routing the conversion through the Commit Adapter instead leaves the Vector Engine free for the sub-context.
-Sub-context itself does not support type casting (consistent with the support matrix above).
+`commit_cast::<bf16>()` converts `f32` to `bf16` on the commit path; `commit_cast_relu::<bf16>()` also applies ReLU.
 
-`commit_cast` and `commit_cast_relu` are separate methods because they are separate hardware conversions, not one conversion with a mode: ReLU has no standalone stage to select at run time, and exists only fused with the narrowing cast.
+The Vector Engine's [`vector_cast()`](./vector-engine/cast-compaction.md) also supports `f32` → `bf16`, but the main and sub contexts share that engine.
+Use `commit_cast` in the main context to convert `f32` to `bf16` while the sub context runs Vector Engine operations.
 
 ```rust,ignore
 {{#include ../../../furiosa-opt-std/src/engine/commit_adapter.rs:commit_cast_impl}}
@@ -136,7 +131,7 @@ Generate Mode fills a DM region with a constant through `DmTensorViewMut::memset
 The fill runs in the sub context and takes a value of the tensor's element type, such as `0` for `i32` or `const { bf16::from_f32(1.0) }` for `bf16`.
 
 It does not fetch from DM and does not consume any upstream Tensor Unit stream.
-The constant `value` and the destination are the only inputs; the rest of the Tensor Unit pipeline (Fetch / Switch / Collect / Contraction / Vector / Cast / Transpose / Commit Adapter stages) is bypassed entirely.
+The constant `value` and the destination are the only inputs; the rest of the Tensor Unit pipeline is bypassed.
 
 Device compilation requires a compile-time constant value and a whole-region view from `view_mut()`.
 Non-constant values and tiled sub-view fills are rejected at translation.

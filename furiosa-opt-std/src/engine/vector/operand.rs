@@ -78,11 +78,17 @@ use crate::engine::vector::stage::markers::Way;
 use crate::engine::vector::stage::state::VeState;
 use crate::engine::vector::stash_slot::{Occupied, Spent, StashState};
 use crate::engine::vector::tensor::VeTensorShape;
+use crate::scalar::VrfScalar;
 use crate::tensor::Tensor;
 use crate::tensor::memory::{VrfTensor, VrfTensorView};
 // Straight from the common IR, not through `branch`, which deliberately does not re-export it: a
 // kernel author reaches a layout only through [`Branched`]. Named here because the builder holds one.
 use furiosa_opt_common_ir::{BranchedOperand, ImmSlot, SlotDefect};
+
+/// Scalar types usable as Vector Engine operands stored in VRF.
+pub trait VrfOperandScalar: VeScalar + VrfScalar {}
+
+impl<D: VeScalar + VrfScalar> VrfOperandScalar for D {}
 
 /// The operand that reads the stash: `vector_fp_binary(op, Stash)`, `vector_fp_ternary(op,
 /// (Stash, c))`. A value read more than once is not a stash -- use a read-many [`VrfTensor`].
@@ -439,14 +445,7 @@ fn fill_rf<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>, A: Port
     }
 }
 
-/// Panics if a fill was refused.
-///
-/// The rules are `BranchedOperand::validate`'s, shared with the ViSA translator and with lowering
-/// so they cannot drift apart; only the reporting is local.
-///
-/// Panicking is a host-side backstop, not the enforcement: a `#[device]` function's body is read as MIR
-/// and never run, so this never fires for a compiled kernel. The translator checks the same rules
-/// against the kernel's span, which is what actually rejects them.
+/// Panics on a host-side slot-layout defect.
 fn assert_fill(filled: Result<(), SlotDefect>) {
     if let Err(defect) = filled {
         panic!("{defect}");
@@ -662,9 +661,34 @@ fn verify_vrf_operand<Element: M, Time: M, Packet: M>() {
     }
 }
 
+/// Checks ternary RF register capacity during kernel emulation.
+#[track_caller]
+pub(super) fn verify_ternary_immediate_budget<D: VeScalar, Mapping: M>(
+    operand: &TernaryBranchedOperand<'_, D, Mapping>,
+) {
+    let Some((_, (_, rf_branch_add_imm))) = operand.rf_slot() else {
+        return;
+    };
+    let regs = operand.reg_slots();
+    if regs.iter().filter(|slot| slot.is_some()).count() < 3 {
+        return;
+    }
+    // Three immediate branches fill every slot, so the first one is filled.
+    let Some((_, (_, first_branch_add_imm))) = regs[0] else {
+        return;
+    };
+    assert!(
+        first_branch_add_imm.to_raw_bits() == rf_branch_add_imm.to_raw_bits(),
+        "with three immediate branches the RF branch has to add what the first immediate branch \
+         adds: the RF branch reads the first immediate register, so a value the first immediate \
+         branch does not declare takes the first immediate register and leaves two registers for \
+         immediate branches"
+    );
+}
+
 /// Prepares a borrowed VRF tensor through [`vrf_view_rf_port`].
 #[track_caller]
-fn vrf_rf_port<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>(
+fn vrf_rf_port<'l, D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>(
     vrf: &'l VrfTensor<D, Chip, Cluster, Slice, Element>,
 ) -> RfPort<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
     vrf_view_rf_port(vrf.view())
@@ -676,7 +700,7 @@ fn vrf_rf_port<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time:
 /// `#[track_caller]` forwards diagnostics only while callers also forward it; a trait default or
 /// `fill_rf` may stop the reported location before the kernel call.
 #[track_caller]
-fn vrf_view_rf_port<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>(
+fn vrf_view_rf_port<'l, D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>(
     vrf: VrfTensorView<'l, D, Chip, Cluster, Slice, Element>,
 ) -> RfPort<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>> {
     verify_vrf_operand::<Element, Time, Packet>();
@@ -686,7 +710,7 @@ fn vrf_view_rf_port<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, 
 }
 
 /// A binary register read, under [`IntoBranchedOperand`]'s rules.
-impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+impl<'l, D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
     PortArg<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>, D>
     for &'l VrfTensor<D, Chip, Cluster, Slice, Element>
 where
@@ -706,7 +730,7 @@ where
 }
 
 /// A binary register read through a view, under [`IntoBranchedOperand`]'s rules.
-impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+impl<'l, D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
     PortArg<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>, D>
     for VrfTensorView<'l, D, Chip, Cluster, Slice, Element>
 where
@@ -807,16 +831,19 @@ impl sealed::Sealed for i32 {}
 impl Plain for i32 {}
 impl sealed::Sealed for f32 {}
 impl Plain for f32 {}
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::Sealed
+impl<D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::Sealed
     for &VrfTensor<D, Chip, Cluster, Slice, Element>
 {
 }
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> Plain for &VrfTensor<D, Chip, Cluster, Slice, Element> {}
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::Sealed
+impl<D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M> Plain
+    for &VrfTensor<D, Chip, Cluster, Slice, Element>
+{
+}
+impl<D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::Sealed
     for VrfTensorView<'_, D, Chip, Cluster, Slice, Element>
 {
 }
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> Plain
+impl<D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M> Plain
     for VrfTensorView<'_, D, Chip, Cluster, Slice, Element>
 {
 }
@@ -833,11 +860,11 @@ impl sealed::SlotSealed for i32 {}
 impl sealed::SlotSealed for f32 {}
 impl sealed::SlotSealed for Stash {}
 impl sealed::SlotSealed for () {}
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::SlotSealed
+impl<D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::SlotSealed
     for &VrfTensor<D, Chip, Cluster, Slice, Element>
 {
 }
-impl<D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::SlotSealed
+impl<D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M> sealed::SlotSealed
     for VrfTensorView<'_, D, Chip, Cluster, Slice, Element>
 {
 }
@@ -940,7 +967,7 @@ impl<'l, Mapping: M> IntoBranchedOperand<'l, f32, Mapping> for f32 {
 
 /// A VRF register drives the rf port, transposed to the op's tensor shape. VRF is read-many, so the
 /// same register may feed several ops.
-impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+impl<'l, D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
     IntoBranchedOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
     for &'l VrfTensor<D, Chip, Cluster, Slice, Element>
 {
@@ -955,7 +982,7 @@ impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet
 }
 
 /// A VRF view drives the rf port, transposed to the op's tensor shape.
-impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+impl<'l, D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
     IntoBranchedOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
     for VrfTensorView<'l, D, Chip, Cluster, Slice, Element>
 {
@@ -1170,7 +1197,7 @@ impl<'l, Mapping: M> IntoGroupOperand<'l, f32, Mapping> for f32 {
 
 /// A VRF register drives the rf port. It is read-many, so both groups may name the same one, and
 /// each group's stream is the pair's own.
-impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+impl<'l, D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
     IntoGroupOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
     for &'l VrfTensor<D, Chip, Cluster, Slice, Element>
 {
@@ -1180,7 +1207,7 @@ impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet
     }
 }
 
-impl<'l, D: VeScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
+impl<'l, D: VrfOperandScalar, Chip: M, Cluster: M, Slice: M, Element: M, Time: M, Packet: M>
     IntoGroupOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
     for VrfTensorView<'l, D, Chip, Cluster, Slice, Element>
 {
@@ -1397,6 +1424,28 @@ mod tests {
         assert!(group1_guard.admits(id::<0b1000>()) && !group1_guard.admits(id::<0>()));
 
         assert!(reg2.is_none() && !has_rf);
+    }
+
+    #[test]
+    fn ternary_rf_addend_sharing_preserves_zero_sign() {
+        for (register_addend, rf_addend, accepted) in [
+            (-0.0, -0.0, true),
+            (0.0, 0.0, true),
+            (-0.0, 0.0, false),
+            (0.0, -0.0, false),
+        ] {
+            let result = std::panic::catch_unwind(|| {
+                let guard = |low, high| TagGuard::matches([low, high, Ignore, Ignore]);
+                let operand: TernaryBranchedOperand<'_, f32, Map> =
+                    Branched::imm(guard(Zero, Zero), (2.0f32, register_addend))
+                        .imm(guard(One, Zero), (3.0f32, 7.0f32))
+                        .imm(guard(Zero, One), (5.0f32, 9.0f32))
+                        .rf(TagGuard::all(), (Stash, rf_addend))
+                        .into_ternary_operand();
+                super::verify_ternary_immediate_budget(&operand);
+            });
+            assert_eq!(result.is_ok(), accepted);
+        }
     }
 
     /// `imm` takes the next immediate, so successive calls fill densely and in call order, leaving no

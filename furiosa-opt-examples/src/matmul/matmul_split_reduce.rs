@@ -37,8 +37,8 @@ fn narrow_split_contractions(
         .vector_init()
         .vector_intra_slice_unzip::<I, m![A / 4 % 16]>()
         .vector_clip_zip(ClipBinaryOpI32::AddFxp)
+        .vector_cast::<i8, m![A % 4 # 8 # 32]>()
         .vector_final()
-        .cast::<i8, m![A % 4 # 8 # 32]>()
         .commit_trim::<m![A % 4 # 8]>()
         .commit()
 }

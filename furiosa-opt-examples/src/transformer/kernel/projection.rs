@@ -32,7 +32,9 @@ pub(crate) fn proj_q(
         .contract_packet::<m![1]>()
         .contract_time::<m![Q % 4]>()
         .contract_lane::<m![Q % 4], m![Q / 4 % 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![Q / 4 % 8 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![Q / 4 % 8 # 16]>()
+        .vector_final()
         .transpose::<m![Q / 4 % 8], m![Q % 4 # 16]>()
         .commit_trim::<m![Q % 4]>()
         .commit();
@@ -76,7 +78,9 @@ fn proj_p(
         .contract_packet::<m![1]>()
         .contract_time::<m![P / 8 % 4]>()
         .contract_lane::<m![P / 8 % 4], m![P % 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![P % 8 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![P % 8 # 16]>()
+        .vector_final()
         .commit_trim::<m![P % 8]>()
         .commit();
 
@@ -141,7 +145,9 @@ pub(crate) fn proj_o(
         .contract_packet::<m![1]>()
         .contract_time::<m![H % 4]>()
         .contract_lane::<m![H % 4], m![H / 4 % 4 # 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![H / 4 % 4 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![H / 4 % 4 # 16]>()
+        .vector_final()
         .transpose::<m![H / 4 % 4], m![H % 4 # 16]>()
         .commit_trim::<m![H % 4]>()
         .commit();

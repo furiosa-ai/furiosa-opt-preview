@@ -24,7 +24,7 @@ pub(crate) fn bf16_to_f32(v: bf16) -> f32 {
     }
 }
 
-/// Narrows `f32` to `bf16` as the Fetch Adapter, Cast Engine and Commit Adapter all do.
+/// Narrows `f32` to `bf16` as the Fetch Adapter, Vector Engine cast compaction and Commit Adapter all do.
 pub(crate) fn f32_to_bf16(v: f32) -> bf16 {
     if v.is_nan() {
         bf16::from_bits(QUIET_NAN_BF16)

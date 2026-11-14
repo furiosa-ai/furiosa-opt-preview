@@ -15,19 +15,23 @@
 //! vector_init()                              → VectorInitTensor
 //!   ├─ vector_intra_slice_tag(TagMode) → VectorBranchTensor           { VeOrder::IntraFirst }
 //!   ├─ vector_intra_slice_unzip(...)         → VectorTensorPair             { VeOrder::IntraFirst }
-//!   └─ vector_inter_slice_reduce(op)         → VectorInterSliceReduceTensor { VeOrder::InterFirst }
+//!   ├─ vector_inter_slice_reduce(op)         → VectorInterSliceReduceTensor { VeOrder::InterFirst }
+//!   └─ vector_cast()                        → VectorCastTensor
 //! ```
 //!
 //! # Exit
 //! `vector_final()` exits the VE pipeline and returns a `VectorFinalTensor`.
-//! From there, `commit`, `cast`, `to_vrf`, or `transpose` are available.
+//! From there, `to_vrf()`, `to_vrf_view()`, `transpose()`, and `commit_trim()` are available.
 //!
-//! # Four Pipeline Paths
+//! # Pipeline Paths
+//! `intra` denotes intra-slice computation; `inter` denotes inter-slice reduction.
+//! Brackets mark stages that may be skipped.
 //! ```text
-//! Path 1 (intra only):     vector_init → vector_intra_slice_tag → [intra stages] → vector_final
-//! Path 2 (intra → inter):  vector_init → vector_intra_slice_tag → [intra stages] → vector_inter_slice_reduce → vector_final
-//! Path 3 (inter only):     vector_init → vector_inter_slice_reduce → vector_final
-//! Path 4 (inter → intra):  vector_init → vector_inter_slice_reduce → vector_intra_slice_tag → [intra stages] → vector_final
+//! intra only:    vector_init → intra         → [filter] → [cast] → vector_final
+//! intra → inter: vector_init → intra → inter → [filter] → [cast] → vector_final
+//! inter only:    vector_init → inter         → [filter] → [cast] → vector_final
+//! inter → intra: vector_init → inter → intra → [filter] → [cast] → vector_final
+//! cast only:     vector_init → cast                             → vector_final
 //! ```
 //!
 //! # Intra-Slice Stage Flow (IntraSliceStage)
@@ -36,8 +40,8 @@
 //! ```
 //!
 //! # Filter
-//! `vector_filter` is available after intra-slice stages and after inter-slice reduce
-//! (when `VeOrder::IntraFirst`). It applies VE-level branch filtering.
+//! `vector_filter()` applies branch filtering after intra-slice computation or inter-slice reduction.
+//! It requires `Way8` mode and the `Standalone` context.
 //!
 //! # VeOrder Tracking
 //! The `const VE_ORDER: VeOrder` parameter tracks which unit was entered first:
@@ -71,9 +75,7 @@ use crate::tensor::tu::{Position, TuTensor};
 /// stream's own partition. Public because those impls are, and their headers spell it out.
 pub type VeTensorShape<Chip, Cluster, Slice, Time, Packet> = m![{ Chip }, { Cluster }, { Slice }, { Time }, { Packet }];
 
-/// After the vector engine (`vector_final`).
-///
-/// Produced by [`vector_tensor::VectorTensor::vector_final`].
+/// Stream position after `vector_final()` closes the Vector Engine pipeline.
 #[derive(Debug)]
 pub struct PositionVectorFinal;
 

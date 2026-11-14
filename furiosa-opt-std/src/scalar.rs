@@ -112,17 +112,8 @@ pub trait ScalarBytes: Scalar {
     fn from_le_bytes(bytes: &[u8]) -> Self;
 }
 
-/// A [`Scalar`] that may be used as a host/HBM/DM tensor element or materialized by the commit,
-/// to-TRF, or transpose paths.
-///
-/// Every real tensor dtype implements this. The zero-point-subtracted
-/// contraction-engine stagings [`i5`]/[`i9`] deliberately do **not**: as a
-/// stream they exist only between `fetch_zero_point_sub` and `contract_outer`,
-/// so the host/HBM/DM carriers, the device-image entry points
-/// ([`from_buf`](crate::tensor::Tensor::from_buf) / [`into_buf`](crate::tensor::Tensor::into_buf)) and
-/// the commit / to-TRF / transpose entry points bound `MaterializableScalar` to make storing or
-/// re-routing an i5/i9 stream a compile error. The to-VRF / Vector / Cast paths exclude them separately via
-/// `VeScalar`. (An i5/i9 may still be a contraction weight resident in the TRF.)
+/// A [`Scalar`] supported by general storage and output APIs.
+/// Excludes contraction intermediates [`i5`]/[`i9`], which may still reside in TRF as weights.
 ///
 /// A real dtype satisfies the bound:
 /// ```
@@ -137,6 +128,20 @@ pub trait ScalarBytes: Scalar {
 /// materialize::<i9>();
 /// ```
 pub trait MaterializableScalar: Scalar {}
+
+/// Scalar types supported by VRF storage: `f32`, `i32`, and [`i4`].
+pub trait VrfScalar: MaterializableScalar + vrf_scalar_sealed::Sealed {}
+
+mod vrf_scalar_sealed {
+    pub trait Sealed {}
+    impl Sealed for f32 {}
+    impl Sealed for i32 {}
+    impl Sealed for super::i4 {}
+}
+
+impl VrfScalar for f32 {}
+impl VrfScalar for i32 {}
+impl VrfScalar for i4 {}
 
 /// A value that can be loaded from HBM and used as a device runtime scalar.
 /// `Storage` fixes its physical HBM representation independently of Rust's source type.

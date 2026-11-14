@@ -72,8 +72,8 @@ pub(crate) fn forward<Cluster: M, Slice: M>(
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_vrf)
         .vector_fp_div(&rms_vrf)
         .vector_widen_concat::<m![H / 8], m![H % 8]>()
+        .vector_cast::<bf16, m![H % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![H % 8 # 16]>()
         .commit_trim::<m![H % 8]>()
         .commit()
 }
@@ -145,8 +145,8 @@ pub(crate) fn forward_q(
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_vrf)
         .vector_fp_div(&rms_vrf)
         .vector_widen_concat::<m![G, D / 8], m![D % 8]>()
+        .vector_cast::<bf16, m![D % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![D % 8 # 16]>()
         .commit_trim::<m![D % 8]>()
         .commit()
 }
@@ -217,8 +217,8 @@ pub(crate) fn forward_k(
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &weight_vrf)
         .vector_fp_div(&rms_vrf)
         .vector_widen_concat::<m![D / 8], m![D % 8]>()
+        .vector_cast::<bf16, m![D % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![D % 8 # 16]>()
         .commit_trim::<m![D % 8]>()
         .commit()
 }

@@ -30,6 +30,16 @@ pub enum GroupId {
     One,
 }
 
+impl GroupId {
+    /// Returns the other group in a pair.
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::Zero => Self::One,
+            Self::One => Self::Zero,
+        }
+    }
+}
+
 impl Display for GroupId {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -314,6 +324,7 @@ impl Display for TagGuard {
 
 /// The rhs slots one VE pass drives: three immediate registers and the register-file port, each
 /// `None` while unused and gated by its own [`TagGuard`].
+/// Immediate registers are filled from `reg0` in order; the rf port is independent.
 ///
 /// Slot order is match priority, not hardware register numbering: an element takes the first filled
 /// slot whose guard it satisfies -- first match, not every match, which the ISA specifies and the
@@ -481,21 +492,21 @@ impl<Reg, Port> BranchedOperand<Reg, Port> {
         [reg0, reg1, reg2, self.rf.as_ref().map(|(guard, _)| guard)]
     }
 
-    /// The first way this layout is ill-formed, or `Ok(())`.
-    ///
-    /// One place for the rules, because three have to apply them and cannot share a way of *reporting*:
-    /// the eDSL builder panics, the ViSA translator reports against the kernel's span, and lowering
-    /// returns an `eyre` error. Each wraps this [`SlotDefect`] in its own idiom.
-    ///
-    /// Checked in slot order, so the defect reported is the earliest a reader would find.
+    /// Reports the first slot-layout defect in slot order.
     pub fn validate(&self) -> Result<(), SlotDefect> {
         let guards = self.slot_guards();
         if guards.iter().all(Option::is_none) {
             return Err(SlotDefect::Empty);
         }
         let mut unconditional = None;
-        for (slot, guard) in Slot::ALL.into_iter().zip(guards) {
+        for (index, (slot, guard)) in Slot::ALL.into_iter().zip(guards).enumerate() {
             let Some(guard) = guard else { continue };
+            if let Slot::Imm(slot) = slot
+                && index > 0
+                && guards[index - 1].is_none()
+            {
+                return Err(SlotDefect::OutOfOrderImmediate { slot });
+            }
             if guard.matches_nothing() {
                 return Err(SlotDefect::DeadGuard { slot: Some(slot) });
             }
@@ -589,6 +600,12 @@ pub enum SlotDefect {
     /// Every immediate register is spoken for; a pass has three.
     #[error("this pass has no immediate register left: it has three, and they are all spoken for")]
     NoFreeImmediate,
+    /// An immediate skips an empty register before it.
+    #[error("immediate slot {slot} skips an empty register; fill immediates from reg0 in order")]
+    OutOfOrderImmediate {
+        /// The immediate slot filled out of order.
+        slot: ImmSlot,
+    },
     /// A slot follows an unconditional one, which already claims every element left over.
     #[error(
         "slot {unconditional} is unconditional, which claims every element the earlier guards left \
@@ -945,10 +962,7 @@ mod tests {
     const REG0: Slot = Slot::Imm(ImmSlot::Reg0);
     const REG1: Slot = Slot::Imm(ImmSlot::Reg1);
 
-    /// One case per [`SlotDefect`] variant, each built the way that defect actually arises, plus the
-    /// shapes that are fine so the rules are not passing by refusing everything. This is the one place
-    /// the rules live -- the eDSL builder, the ViSA translator and lowering all report
-    /// what `validate` decides -- so it is the one place they are pinned.
+    /// Covers every slot-layout defect and valid operand layouts.
     #[test]
     fn reports_each_slot_defect() {
         type Layout = BranchedOperand<i32, i32>;
@@ -960,6 +974,15 @@ mod tests {
 
         // `Empty`: an operand that drives nothing at all.
         assert_eq!(Layout::default().validate(), Err(SlotDefect::Empty));
+
+        assert_eq!(
+            Layout::try_from_slots([None, Some((bit0, 1)), None], None),
+            Err(SlotDefect::OutOfOrderImmediate { slot: ImmSlot::Reg1 })
+        );
+        assert_eq!(
+            Layout::try_from_slots([Some((bit0, 1)), None, Some((bit1, 2))], None),
+            Err(SlotDefect::OutOfOrderImmediate { slot: ImmSlot::Reg2 })
+        );
 
         // `DeadGuard` naming a slot: the slot is filled, it costs a slot, and it can never fire.
         assert_eq!(
@@ -1087,11 +1110,11 @@ mod tests {
     /// One filled slot, as the four named fields a `serde-lite` payload carries.
     fn one_filled_slot() -> serde_lite::Intermediate {
         let mut map = serde_lite::Map::new();
-        map.insert_with_static_key("reg0", serde_lite::Intermediate::None);
         map.insert_with_static_key(
-            "reg1",
+            "reg0",
             serde_lite::Intermediate::Array(vec![unconditional_guard(), 7i64.into()]),
         );
+        map.insert_with_static_key("reg1", serde_lite::Intermediate::None);
         map.insert_with_static_key("reg2", serde_lite::Intermediate::None);
         map.insert_with_static_key("rf", serde_lite::Intermediate::None);
         serde_lite::Intermediate::Map(map)
@@ -1103,7 +1126,7 @@ mod tests {
     #[test]
     fn the_serde_lite_shape_is_the_named_slots() {
         let operand: BranchedOperand<i32, i32> =
-            BranchedOperand::from_slots([None, Some((TagGuard::all(), 7)), None], None);
+            BranchedOperand::from_slots([Some((TagGuard::all(), 7)), None, None], None);
         assert_eq!(
             <BranchedOperand<i32, i32> as serde_lite::Deserialize>::deserialize(&one_filled_slot()).unwrap(),
             operand
@@ -1143,7 +1166,7 @@ mod tests {
             <Operands<i32, i32> as serde_lite::Deserialize>::deserialize(&serde_lite::Intermediate::Map(binary))
                 .unwrap(),
             Operands::Binary(BranchedOperand::from_slots(
-                [None, Some((TagGuard::all(), 7)), None],
+                [Some((TagGuard::all(), 7)), None, None],
                 None
             ))
         );

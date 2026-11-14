@@ -34,8 +34,8 @@ pub fn matmul_4096(
         .contract_lane::<m![A / 2 % 512], m![A % 2 # 8]>(LaneMode::Sequential)
         .vector_init()
         .vector_inter_slice_reduce::<m![A / 1024 % 2, 1 # 128], m![A / 2 % 512]>(InterSliceReduceOpI32::Add)
+        .vector_cast::<i8, m![A % 2 # 32]>()
         .vector_final()
-        .cast::<i8, m![A % 2 # 32]>()
         .commit_trim::<m![A % 2 # 8]>()
         .commit();
 

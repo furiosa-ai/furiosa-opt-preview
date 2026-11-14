@@ -34,7 +34,7 @@
       + [Intra-Slice Reduce](./computing-tensors/vector-engine/intra-slice-reduce.md)
       + [Valid Count Generator](./computing-tensors/vector-engine/vcg.md)
     * [Inter-Slice Reducer](./computing-tensors/vector-engine/inter-slice-reducer.md)
-  + [Cast Engine](./computing-tensors/cast-engine.md)
+    * [Cast Compaction](./computing-tensors/vector-engine/cast-compaction.md)
   + [Transpose Engine](./computing-tensors/transpose-engine.md)
   + [Commit Adapter](./computing-tensors/commit-adapter.md)
 

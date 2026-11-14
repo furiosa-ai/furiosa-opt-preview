@@ -55,8 +55,8 @@ pub fn matmul_cluster_reduce(
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
         .vector_fxp(FxpBinaryOp::MulInt, &rhs_vrf)
+        .vector_cast::<i8, m![A % 8 # 32]>()
         .vector_final()
-        .cast::<i8, m![A % 8 # 32]>()
         .commit_trim::<m![A % 8]>()
         .commit();
 
@@ -107,8 +107,8 @@ fn reduce_over_cluster(
         .vector_intra_slice_unzip::<I, m![C / 8 % 128, C % 8]>()
         .vector_clip_zip(ClipBinaryOpI32::AddFxp)
         // After vector_clip_zip, result is implicitly filtered to Group 1 only
+        .vector_cast::<i8, m![A % 8 # 32]>()
         .vector_final()
-        .cast::<i8, m![A % 8 # 32]>()
         .commit_trim::<m![A % 8]>()
         .commit_view(reduced.view_mut());
 

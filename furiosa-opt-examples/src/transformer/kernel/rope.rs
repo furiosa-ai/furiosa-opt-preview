@@ -121,8 +121,8 @@ pub(crate) fn apply_rope(
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
         .vector_clip(ClipBinaryOpF32::Add, &tsq_vrf)
+        .vector_cast::<bf16, m![D % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![D % 8 # 16]>()
         .commit_trim::<m![D % 8]>()
         .commit();
 
@@ -171,8 +171,8 @@ pub(crate) fn apply_rope(
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
         .vector_clip(ClipBinaryOpF32::Add, &tsk_vrf)
+        .vector_cast::<bf16, m![D % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![D % 8 # 16]>()
         .commit_trim::<m![D % 8]>()
         .commit();
 

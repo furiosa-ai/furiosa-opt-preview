@@ -37,7 +37,9 @@ pub fn dot_product_kernel(
         .contract_packet::<m![1]>()
         .contract_time::<m![1]>()
         .contract_lane::<m![1], m![1 # 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![1 # 16]>() // cast f32 accumulator output back to bf16
+        .vector_init()
+        .vector_cast::<bf16, m![1 # 16]>()
+        .vector_final()
         .commit_trim::<m![1 # 8]>()
         .commit();
 

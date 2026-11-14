@@ -87,8 +87,8 @@ The example does exactly this: `vector_narrow_trim` then `vector_fp_unary(Sigmoi
 
 <a id="transitioning-to-the-inter-slice-reducer"></a>
 
-The chain exits via `vector_final()` (as in the example) or `vector_inter_slice_reduce()` (handing off to the [Inter-Slice Reducer](./inter-slice-reducer.md)).
-Both exits require 8-way, so any active 4-way stage must pass through `Widen` first.
+The chain can transition to the [Inter-Slice Reducer](./inter-slice-reducer.md) via `vector_inter_slice_reduce()`, to [Cast Compaction](./cast-compaction.md) via `vector_cast()`, or finalize the Vector Engine via `vector_final()`.
+These transitions require 8-way, so any active 4-way stage must pass through `Widen` first.
 
 ### Operands
 
@@ -559,8 +559,8 @@ The source `impl` lives on `VectorTensor` for any stage with `CanTransitionTo<Fi
 
 ### Output
 
-The Output stage exits the Vector Engine pipeline.
-The result can continue to the [Cast Engine](../cast-engine.md), [Transpose Engine](../transpose-engine.md), or [Commit Engine](../../moving-tensors/commit-engine.md).
+`vector_final()` closes the Vector Engine pipeline.
+The result can be stored in VRF, or continue to the [Transpose Engine](../transpose-engine.md) or [Commit Engine](../../moving-tensors/commit-engine.md).
 
 ## Reinterpret
 

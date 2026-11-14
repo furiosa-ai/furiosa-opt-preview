@@ -60,8 +60,8 @@ fn qk_scaled(
         .vector_narrow_split::<m![N, G, T / 4 % 2], m![T % 4]>()
         .vector_fp_div(SQRT_HEAD_DIM)
         .vector_widen_concat::<m![N, G], m![T % 8]>()
+        .vector_cast::<bf16, m![T % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![T % 8 # 16]>()
         .commit_trim::<m![T % 8]>()
         .commit();
 
@@ -176,7 +176,9 @@ fn weighted_sum(
         .begin(masked_exp.view())
         .fetch::<m![N, G, T / 8], m![T % 8]>()
         .collect::<m![N, G, T / 8], m![T % 8]>()
-        .cast::<bf16, m![T % 8 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![T % 8 # 16]>()
+        .vector_final()
         .commit_trim::<m![T % 8]>()
         .commit();
     let weight: DmTensor<bf16, Chip, Cluster, SliceQV, m![G, T % 16]> = weight.to_dm(&mut device.tdma);
@@ -206,7 +208,9 @@ fn weighted_sum(
         .contract_packet::<m![1]>()
         .contract_time::<m![G, D / 8]>()
         .contract_lane::<m![G, D / 8], m![D % 8]>(LaneMode::Interleaved)
-        .cast::<bf16, m![D % 8 # 16]>()
+        .vector_init()
+        .vector_cast::<bf16, m![D % 8 # 16]>()
+        .vector_final()
         .commit_trim::<m![D % 8]>()
         .commit();
     let weighted_sum: DmTensor<bf16, Chip, Cluster, m![N, 1 # 32], m![G, D]> = device
@@ -217,8 +221,8 @@ fn weighted_sum(
         .collect::<m![G, D / 8], m![D % 8]>()
         .vector_init()
         .vector_inter_slice_reduce::<m![N, 1 # 32], m![G, D / 8]>(InterSliceReduceOpF32::Add)
+        .vector_cast::<bf16, m![D % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![D % 8 # 16]>()
         .commit_trim::<m![D % 8]>()
         .commit();
 
@@ -348,8 +352,8 @@ pub(crate) fn forward(
         .vector_narrow_split::<m![N, G, D / 4], m![D % 4]>()
         .vector_fp_binary(FpBinaryOp::MulF(FpMulAlu::Mul0), &alpha_vrf)
         .vector_widen_concat::<m![N, G, D / 8], m![D % 8]>()
+        .vector_cast::<bf16, m![D % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![D % 8 # 16]>()
         .commit_trim::<m![D % 8]>()
         .commit();
     let out: DmTensor<bf16, Chip, Cluster, Slice, m![N, G, D]> = device
@@ -361,8 +365,8 @@ pub(crate) fn forward(
         .vector_init()
         .vector_intra_slice_tag(TagMode::Zero)
         .vector_clip(ClipBinaryOpF32::Add, &result_vrf)
+        .vector_cast::<bf16, m![D % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![D % 8 # 16]>()
         .commit_trim::<m![D % 8]>()
         .commit();
 
@@ -391,8 +395,8 @@ pub(crate) fn norm<Slice: M>(
         .vector_narrow_split::<m![N, G, D / 4], m![D % 4]>()
         .vector_fp_div(&sum_vrf)
         .vector_widen_concat::<m![N, G, D / 8], m![D % 8]>()
+        .vector_cast::<bf16, m![D % 8 # 16]>()
         .vector_final()
-        .cast::<bf16, m![D % 8 # 16]>()
         .commit_trim::<m![D % 8]>()
         .commit()
 }

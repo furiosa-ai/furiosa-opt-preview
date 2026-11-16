@@ -41,6 +41,7 @@ pub mod reshape;
 pub mod runtime_dm;
 pub mod runtime_if;
 pub mod runtime_if_scalar;
+pub mod runtime_loop;
 pub mod scalar;
 pub mod scatter_gather;
 pub mod scatter_gather_topology;

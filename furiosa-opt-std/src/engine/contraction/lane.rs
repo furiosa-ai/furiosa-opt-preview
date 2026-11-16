@@ -13,7 +13,7 @@ use crate::tensor::Tensor;
 
 /// Contraction mode for the Lane Folder.
 #[primitive(LaneMode)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaneMode {
     /// Interleaved: outputs data element-by-element across all `Lane`s.
     Interleaved,

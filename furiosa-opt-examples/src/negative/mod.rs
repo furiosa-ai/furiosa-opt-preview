@@ -17,6 +17,7 @@ pub mod dma;
 pub mod fetch_lift;
 pub mod generic_device;
 pub mod memset;
+pub mod runtime_if;
 pub mod runtime_if_scalar;
 pub mod runtime_panic;
 pub mod scalar_cast_diag;

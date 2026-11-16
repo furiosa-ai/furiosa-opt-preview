@@ -2,6 +2,8 @@
 //!
 //! - The compiler's link pass writes the registry and its images in the layout and format
 //!   `furiosa_opt_abi::registry` and `furiosa_opt_abi::image` define; [`entries`] reads it back.
+//! - [`load`] loads an entry's image, or one from elsewhere, such as one a program compiled at run
+//!   time.
 
 mod load;
 pub use furiosa_opt_abi::image::Level;

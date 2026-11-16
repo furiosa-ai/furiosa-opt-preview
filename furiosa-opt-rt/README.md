@@ -13,7 +13,7 @@ async fn run(entry: &registry::Entry) -> Result<()> {
     let mut host = Pinned::zeroed(4096)?;
     device.write([(host.slice(..), buffer.slice_mut(..)?)]).await?;
     // SAFETY: the entry holds the compiler's image of its function.
-    let function = unsafe { registry::load(entry, &device, None) }.await?;
+    let function = unsafe { registry::load(entry.image(), entry.path().to_string(), &device, None) }.await?;
     function.launch([Argument::from(buffer.slice_mut(..)?)])?.await?;
     device.read([(buffer.slice(..)?, host.slice_mut(..))]).await
 }

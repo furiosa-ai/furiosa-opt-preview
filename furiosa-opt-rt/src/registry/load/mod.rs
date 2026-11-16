@@ -1,4 +1,4 @@
-//! Loading an [`Entry`]: argument binding and completion processing of the compiler's images.
+//! Loading a compiler image: argument binding and completion processing of the compiler's images.
 //!
 //! - Implements the bind callback [`Function::load`] takes.
 
@@ -6,16 +6,16 @@ use std::sync::Arc;
 
 use furiosa_opt_abi::image::{Image, Parts, Slot};
 
-use super::Entry;
 use crate::memory::Kind;
 use crate::{Argument, Arguments, Buffer, Device, Error, Function, Result};
 
 mod profile;
 use profile::{Profile, Report};
 
-/// Loads `entry`'s image onto `device` and registers every launch through host completion. A
-/// profiled function's launches report the spans the image names on [`TARGET`](super::TARGET),
-/// in device cycles.
+/// Loads the compiler's `image` onto `device` and registers every launch through host completion.
+/// The image is an [`Entry`](super::Entry)'s or one compiled while the program runs. A profiled
+/// function's launches report the spans the image names on [`TARGET`](super::TARGET), in device
+/// cycles, under `name`.
 ///
 /// # Safety
 /// The image's code must access only its slots, with the modes its inputs and outputs give, as
@@ -24,8 +24,13 @@ use profile::{Profile, Report};
 /// requires: the compiler ends every image with a DRAM drain and an all-cluster rendezvous. Private
 /// stacks must remain inaccessible to callers and their reuse must be ordered by the generated
 /// synchronization.
-pub async unsafe fn load(entry: &Entry, device: &Arc<Device>, profile: Option<super::Profile>) -> Result<Function> {
-    let image = Image::parse(entry.image()).map_err(Error::Invalid)?;
+pub async unsafe fn load(
+    image: &[u8],
+    name: String,
+    device: &Arc<Device>,
+    profile: Option<super::Profile>,
+) -> Result<Function> {
+    let image = Image::parse(image).map_err(Error::Invalid)?;
     if image.topology != device.topology() {
         return Err(Error::Invalid(format!(
             "image topology {:?} differs from device topology {:?}",
@@ -49,15 +54,6 @@ pub async unsafe fn load(entry: &Entry, device: &Arc<Device>, profile: Option<su
     });
     let stacks = [first?, second?];
     let profile = profile.and_then(|profile| {
-        // Spans name the kernel as the driver names its artifact: the path, then any key.
-        let name = match entry.key() {
-            [] => entry.path().to_string(),
-            key => format!(
-                "{}[{}]",
-                entry.path(),
-                key.iter().map(usize::to_string).collect::<Vec<_>>().join(",")
-            ),
-        };
         Profile::new(&image, profile.level, name)
             .inspect_err(|error| (profile.refused)(profile.level, error))
             .ok()?

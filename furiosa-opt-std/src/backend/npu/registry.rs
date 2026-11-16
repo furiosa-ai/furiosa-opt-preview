@@ -31,14 +31,18 @@ pub(super) fn index(path: &'static str, key: &[usize]) -> Result<usize, Error> {
 /// Registry entry `index` on `device`, loaded on first use.
 pub(super) fn function(device: &<Npu as Runtime>::Device, index: usize) -> Result<&rt::Function, Error> {
     device.registry.functions[index].get_or_try_init(|| {
-        // SAFETY: the link pass wrote every entry with the compiler's image of its function.
-        let load = unsafe {
-            rt::registry::load(
-                &rt::registry::entries()[index],
-                &device.device,
-                super::profile::requested(),
-            )
+        let entry = &rt::registry::entries()[index];
+        // Spans name the kernel as the driver names its artifact: the path, then any key.
+        let name = match entry.key() {
+            [] => entry.path().to_string(),
+            key => format!(
+                "{}[{}]",
+                entry.path(),
+                key.iter().map(usize::to_string).collect::<Vec<_>>().join(",")
+            ),
         };
+        // SAFETY: the link pass wrote every entry with the compiler's image of its function.
+        let load = unsafe { rt::registry::load(entry.image(), name, &device.device, super::profile::requested()) };
         Ok(wait(load)?)
     })
 }

@@ -29,7 +29,7 @@ pub enum ArgMode {
 /// Binary arg mode.
 /// ModeXY: op(argX, argY) where 0=mainstream, 1=operand0
 #[primitive(op::BinaryArgMode)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryArgMode {
     /// op(mainstream, mainstream).
     Mode00,
@@ -67,7 +67,7 @@ impl BinaryArgMode {
 
 /// Ternary arg mode.
 /// ModeXYZ: op(argX, argY, argZ) where 0=mainstream, 1=operand0, 2=operand1
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TernaryArgMode {
     /// op(mainstream, operand0, operand1).
     Mode012,

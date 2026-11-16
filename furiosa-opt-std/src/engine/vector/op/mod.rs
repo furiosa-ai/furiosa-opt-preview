@@ -267,7 +267,7 @@ impl FpTernaryOp {
 
 /// Intra-Slice Reduce operations for i32.
 #[primitive(op::IntraSliceReduceOpI32)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntraSliceReduceOpI32 {
     /// Saturating addition reduction.
     AddSat,
@@ -286,7 +286,7 @@ impl IntraSliceReduceOpI32 {
 
 /// Intra-Slice Reduce operations for f32.
 #[primitive(op::IntraSliceReduceOpF32)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntraSliceReduceOpF32 {
     /// Floating-point addition reduction.
     Add,
@@ -309,7 +309,7 @@ impl IntraSliceReduceOpF32 {
 
 /// Inter-slice reduce operations for i32.
 #[primitive(op::InterSliceReduceOpI32)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterSliceReduceOpI32 {
     /// Addition reduction.
     Add,
@@ -323,7 +323,7 @@ pub enum InterSliceReduceOpI32 {
 
 /// Inter-slice reduce operations for f32.
 #[primitive(op::InterSliceReduceOpF32)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterSliceReduceOpF32 {
     /// Floating-point addition reduction.
     Add,
@@ -341,7 +341,7 @@ pub enum InterSliceReduceOpF32 {
 
 /// FpDiv binary operations (user-facing, mode-free).
 #[primitive(op::FpDivBinaryOp)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FpDivBinaryOp {
     /// Floating-point division.
     DivF,

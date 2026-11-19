@@ -21,12 +21,22 @@ impl<T> Buf for T where T: From<Vec<u8>> + Into<Vec<u8>> + Deref<Target = [u8]> 
 /// generic-over-`D` ops address elements by logical index. The element count is byte-aligned (enforced by
 /// [`Self::from_vec`]), so it is recovered from the byte length alone.
 ///
-/// Layout-free: ops take their mapping(s) from type parameters. Reads parallelize via [`Self::par_iter`];
+/// Layout-free: callers supply the mappings for each operation. Reads parallelize via [`Self::par_iter`];
 /// a parallel write partitions the byte image into disjoint chunks ([`Self::par_chunks_mut`]).
 #[derive(Clone, Debug)]
 pub struct BufStorage<D: Scalar, B: crate::storage::Buf> {
     bytes: B,
     _marker: PhantomData<D>,
+}
+
+/// Layouts of a gather or scatter and its per-chip index list.
+struct IndirectLayout<'a> {
+    src: &'a Mapping,
+    dst: &'a Mapping,
+    index: &'a Mapping,
+    indexed_axis: &'a Mapping,
+    domain: &'a Mapping,
+    chip: &'a Mapping,
 }
 
 /// Byte-wise equality over the packed device image: two `BufStorage`s are equal iff their raw bytes
@@ -280,11 +290,27 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
     ) where
         B: Sync,
     {
-        // Structural check (also asserts `Src` is contained in `Dst`); `!allow_broadcast`
-        // rejects a non-padding leftover.
-        let _ = transpose_broadcast::<Src, Dst>(allow_broadcast);
         let src_view = &Src::to_value();
         let dst_view = &Dst::to_value();
+        // Structural check (also asserts `Src` is contained in `Dst`); `!allow_broadcast`
+        // rejects a non-padding leftover.
+        transpose_broadcast(src_view, dst_view, allow_broadcast);
+        self.transpose_values(src, src_view, dst_view, src_offset, dst_offset, src_map, dst_map);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transpose_values(
+        &mut self,
+        src: &BufStorage<D, B>,
+        src_view: &Mapping,
+        dst_view: &Mapping,
+        src_offset: &Index,
+        dst_offset: &Index,
+        src_map: &Mapping,
+        dst_map: &Mapping,
+    ) where
+        B: Sync,
+    {
         // Relayout: sequence the `Src` buffer (memory) against the `Dst` layout (stream)
         // under `Carve`. Each dst buffer position reads one Src element; a broadcast axis (in dst, not Src)
         // gets `memory_stride` 0, so one Src element feeds the whole broadcast run. `Carve` (not `Read`)
@@ -355,10 +381,23 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
         D: MaterializableScalar,
         B: Sync,
     {
-        let src = Src::to_value();
-        let dst = Dst::to_value();
+        self.reduce_values(&Src::to_value(), &Dst::to_value(), reduce_fn, identity, allow_broadcast)
+    }
+
+    fn reduce_values<R: Fn(D, D) -> D + Sync>(
+        &self,
+        src: &Mapping,
+        dst: &Mapping,
+        reduce_fn: R,
+        identity: D,
+        allow_broadcast: bool,
+    ) -> Self
+    where
+        D: MaterializableScalar,
+        B: Sync,
+    {
         // Axes `Dst` adds beyond the reduced source are broadcast; `!allow_broadcast` rejects them.
-        let broadcast = broadcast_axes(&src, &dst);
+        let broadcast = broadcast_axes(src, dst);
         assert!(
             allow_broadcast || broadcast.axes().is_empty(),
             "reduce: Dst adds axes absent from the source; pass allow_broadcast=true for reduce-then-broadcast"
@@ -369,7 +408,7 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
         let inter = dst.carve(&broadcast);
         let reduce_residue = src.carve(&inter);
         let out_size = dst.size();
-        let plan = ReadPlan::new(&src, &dst, &reduce_residue);
+        let plan = ReadPlan::new(src, dst, &reduce_residue);
         // Fold each independent output cell across the rayon pool into a logical `Vec<D>`, then pack the
         // result on `D::STAGING_BITS` via `from_vec`. `with_min_len` holds each job at >= `PAR_MIN_JOB` work
         // (cells x live residue) so small reduces stay one job. A dead (padding) cell has no reads and
@@ -459,7 +498,7 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
                         (Some(l), Some(r)) => Some(Cast::cast(l) * Cast::cast(r)),
                         _ => None,
                     })
-                    .fold(<Acc as num_traits::Zero>::zero(), |acc, prod| acc + prod);
+                    .fold(<Acc as num_traits::Zero>::zero(), std::ops::Add::add);
                 *slot = Cast::cast(acc);
             });
         Self::from_vec(out)
@@ -507,19 +546,41 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
         chip: &Mapping,
         unit: IndexUnit,
     ) {
-        let updates = in_chip_elements(&Src::to_value(), chip);
-        let destination = in_chip_elements(&Dst::to_value(), chip);
-        let domain = Domain::to_value();
-        let indexed_axis = IndexedAxis::to_value();
+        self.scatter_values(
+            dst,
+            index,
+            IndirectLayout {
+                src: &Src::to_value(),
+                dst: &Dst::to_value(),
+                index: &Idx::to_value(),
+                indexed_axis: &IndexedAxis::to_value(),
+                domain: &Domain::to_value(),
+                chip,
+            },
+            unit,
+        );
+    }
+
+    fn scatter_values(
+        &self,
+        dst: &mut BufStorage<D, B>,
+        index: &BufStorage<i32, B>,
+        layout: IndirectLayout<'_>,
+        unit: IndexUnit,
+    ) {
+        let updates = in_chip_elements(layout.src, layout.chip);
+        let destination = in_chip_elements(layout.dst, layout.chip);
+        let domain = layout.domain;
+        let indexed_axis = layout.indexed_axis;
 
         let domain_size = domain.iter_positions().flatten().count();
         let indexed_axis_size = indexed_axis.iter_positions().flatten().count();
         let index_positions =
-            axis_positions_by_chip(index, &Idx::to_value(), chip, unit, indexed_axis_size, domain_size);
+            axis_positions_by_chip(index, layout.index, layout.chip, unit, indexed_axis_size, domain_size);
 
         let (update_offsets, destination_offsets) = {
             let payload = destination
-                .remove_axis(&indexed_axis)
+                .remove_axis(indexed_axis)
                 .unwrap_or_else(|error| {
                     panic!("scatter destination {destination} does not hold {indexed_axis} as one region: {error}")
                 })
@@ -527,13 +588,13 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
             let update_offsets = live_offsets_by(
                 &updates,
                 &payload,
-                &domain,
+                domain,
                 "scatter: updates factor into payload x domain",
             );
             let destination_offsets = live_offsets_by(
                 &destination,
                 &payload,
-                &indexed_axis,
+                indexed_axis,
                 "scatter: destination factors into payload x indexed axis",
             );
             (update_offsets, destination_offsets)
@@ -571,19 +632,47 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
         D: MaterializableScalar,
         B: Sync,
     {
-        let table = in_chip_elements(&Src::to_value(), chip);
-        let output = in_chip_elements(&Dst::to_value(), chip);
-        let indexed_axis = IndexedAxis::to_value();
+        self.gather_values(
+            dst,
+            index,
+            IndirectLayout {
+                src: &Src::to_value(),
+                dst: &Dst::to_value(),
+                index: &Idx::to_value(),
+                indexed_axis: &IndexedAxis::to_value(),
+                domain,
+                chip,
+            },
+            prefix,
+            unit,
+        );
+    }
+
+    fn gather_values(
+        &self,
+        dst: &mut BufStorage<D, B>,
+        index: &BufStorage<i32, B>,
+        layout: IndirectLayout<'_>,
+        prefix: Option<usize>,
+        unit: IndexUnit,
+    ) where
+        D: MaterializableScalar,
+        B: Sync,
+    {
+        let table = in_chip_elements(layout.src, layout.chip);
+        let output = in_chip_elements(layout.dst, layout.chip);
+        let indexed_axis = layout.indexed_axis;
+        let domain = layout.domain;
 
         let domain_size = domain.iter_positions().flatten().count();
         let indexed_axis_size = indexed_axis.iter_positions().flatten().count();
         // DMA may execute past the prefix, so every index value must be valid.
         let index_positions =
-            axis_positions_by_chip(index, &Idx::to_value(), chip, unit, indexed_axis_size, domain_size);
+            axis_positions_by_chip(index, layout.index, layout.chip, unit, indexed_axis_size, domain_size);
 
         let source_by_output = {
             let payload = table
-                .remove_axis(&indexed_axis)
+                .remove_axis(indexed_axis)
                 .unwrap_or_else(|error| {
                     panic!("gather table {table} does not hold {indexed_axis} as one region: {error}")
                 })
@@ -591,7 +680,7 @@ impl<D: Scalar, B: Buf> BufStorage<D, B> {
             let table_offsets = live_offsets_by(
                 &table,
                 &payload,
-                &indexed_axis,
+                indexed_axis,
                 "gather: table factors into payload x indexed axis",
             );
             let output_offsets = live_offsets_by(

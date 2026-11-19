@@ -20,6 +20,42 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - `to_vrf` and `to_vrf_view` support `i4` storage alongside `f32` and `i32`, including from
   finalized Vector Engine output. VRF operand reads still accept only `f32` and `i32`.
+- `#[bound(MAX)]` allows a device `for` loop to end at a value known only at run time, such as
+  `0..count`; on the device, the body runs `min(count, MAX)` times. A compile-time end must equal
+  `MAX`. On the CPU backend, the loop panics once its index reaches `MAX`.
+- `Device::per_cluster(args, |ctx, locals| ..)` runs scalar scratchpad computations in every cluster
+  on every chip in the device, including argument padding. Pass `&SpmTensor` for local reads and
+  `&mut SpmTensor` for local reads and writes. The body is an `Fn` closure, and the scalars it
+  returns are collected into the `SpmScalar`s the destination type names. Scalar access uses PE 0,
+  and DMA and Tensor Unit operations stay outside the closure. See [Per Cluster](docs/src/computing-tensors/per-cluster.md).
+- `SpmTensor::get(index)` returns `SpmScalar<D, Chip, Cluster>`, with one value read from the same
+  element position in each chip's active clusters. Pass `&SpmScalar` to `per_cluster` to receive
+  the current cluster's value as `D`; `uniform_value()` returns `D` directly when both `Chip` and
+  `Cluster` mappings broadcast. `SpmScalar::uniform(value)` holds one host value at every chip and
+  cluster. A mutable argument or a returned scalar whose `Chip` or `Cluster` mapping broadcasts must
+  receive the same value at every location that mapping covers; the caller guarantees this.
+- `SpmTensor::zero()` initializes PE 0 scratchpad data. Local `get` and `set` accept `i32`, `u32`,
+  `i64`, `u64`, and `usize` indices. `len()` counts element positions including padding; indices
+  must be non-negative and below `len()`. Invalid constant indices fail device compilation, and
+  the host checks runtime indices; device kernels must guard runtime indices themselves.
+  `SpmTensor::from_const` initializes a source-defined array on the host only.
+- `SpmTensor::reshape` consumes the tensor and reuses its allocation under another mapping.
+  It is unsafe: the old and new mappings must preserve each dimension's size and physical element
+  order. Use a DMA conversion when the change requires moving data.
+- Direct Tensor DMA supports HBM to SPM, SPM to HBM, and SPM to SPM copies and redistribution
+  through `to_spm` and `to_hbm`. `SpmTensor::view()` and `view_mut()` provide borrowed DMA regions.
+  Borrowed regions also add `HbmTensorView::to_hbm`, `SpmTensorView::{to_dm,to_dm_view}`, and
+  `DmTensorView::{to_hbm,to_dm,to_spm_view}`. SPM view `tile` and `pe_tile` currently run on the
+  host only; device compilation is not yet supported.
+- `Device::num_chip()` and `num_cluster()` report the opened device's chip count and number of
+  clusters per chip. `per_cluster` uses these counts for its host iteration bounds.
+- `per_cluster` bodies use the same graph lowering as the enclosing device function and can
+  write multiple SPM tensors. Each scalar holds one element on PE 0 per active chip and cluster.
+  Runtime element indices and `min`/`max` are supported; `for`
+  loops need a zero start and a positive compile-time end. Branch conditions must be uniform
+  across chips and clusters when their arms execute statements; selecting between existing scalar
+  values can vary per chip and cluster. Runtime `panic!` and `assert!` are not yet supported,
+  including the assertion emitted by `clamp`.
 
 ## [v0.10.0]
 

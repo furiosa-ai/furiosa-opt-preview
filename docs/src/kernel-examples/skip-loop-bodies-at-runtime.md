@@ -2,6 +2,7 @@
 
 A kernel can use a runtime scalar to execute only the useful part of a statically bounded workload.
 The host stores the value in `HbmScalar<T>`, the kernel loads it into SPM with `to_spm`, and a normal `if` guards the operations that may be skipped.
+Alternatively, `#[bound(MAX)]` lets a loop end at the runtime value directly.
 The tensor shapes and the loop's maximum trip count remain compile-time constants.
 
 This pattern fits MoE expert blocks, variable-length batches, and other kernels with a known maximum amount of work and a runtime valid count.
@@ -102,31 +103,31 @@ Inside the kernel, `to_spm(&mut device.tdma)` stages the value into an SPM scala
 Use `bool` for a direct on/off guard and `usize` for loop bounds and tensor indices.
 The current compiler accepts `usize` runtime scalars only for a 64-bit Rust frontend target and stores them as unsigned 64-bit values.
 
-## Use `if`, Not a Runtime Loop Bound
+## Use `if` Inside a Static Loop
 
-Runtime `if` statements are supported, including statement blocks that return no value.
-General `break` statements and runtime loop bounds are not supported in device functions.
-Write a static maximum loop with a runtime guard:
+Runtime `if` statements are supported, including statement blocks that return no value. Write the
+loop over the static maximum and guard its body:
 
 ```rust
 # struct Expert;
 # impl Expert { const SIZE: usize = 4; }
 # fn run_expert(_: usize) {}
-# let active_experts = 2;
+# fn run_experts(active_experts: usize) {
 for expert in 0..Expert::SIZE {
     if expert < active_experts {
         run_expert(expert);
     }
 }
+# }
 ```
 
-The following forms are not supported:
+The loop runs the static maximum number of iterations. When the condition is false, the guarded
+Tensor Unit or DMA operations do not run, but evaluating the guard and advancing the loop still
+cost time.
+
+General `break` statements are not supported in device functions:
 
 ```text
-for expert in 0..active_experts {
-    run_expert(expert);
-}
-
 for expert in 0..Expert::SIZE {
     if expert >= active_experts {
         break;
@@ -135,8 +136,46 @@ for expert in 0..Expert::SIZE {
 }
 ```
 
-The supported form schedules the static maximum number of iterations.
-The guarded Tensor Unit or DMA operations do not run when the condition is false, but evaluating the guard and advancing the outer loop still have a runtime cost.
+## Bound a Runtime Loop End
+
+Instead of writing the guard, a loop can end at the runtime value directly when
+`#[bound(MAX)]` declares a compile-time maximum of that end:
+
+```rust
+# #![feature(proc_macro_hygiene, register_tool, stmt_expr_attributes)]
+# #![register_tool(furiosa_opt)]
+# extern crate furiosa_opt_std;
+# extern crate tokio;
+# use furiosa_opt_std::prelude::*;
+# axes![Expert = 4];
+# fn run_expert(_: usize) {}
+# #[device]
+# fn example(device: &mut Device, active_experts: &HbmScalar<usize>) {
+#     let active_experts = active_experts.to_spm(&mut device.tdma);
+#[bound(Expert::SIZE)]
+for expert in 0..active_experts {
+    run_expert(expert);
+}
+# }
+# #[tokio::main]
+# async fn main() -> Result<(), Error> {
+#     let mut device = Device::new(example.topology())?;
+#     let active_experts = HbmScalar::from_host(2usize, &mut device.pdma).await?;
+#     launch(example, (&mut device, &active_experts)).await?;
+#
+#     Ok(())
+# }
+```
+
+On the device, this compiles to the guarded loop above: `MAX` iterations with the body run only
+while the index is below the end, so choose the smallest `MAX` that every end the kernel produces
+stays within. Keep the end at or below `MAX`: above it, the device runs the body only `MAX` times,
+and the CPU backend panics once the index reaches `MAX`.
+
+`MAX` is a `usize` constant expression of at least 1 and may use generic parameters, such as
+`#[bound(Tile::SIZE)]` in a helper generic over `Tile`. It must fit the loop index type, so an
+`i32` loop takes at most `i32::MAX`. If the end is known at compile time, it must equal `MAX`, and the
+loop runs exactly that many times.
 
 ## Unroll a Small Maximum
 

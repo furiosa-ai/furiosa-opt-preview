@@ -12,13 +12,57 @@ pub fn tile_simple(
     input: HbmTensorView<'_, i8, m![1], m![A, B]>,
 ) -> HbmTensor<i8, m![1], m![B, A]> {
     let mut output = HbmTensor::<i8, m![1], m![B, A]>::new();
-    for b in 0..32 {
+    for b in 0..32u32 {
         // TODO: replace with <m![B]>::SIZE
         let input_slice = input.tile::<m![B], 1, m![A, 1 # 32]>(b);
         let output_slice = output.view_mut().tile::<m![B], 1, m![1 #{!} 32, A]>(b);
         input_slice.to_hbm_view(&mut device.tdma, output_slice);
     }
     output
+}
+
+/// Copies a column selected by a runtime `u32` index.
+#[device(chip = 1)]
+pub fn tile_runtime_u32(
+    device: &mut Device,
+    input: HbmTensorView<'_, i8, m![1], m![A, B]>,
+    index: &HbmScalar<u32>,
+) -> HbmTensor<i8, m![1], m![A]> {
+    let index = index.to_spm(&mut device.tdma);
+    input.tile::<m![B], 1, m![A, 1 # 32]>(index).to_hbm(&mut device.tdma)
+}
+
+/// Copies a column selected by a runtime `i32` index.
+#[device(chip = 1)]
+pub fn tile_runtime_i32(
+    device: &mut Device,
+    input: HbmTensorView<'_, i8, m![1], m![A, B]>,
+    index: &HbmScalar<i32>,
+) -> HbmTensor<i8, m![1], m![A]> {
+    let index = index.to_spm(&mut device.tdma);
+    input.tile::<m![B], 1, m![A, 1 # 32]>(index).to_hbm(&mut device.tdma)
+}
+
+/// Copies a column selected by a runtime `u64` index.
+#[device(chip = 1)]
+pub fn tile_runtime_u64(
+    device: &mut Device,
+    input: HbmTensorView<'_, i8, m![1], m![A, B]>,
+    index: &HbmScalar<u64>,
+) -> HbmTensor<i8, m![1], m![A]> {
+    let index = index.to_spm(&mut device.tdma);
+    input.tile::<m![B], 1, m![A, 1 # 32]>(index).to_hbm(&mut device.tdma)
+}
+
+/// Copies a column selected by a runtime `i64` index.
+#[device(chip = 1)]
+pub fn tile_runtime_i64(
+    device: &mut Device,
+    input: HbmTensorView<'_, i8, m![1], m![A, B]>,
+    index: &HbmScalar<i64>,
+) -> HbmTensor<i8, m![1], m![A]> {
+    let index = index.to_spm(&mut device.tdma);
+    input.tile::<m![B], 1, m![A, 1 # 32]>(index).to_hbm(&mut device.tdma)
 }
 
 /// Exercises computed tile offsets.

@@ -167,8 +167,8 @@ impl<
         // pre_reduce-shaped broadcast this stage used to build.
         //
         let contraction = LazyContraction {
-            lhs: self.inner.map(|v| -> Out<D> { v.cast() }).inner,
-            rhs: trf_tensor.inner.map(|v| -> Out<D> { v.cast() }).inner,
+            lhs: self.inner.map(Cast::<Out<D>>::cast).inner,
+            rhs: trf_tensor.inner.map(Cast::<Out<D>>::cast).inner,
             lhs_map,
             rhs_map,
             pre_reduce,

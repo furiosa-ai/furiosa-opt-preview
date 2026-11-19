@@ -255,8 +255,9 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     #[primitive(DmTensorView::chip_tile)]
     pub fn chip_tile<Index: M, const LEN: usize, Chip2: M>(
         &self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> DmTensorView<'l, D, Chip2, Cluster, Slice, Element, B> {
+        let start = start.into_usize();
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster, Slice, Slice>();
         assert_tile::<Index, Chip, Chip2, LEN>(PaddingKind::Top);
         let inner = self.inner.retile::<Index, _>(start, LEN);
@@ -285,8 +286,9 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     #[primitive(DmTensorView::cluster_tile)]
     pub fn cluster_tile<Index: M, const LEN: usize, Cluster2: M>(
         &self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> DmTensorView<'l, D, Chip, Cluster2, Slice, Element, B> {
+        let start = start.into_usize();
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster2, Slice, Slice>();
         assert_tile::<Index, Cluster, Cluster2, LEN>(PaddingKind::Top);
         let inner = self.inner.retile::<Index, _>(start, LEN);
@@ -306,8 +308,9 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     #[primitive(DmTensorView::slice_tile)]
     pub fn slice_tile<Index: M, const LEN: usize, Slice2: M>(
         &self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> DmTensorView<'l, D, Chip, Cluster, Slice2, Element, B> {
+        let start = start.into_usize();
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
         assert_tile::<Index, Slice, Slice2, LEN>(PaddingKind::Top);
         let inner = self.inner.retile::<Index, _>(start, LEN);
@@ -318,8 +321,9 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     #[primitive(DmTensorView::tile)]
     pub fn tile<Index: M, const LEN: usize, Element2: M>(
         &self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> DmTensorView<'l, D, Chip, Cluster, Slice, Element2, B> {
+        let start = start.into_usize();
         assert_tile::<Index, Element, Element2, LEN>(PaddingKind::Top);
         let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorView { inner }
@@ -408,8 +412,9 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     #[primitive(DmTensorViewMut::chip_tile)]
     pub fn chip_tile<Index: M, const LEN: usize, Chip2: M>(
         self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> DmTensorViewMut<'l, D, Chip2, Cluster, Slice, Element, B> {
+        let start = start.into_usize();
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip2, Cluster, Cluster, Slice, Slice>();
         assert_tile::<Index, Chip, Chip2, LEN>(PaddingKind::Bottom);
         let inner = self.inner.retile::<Index, _>(start, LEN);
@@ -429,8 +434,9 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     #[primitive(DmTensorViewMut::cluster_tile)]
     pub fn cluster_tile<Index: M, const LEN: usize, Cluster2: M>(
         self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> DmTensorViewMut<'l, D, Chip, Cluster2, Slice, Element, B> {
+        let start = start.into_usize();
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster2, Slice, Slice>();
         assert_tile::<Index, Cluster, Cluster2, LEN>(PaddingKind::Bottom);
         let inner = self.inner.retile::<Index, _>(start, LEN);
@@ -450,8 +456,9 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     #[primitive(DmTensorViewMut::slice_tile)]
     pub fn slice_tile<Index: M, const LEN: usize, Slice2: M>(
         self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> DmTensorViewMut<'l, D, Chip, Cluster, Slice2, Element, B> {
+        let start = start.into_usize();
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
         assert_tile::<Index, Slice, Slice2, LEN>(PaddingKind::Bottom);
         let inner = self.inner.retile::<Index, _>(start, LEN);
@@ -462,8 +469,9 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     #[primitive(DmTensorViewMut::tile)]
     pub fn tile<Index: M, const LEN: usize, Element2: M>(
         self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> DmTensorViewMut<'l, D, Chip, Cluster, Slice, Element2, B> {
+        let start = start.into_usize();
         assert_tile::<Index, Element, Element2, LEN>(PaddingKind::Bottom);
         let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorViewMut { inner }

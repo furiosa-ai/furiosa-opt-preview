@@ -20,7 +20,7 @@
 //! ```
 //!
 //! # Exit
-//! `vector_final()` exits the VE pipeline and returns a `VectorFinalTensor`.
+//! `vector_final()` exits the VE pipeline from any `Way8` stage and returns a `VectorFinalTensor`.
 //! From there, `to_vrf()`, `to_vrf_view()`, `transpose()`, and `commit_trim()` are available.
 //!
 //! # Pipeline Paths
@@ -38,6 +38,8 @@
 //! ```text
 //! Tag → Logic → Fxp → FxpToFp → Narrow(Way4) → Fp → IntraSliceReduce → FpDiv → Widen(Way8) → FpToFxp → Clip
 //! ```
+//! Each stage's `Stage::Way` is the packet width of the stream it emits: Narrow, Fp, IntraSliceReduce
+//! and FpDiv emit `Way4`, and Widen emits `Way8` again.
 //!
 //! # Filter
 //! `vector_filter()` applies branch filtering after intra-slice computation or inter-slice reduction.

@@ -10,13 +10,19 @@
 //!   - `vector_init()`, then `vector_intra_slice_tag(TagMode)` → intra-slice (single stream)
 //!   - `vector_init()`, then `vector_intra_slice_unzip(...)` → intra-slice (two-group)
 //!   - `vector_init()`, then `vector_inter_slice_reduce(...)` → inter-slice reduce
-//! - Exit: `vector_final()` → `VectorFinalTensor` → commit/transpose
+//! - Exit: `vector_final()` from a `Way8` stage → `VectorFinalTensor` → commit/transpose
 //!
 //! # VeOrder (VE_ORDER)
 //! Tracks which unit was entered first. Set once, never changes after.
 //! - `IntraFirst` after `vector_intra_slice_tag` / `vector_intra_slice_unzip`
 //! - `InterFirst` after `vector_inter_slice_reduce` from `VectorInitTensor`
 //! - Preserved through all subsequent operations
+//!
+//! # Way
+//! `W` is the packet width of the stream, which the current stage `S` emitted (`Stage::Way`). The
+//! struct bounds `S: Stage<Way = W>`, so the two never disagree. An impl block names the width it
+//! receives (`…, Way8>` with `S: stage::Stage<Way = Way8>`), and a return type names the width it
+//! emits, such as `VectorWidenTensor<…, Way8>` after a widen.
 
 use std::marker::PhantomData;
 
@@ -55,7 +61,7 @@ use crate::engine::vector::scalar::VeScalar;
 use crate::engine::vector::stage::markers as stage;
 use crate::engine::vector::stage::markers::CanTransitionTo;
 use crate::engine::vector::stage::markers::VeOrder;
-use crate::engine::vector::stage::markers::Way::{self, Way4, Way8};
+use crate::engine::vector::stage::markers::{Way, Way4, Way8};
 use crate::engine::vector::stage::state::VeState;
 use crate::engine::vector::stash_slot::{Fresh, Occupied, StashState};
 use crate::engine::vector::tensor::verify::{
@@ -105,7 +111,7 @@ impl<'l, const T: Tu, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packe
 /// `VectorTensor` and `VectorTensorPair` groups.
 #[derive(Debug)]
 pub struct VeTensorData<
-    S: stage::Stage,
+    S: stage::Stage<Way = W>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -115,7 +121,7 @@ pub struct VeTensorData<
     Stash: StashState,
     const VE_ORDER: VeOrder,
     FS: stage::VeTensorContext = stage::Standalone,
-    const W: Way = { Way8 },
+    W: Way = <S as stage::Stage>::Way,
 > {
     pub(crate) inner: Tensor<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
     pub(crate) tag: Tensor<u8, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
@@ -145,7 +151,7 @@ pub struct VeTensorData<
 pub struct VectorTensor<
     'l,
     const T: Tu,
-    S: stage::Stage,
+    S: stage::Stage<Way = W>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -155,7 +161,7 @@ pub struct VectorTensor<
     Stash: StashState,
     const VE_ORDER: VeOrder,
     FS: stage::VeTensorContext = stage::Standalone,
-    const W: Way = { Way8 },
+    W: Way = <S as stage::Stage>::Way,
 > {
     pub(crate) device: &'l mut TuContext<{ T }>,
     pub(crate) data: VeTensorData<S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>,
@@ -166,7 +172,7 @@ pub struct VectorTensor<
 // ============================================================================
 
 impl<
-    S: stage::Stage,
+    S: stage::Stage<Way = W>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -175,7 +181,7 @@ impl<
     Packet: M,
     Stash: StashState,
     FS: stage::VeTensorContext,
-    const W: Way,
+    W: Way,
     const VE_ORDER: VeOrder,
 > VeTensorData<S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>
 {
@@ -212,7 +218,7 @@ impl<
 
     /// Internal helper for binary operations.
     /// Applies a binary operation with ALU tracking and stash support.
-    pub(crate) fn apply_binary<NextStage: stage::Stage>(
+    pub(crate) fn apply_binary<NextStage: stage::Stage<Way = W>>(
         mut self,
         alu: RngdAlu,
         op_fn: impl Fn(D, D) -> D + Sync,
@@ -232,7 +238,7 @@ impl<
 }
 
 impl<
-    S: stage::Stage,
+    S: stage::Stage<Way = W>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -241,7 +247,7 @@ impl<
     Packet: M,
     Stash: StashState,
     FS: stage::VeTensorContext,
-    const W: Way,
+    W: Way,
     const VE_ORDER: VeOrder,
 > VeTensorData<S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>
 {
@@ -267,7 +273,7 @@ impl<
 impl<
     'l,
     const T: Tu,
-    S: stage::Stage,
+    S: stage::Stage<Way = W>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -276,7 +282,7 @@ impl<
     Packet: M,
     Stash: StashState,
     FS: stage::VeTensorContext,
-    const W: Way,
+    W: Way,
     const VE_ORDER: VeOrder,
 > VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>
 {
@@ -365,7 +371,7 @@ impl<
     /// transition is not expressible at the call sites. The `D` and `W` in the bound are this impl's own,
     /// so an op method naming a different scalar or way fails here rather than reading the stash at the
     /// wrong one.
-    pub(crate) fn do_binary<NextStage: stage::Stage, Op>(
+    pub(crate) fn do_binary<NextStage: stage::Stage<Way = W>, Op>(
         self,
         op: impl HasAlu + HasBinaryOp<D>,
         mode: Option<BinaryArgMode>,
@@ -394,14 +400,14 @@ impl<
 impl<
     'l,
     const T: Tu,
-    S: stage::Stashable,
+    S: stage::Stashable + stage::Stage<Way = W>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
     Slice: M,
     Time: M,
     Packet: M,
-    const W: Way,
+    W: Way,
     const VE_ORDER: VeOrder,
 > VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Fresh, VE_ORDER, stage::Standalone, W>
 {
@@ -465,7 +471,7 @@ impl<
 impl<
     'l,
     const T: Tu,
-    S: stage::Stage,
+    S: stage::Stage<Way = Way8>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -475,7 +481,7 @@ impl<
     Stash: StashState,
     FS: stage::Commitable,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 {
     /// Exits the Vector Engine pipeline and returns a stream tensor.
     /// After this, commit/transpose are available through the stream tensor API.
@@ -492,7 +498,7 @@ impl<
 impl<
     'l,
     const T: Tu,
-    S: stage::Stage + CanTransitionTo<stage::Cast>,
+    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Cast>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -502,7 +508,7 @@ impl<
     Stash: StashState,
     FS: stage::Commitable,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 {
     /// Casts and packs the stream.
     #[primitive(VectorTensor::vector_cast)]
@@ -523,7 +529,7 @@ impl<
 impl<
     'l,
     const T: Tu,
-    S: stage::IntraSliceStage + stage::CanTransitionTo<stage::InterSliceReduce>,
+    S: stage::IntraSliceStage + stage::CanTransitionTo<stage::InterSliceReduce> + stage::Stage<Way = Way8>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -531,7 +537,7 @@ impl<
     Packet: M,
     Stash: StashState,
     FS: stage::Commitable,
-> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, { VeOrder::IntraFirst }, FS, { Way8 }>
+> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, { VeOrder::IntraFirst }, FS, Way8>
 {
     /// Performs inter-slice reduce for i32 from intra-slice stages.
     /// Only available when VeOrder::IntraFirst (intra-slice was entered first).
@@ -549,7 +555,7 @@ impl<
 impl<
     'l,
     const T: Tu,
-    S: stage::IntraSliceStage + stage::CanTransitionTo<stage::InterSliceReduce>,
+    S: stage::IntraSliceStage + stage::CanTransitionTo<stage::InterSliceReduce> + stage::Stage<Way = Way8>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -557,7 +563,7 @@ impl<
     Packet: M,
     Stash: StashState,
     FS: stage::Commitable,
-> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, { VeOrder::IntraFirst }, FS, { Way8 }>
+> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, { VeOrder::IntraFirst }, FS, Way8>
 {
     /// Performs inter-slice reduce for f32 from intra-slice stages.
     /// Only available when VeOrder::IntraFirst (intra-slice was entered first).
@@ -692,7 +698,7 @@ pub type VectorInterSliceReduceTensor<'l, const T: Tu, D, Chip, Cluster, Slice, 
         Fresh,
         VE_ORDER,
         stage::Standalone,
-        { Way8 },
+        Way8,
     >;
 
 // ============================================================================
@@ -702,7 +708,7 @@ pub type VectorInterSliceReduceTensor<'l, const T: Tu, D, Chip, Cluster, Slice, 
 impl<
     'l,
     const T: Tu,
-    S: stage::InterSliceStage + stage::CanTransitionTo<stage::Tag>,
+    S: stage::InterSliceStage + stage::CanTransitionTo<stage::Tag> + stage::Stage<Way = Way8>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -711,7 +717,7 @@ impl<
     Packet: M,
     Stash: StashState,
     FS: stage::Commitable,
-> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, { VeOrder::InterFirst }, FS, { Way8 }>
+> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, { VeOrder::InterFirst }, FS, Way8>
 {
     /// Enters intra-slice pipeline from inter-slice output. Requires VeOrder::InterFirst.
     /// Preserves VeOrder::InterFirst.
@@ -737,7 +743,7 @@ pub type VectorBranchTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way8 },
+    W = Way8,
 > = VectorTensor<'l, T, stage::Tag, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 impl<'l, const T: Tu, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, const VE_ORDER: VeOrder>
@@ -773,7 +779,7 @@ pub type VectorLogicTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way8 },
+    W = Way8,
 > = VectorTensor<'l, T, stage::Logic, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 /// Tensor after fixed-point operations.
@@ -789,7 +795,7 @@ pub type VectorFxpTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way8 },
+    W = Way8,
 > = VectorTensor<'l, T, stage::Fxp, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 /// Tensor after i32 to f32 conversion.
@@ -805,7 +811,7 @@ pub type VectorFxpToFpTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way8 },
+    W = Way8,
 > = VectorTensor<'l, T, stage::FxpToFp, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 /// Tensor after narrow layer (split or clip).
@@ -821,7 +827,7 @@ pub type VectorNarrowTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way4 },
+    W = Way4,
 > = VectorTensor<'l, T, stage::Narrow, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 /// Tensor after floating-point operations.
@@ -837,7 +843,7 @@ pub type VectorFpTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way4 },
+    W = Way4,
 > = VectorTensor<'l, T, stage::Fp, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 /// Tensor after intra-slice reduce operations.
@@ -853,7 +859,7 @@ pub type VectorIntraSliceReduceTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way4 },
+    W = Way4,
 > = VectorTensor<'l, T, stage::IntraSliceReduce, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 /// Tensor after fp division.
@@ -869,7 +875,7 @@ pub type VectorFpDivTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way4 },
+    W = Way4,
 > = VectorTensor<'l, T, stage::FpDiv, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 /// Tensor after widen layer (concat or pad).
@@ -885,7 +891,7 @@ pub type VectorWidenTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way8 },
+    W = Way8,
 > = VectorTensor<'l, T, stage::Widen, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 /// Tensor after f32 to i32 conversion.
@@ -901,7 +907,7 @@ pub type VectorFpToFxpTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way8 },
+    W = Way8,
 > = VectorTensor<'l, T, stage::FpToFxp, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 /// Tensor after clip operations.
@@ -917,7 +923,7 @@ pub type VectorClipTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way8 },
+    W = Way8,
 > = VectorTensor<'l, T, stage::Clip, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 /// Tensor after filter operation.
@@ -933,7 +939,7 @@ pub type VectorFilterTensor<
     Stash,
     const VE_ORDER: VeOrder,
     FS = stage::Standalone,
-    const W: Way = { Way8 },
+    W = Way8,
 > = VectorTensor<'l, T, stage::Filter, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 // ============================================================================
@@ -1059,7 +1065,7 @@ pub(super) fn apply_ternary_op<Mapping: M>(
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way8>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -1068,7 +1074,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 where
     S: stage::Stage + CanTransitionTo<stage::Logic>,
 {
@@ -1082,7 +1088,7 @@ where
     ) -> VectorLogicTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, i32, { Way8 }>,
+            + StashTransition<Stash, i32, Way8>,
     {
         self.do_binary::<stage::Logic, Op>(op, None, operand)
     }
@@ -1097,7 +1103,7 @@ where
     ) -> VectorLogicTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, i32, { Way8 }>,
+            + StashTransition<Stash, i32, Way8>,
     {
         self.do_binary::<stage::Logic, Op>(op, Some(mode), operand)
     }
@@ -1110,7 +1116,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way8>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -1119,7 +1125,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 where
     S: stage::Stage + CanTransitionTo<stage::Logic>,
 {
@@ -1133,7 +1139,7 @@ where
     ) -> VectorLogicTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, f32, { Way8 }>,
+            + StashTransition<Stash, f32, Way8>,
     {
         self.do_binary::<stage::Logic, Op>(op, None, operand)
     }
@@ -1148,7 +1154,7 @@ where
     ) -> VectorLogicTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, f32, { Way8 }>,
+            + StashTransition<Stash, f32, Way8>,
     {
         self.do_binary::<stage::Logic, Op>(op, Some(mode), operand)
     }
@@ -1161,7 +1167,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way8>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -1170,7 +1176,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 where
     S: stage::Stage + CanTransitionTo<stage::Fxp>,
 {
@@ -1184,7 +1190,7 @@ where
     ) -> VectorFxpTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, i32, { Way8 }>,
+            + StashTransition<Stash, i32, Way8>,
     {
         self.do_binary::<stage::Fxp, Op>(op, None, operand)
     }
@@ -1199,7 +1205,7 @@ where
     ) -> VectorFxpTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, i32, { Way8 }>,
+            + StashTransition<Stash, i32, Way8>,
     {
         self.do_binary::<stage::Fxp, Op>(op, Some(mode), operand)
     }
@@ -1212,7 +1218,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way8>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -1221,7 +1227,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 where
     S: stage::Stage + CanTransitionTo<stage::FxpToFp>,
 {
@@ -1248,7 +1254,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way8>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -1258,7 +1264,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 where
     S: stage::Stage + CanTransitionTo<stage::Narrow>,
 {
@@ -1270,7 +1276,7 @@ where
     #[primitive(VectorTensor::vector_narrow_split)]
     pub fn vector_narrow_split<Time2: M, Packet2: M>(
         self,
-    ) -> VectorNarrowTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet2, Stash, VE_ORDER, FS, { Way4 }> {
+    ) -> VectorNarrowTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet2, Stash, VE_ORDER, FS, Way4> {
         verify_vector_narrow_split::<Time, Packet, Time2, Packet2>();
 
         let (device, inner, tag, ve_state) = self.into_parts();
@@ -1289,7 +1295,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way8>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -1299,7 +1305,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 where
     S: stage::Stage + CanTransitionTo<stage::Narrow>,
 {
@@ -1312,7 +1318,7 @@ where
     #[primitive(VectorTensor::vector_narrow_trim)]
     pub fn vector_narrow_trim<Packet2: M>(
         self,
-    ) -> VectorNarrowTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet2, Stash, VE_ORDER, FS, { Way4 }> {
+    ) -> VectorNarrowTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet2, Stash, VE_ORDER, FS, Way4> {
         verify_vector_narrow_trim::<Packet, Packet2>();
 
         let (device, inner, tag, ve_state) = self.into_parts();
@@ -1331,7 +1337,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way4>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -1340,7 +1346,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way4 }>
+> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way4>
 where
     S: stage::Stage + CanTransitionTo<stage::Fp>,
 {
@@ -1380,7 +1386,7 @@ where
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, f32, { Way4 }>,
+            + StashTransition<Stash, f32, Way4>,
     {
         self.do_binary::<stage::Fp, Op>(op, None, operand)
     }
@@ -1395,7 +1401,7 @@ where
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, f32, { Way4 }>,
+            + StashTransition<Stash, f32, Way4>,
     {
         self.do_binary::<stage::Fp, Op>(op, Some(mode), operand)
     }
@@ -1416,7 +1422,7 @@ where
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoTernaryOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, f32, { Way4 }>,
+            + StashTransition<Stash, f32, Way4>,
     {
         self.vector_fp_ternary_with_mode(op, TernaryArgMode::Mode012, operands)
     }
@@ -1432,7 +1438,7 @@ where
     ) -> VectorFpTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoTernaryOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, f32, { Way4 }>,
+            + StashTransition<Stash, f32, Way4>,
     {
         let stash_data = Op::stashed(self.ve_state());
         let operands = operands.into_ternary_operand();
@@ -1477,8 +1483,18 @@ fn reduce_tag<Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, OutTime: M, Out
 }
 
 // ANCHOR: intra_slice_reduce_i32
-impl<'l, const T: Tu, S, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, Stash: StashState, const VE_ORDER: VeOrder>
-    VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, stage::Standalone, { Way4 }>
+impl<
+    'l,
+    const T: Tu,
+    S: stage::Stage<Way = Way4>,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    Stash: StashState,
+    const VE_ORDER: VeOrder,
+> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, stage::Standalone, Way4>
 where
     S: stage::Stage + CanTransitionTo<stage::IntraSliceReduce>,
 {
@@ -1500,7 +1516,7 @@ where
         Stash,
         VE_ORDER,
         stage::Standalone,
-        { Way4 },
+        Way4,
     >
 // ANCHOR_END: intra_slice_reduce_i32
     {
@@ -1524,8 +1540,18 @@ where
 }
 
 // ANCHOR: intra_slice_reduce_f32
-impl<'l, const T: Tu, S, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, Stash: StashState, const VE_ORDER: VeOrder>
-    VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, stage::Standalone, { Way4 }>
+impl<
+    'l,
+    const T: Tu,
+    S: stage::Stage<Way = Way4>,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    Stash: StashState,
+    const VE_ORDER: VeOrder,
+> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, stage::Standalone, Way4>
 where
     S: stage::Stage + CanTransitionTo<stage::IntraSliceReduce>,
 {
@@ -1567,7 +1593,7 @@ where
         Stash,
         VE_ORDER,
         stage::Standalone,
-        { Way4 },
+        Way4,
     >
 // ANCHOR_END: intra_slice_reduce_f32
     {
@@ -1597,7 +1623,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way4>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -1606,7 +1632,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way4 }>
+> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way4>
 where
     S: stage::Stage + CanTransitionTo<stage::FpDiv>,
 {
@@ -1618,10 +1644,10 @@ where
     pub fn vector_fp_div<Op>(
         self,
         operand: Op,
-    ) -> VectorFpDivTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS, { Way4 }>
+    ) -> VectorFpDivTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS, Way4>
     where
         Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, f32, { Way4 }>,
+            + StashTransition<Stash, f32, Way4>,
     {
         self.do_binary::<stage::FpDiv, Op>(FpDivBinaryOp::DivF, None, operand)
     }
@@ -1632,10 +1658,10 @@ where
         self,
         mode: BinaryArgMode,
         operand: Op,
-    ) -> VectorFpDivTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS, { Way4 }>
+    ) -> VectorFpDivTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS, Way4>
     where
         Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, f32, { Way4 }>,
+            + StashTransition<Stash, f32, Way4>,
     {
         self.do_binary::<stage::FpDiv, Op>(FpDivBinaryOp::DivF, Some(mode), operand)
     }
@@ -1648,7 +1674,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way4>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -1658,7 +1684,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way4 }>
+> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way4>
 where
     S: stage::Stage + CanTransitionTo<stage::Widen>,
 {
@@ -1670,7 +1696,7 @@ where
     #[primitive(VectorTensor::vector_widen_concat)]
     pub fn vector_widen_concat<Time2: M, Packet2: M>(
         self,
-    ) -> VectorWidenTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet2, Stash, VE_ORDER, FS, { Way8 }> {
+    ) -> VectorWidenTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet2, Stash, VE_ORDER, FS, Way8> {
         verify_vector_widen_concat::<Time, Packet, Time2, Packet2>();
 
         let (device, inner, tag, ve_state) = self.into_parts();
@@ -1689,7 +1715,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way4>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -1699,7 +1725,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way4 }>
+> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way4>
 where
     S: stage::Stage + CanTransitionTo<stage::Widen>,
 {
@@ -1712,7 +1738,7 @@ where
     #[primitive(VectorTensor::vector_widen_pad)]
     pub fn vector_widen_pad<Packet2: M>(
         self,
-    ) -> VectorWidenTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet2, Stash, VE_ORDER, FS, { Way8 }> {
+    ) -> VectorWidenTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet2, Stash, VE_ORDER, FS, Way8> {
         verify_vector_widen_pad::<Packet, Packet2>();
 
         let (device, inner, tag, ve_state) = self.into_parts();
@@ -1731,7 +1757,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way8>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -1740,7 +1766,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 where
     S: stage::Stage + CanTransitionTo<stage::FpToFxp>,
 {
@@ -1766,7 +1792,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way8>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -1775,7 +1801,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, i32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 where
     S: stage::Stage + CanTransitionTo<stage::Clip>,
 {
@@ -1789,7 +1815,7 @@ where
     ) -> VectorClipTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, i32, { Way8 }>,
+            + StashTransition<Stash, i32, Way8>,
     {
         self.do_binary::<stage::Clip, Op>(op, None, operand)
     }
@@ -1804,7 +1830,7 @@ where
     ) -> VectorClipTensor<'l, T, i32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, i32, { Way8 }>,
+            + StashTransition<Stash, i32, Way8>,
     {
         self.do_binary::<stage::Clip, Op>(op, Some(mode), operand)
     }
@@ -1817,7 +1843,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way8>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -1826,7 +1852,7 @@ impl<
     Stash: StashState,
     FS: stage::VeTensorContext,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, { Way8 }>
+> VectorTensor<'l, T, S, f32, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, Way8>
 where
     S: stage::Stage + CanTransitionTo<stage::Clip>,
 {
@@ -1840,7 +1866,7 @@ where
     ) -> VectorClipTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, f32, { Way8 }>,
+            + StashTransition<Stash, f32, Way8>,
     {
         self.do_binary::<stage::Clip, Op>(op, None, operand)
     }
@@ -1855,7 +1881,7 @@ where
     ) -> VectorClipTensor<'l, T, f32, Chip, Cluster, Slice, Time, Packet, Op::Next, VE_ORDER, FS>
     where
         Op: IntoBranchedOperand<'l, f32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>
-            + StashTransition<Stash, f32, { Way8 }>,
+            + StashTransition<Stash, f32, Way8>,
     {
         self.do_binary::<stage::Clip, Op>(op, Some(mode), operand)
     }
@@ -1868,7 +1894,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S,
+    S: stage::Stage<Way = Way8>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -1877,7 +1903,7 @@ impl<
     Packet: M,
     Stash: StashState,
     const VE_ORDER: VeOrder,
-> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, stage::Standalone, { Way8 }>
+> VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, stage::Standalone, Way8>
 where
     S: stage::Stage + CanTransitionTo<stage::Filter>,
 {
@@ -1886,7 +1912,7 @@ where
     pub fn vector_filter<Time2: M>(
         self,
         _config: TagGuard,
-    ) -> VectorFilterTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet, Stash, VE_ORDER, stage::Standalone, { Way8 }>
+    ) -> VectorFilterTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet, Stash, VE_ORDER, stage::Standalone, Way8>
     {
         todo!("Implement vector_filter operation")
     }
@@ -1899,7 +1925,7 @@ where
 impl<
     'l,
     const T: Tu,
-    S: stage::Stage,
+    S: stage::Stage<Way = W>,
     D: VeScalar,
     Chip: M,
     Cluster: M,
@@ -1908,7 +1934,7 @@ impl<
     Packet: M,
     Stash: StashState,
     FS: stage::VeTensorContext,
-    const W: Way,
+    W: Way,
     const VE_ORDER: VeOrder,
 > VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>
 {

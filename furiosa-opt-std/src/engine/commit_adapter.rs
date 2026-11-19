@@ -143,7 +143,11 @@ impl<
     /// output mappings.
     #[primitive(TuTensor::commit_trim)]
     pub fn commit_trim<OutPacket: M>(self) -> CommitTrimTensor<'l, T, D, Chip, Cluster, Slice, Time, OutPacket, B> {
-        verify_commit_trim::<D, Packet, OutPacket>();
+        verify_commit_trim(CommitTrimInput {
+            in_packet: Packet::to_value(),
+            out_packet: OutPacket::to_value(),
+            element_bits: D::BITS,
+        });
         // `transpose(false)` is type-system filler; real trim lowering lands with the backend wiring.
         CommitTrimTensor::new(self.device, self.inner.transpose(false))
     }
@@ -163,7 +167,7 @@ impl<'l, P: CanApplyCommitCast, D: MaterializableScalar, Chip: M, Cluster: M, Sl
         D: CommitCast<OutD>,
     {
         verify_commit_cast::<Packet>();
-        CommitCastTensor::new(self.device, self.inner.map(|v| v.cast()))
+        CommitCastTensor::new(self.device, self.inner.map(D::cast))
     }
 
     /// The same cast with a ReLU fused in, clamping negative values to zero.
@@ -180,7 +184,7 @@ impl<'l, P: CanApplyCommitCast, D: MaterializableScalar, Chip: M, Cluster: M, Sl
         D: CommitCast<OutD>,
     {
         verify_commit_cast::<Packet>();
-        CommitCastTensor::new(self.device, self.inner.map(|v| v.cast_relu()))
+        CommitCastTensor::new(self.device, self.inner.map(D::cast_relu))
     }
 }
 // ANCHOR_END: commit_cast_impl
@@ -207,13 +211,8 @@ impl<'l, P: CanApplyCommitValidCountPack, D: Scalar, Chip: M, Cluster: M, Slice:
 
 /// Validates the Commit Adapter's trimming stage via [`furiosa_opt_lower::config_commit_trim`]
 /// (width / resize rules documented there).
-pub(crate) fn verify_commit_trim<D: Scalar, Packet: M, OutPacket: M>() {
-    config_commit_trim(CommitTrimInput {
-        in_packet: Packet::to_value(),
-        out_packet: OutPacket::to_value(),
-        element_bits: D::BITS,
-    })
-    .unwrap_or_else(|message| panic!("{message}"));
+pub(crate) fn verify_commit_trim(input: CommitTrimInput) {
+    config_commit_trim(input).unwrap_or_else(|message| panic!("{message}"));
 }
 
 /// Validates the Commit Adapter's `f32` to `bf16` conversion.
@@ -245,37 +244,65 @@ mod tests {
 
         #[test]
         fn full_trim() {
-            verify_commit_trim::<i8, m![N # 32], m![N]>();
+            verify_commit_trim(CommitTrimInput {
+                in_packet: <m![N # 32]>::to_value(),
+                out_packet: <m![N]>::to_value(),
+                element_bits: <i8 as crate::scalar::Scalar>::BITS,
+            });
         }
 
         #[test]
         fn partial_trim() {
-            verify_commit_trim::<i8, m![N # 32], m![N # 16]>();
+            verify_commit_trim(CommitTrimInput {
+                in_packet: <m![N # 32]>::to_value(),
+                out_packet: <m![N # 16]>::to_value(),
+                element_bits: <i8 as crate::scalar::Scalar>::BITS,
+            });
         }
 
         #[test]
         fn no_trim() {
-            verify_commit_trim::<i8, m![N # 32], m![N # 32]>();
+            verify_commit_trim(CommitTrimInput {
+                in_packet: <m![N # 32]>::to_value(),
+                out_packet: <m![N # 32]>::to_value(),
+                element_bits: <i8 as crate::scalar::Scalar>::BITS,
+            });
         }
 
         #[test]
         fn bf16() {
-            verify_commit_trim::<bf16, m![N # 16], m![N]>();
+            verify_commit_trim(CommitTrimInput {
+                in_packet: <m![N # 16]>::to_value(),
+                out_packet: <m![N]>::to_value(),
+                element_bits: <bf16 as crate::scalar::Scalar>::BITS,
+            });
         }
 
         #[test]
         fn f32() {
-            verify_commit_trim::<f32, m![N # 8], m![N]>();
+            verify_commit_trim(CommitTrimInput {
+                in_packet: <m![N # 8]>::to_value(),
+                out_packet: <m![N]>::to_value(),
+                element_bits: <f32 as crate::scalar::Scalar>::BITS,
+            });
         }
 
         #[test]
         fn single_time_step() {
-            verify_commit_trim::<i8, m![N # 32], m![N # 8]>();
+            verify_commit_trim(CommitTrimInput {
+                in_packet: <m![N # 32]>::to_value(),
+                out_packet: <m![N # 8]>::to_value(),
+                element_bits: <i8 as crate::scalar::Scalar>::BITS,
+            });
         }
 
         #[test]
         fn non_padding_resize() {
-            verify_commit_trim::<bf16, m![N # 16], m![N = 4]>();
+            verify_commit_trim(CommitTrimInput {
+                in_packet: <m![N # 16]>::to_value(),
+                out_packet: <m![N = 4]>::to_value(),
+                element_bits: <bf16 as crate::scalar::Scalar>::BITS,
+            });
         }
     }
 

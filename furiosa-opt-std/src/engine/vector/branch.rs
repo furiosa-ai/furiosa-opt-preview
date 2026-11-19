@@ -3,7 +3,7 @@
 use std::fmt::{self, Debug, Display, Formatter};
 use std::marker::PhantomData;
 
-use furiosa_mapping::{Ident, Index, M, MappingExt};
+use furiosa_mapping::{Ident, Index, M, Mapping, MappingExt};
 use furiosa_opt_macro::primitive;
 use smart_default::SmartDefault;
 
@@ -203,8 +203,8 @@ pub(crate) fn apply_branch_config<D: VeScalar, Mapping: M>(
     config: &TagMode<D>,
 ) -> Tensor<u8, Mapping> {
     match config {
-        TagMode::Zero => data.map(|_| 0u8),
-        TagMode::AxisToggle { axis } => Tensor::<u8, Mapping>::from_vec(axis_toggle_pattern::<Mapping>(axis)),
+        TagMode::Zero => Tensor::zero(),
+        TagMode::AxisToggle { axis } => Tensor::from_vec(axis_toggle_pattern(&Mapping::to_value(), axis)),
         TagMode::Comparison(cmps) => data.map(|x| {
             let mut exec_id: u8 = 0;
             for (bit_pos, cmp) in cmps.iter().enumerate() {
@@ -217,8 +217,7 @@ pub(crate) fn apply_branch_config<D: VeScalar, Mapping: M>(
 }
 
 /// Host-side `AxisToggle` tag pattern: `(coord_along_axis % 2) << 3` per cell, padding cells → 0.
-fn axis_toggle_pattern<Mapping: M>(axis: &Ident) -> Vec<u8> {
-    let mapping = Mapping::to_value();
+fn axis_toggle_pattern(mapping: &Mapping, axis: &Ident) -> Vec<u8> {
     let axes = mapping.axes();
     let Some(pos) = crate::storage::axis_position(&axes, axis) else {
         return vec![0u8; mapping.size()]; // axis absent: nothing to toggle
@@ -248,9 +247,10 @@ mod tests {
     fn axis_toggle_pattern_decodes_axis_parity() {
         axes![A = 4, B = 2];
         // Toggle A: cell (a, b) -> (a % 2) << 3. a = position / 2.
-        assert_eq!(axis_toggle_pattern::<m![A, B]>(&Ident::A), vec![0, 0, 8, 8, 0, 0, 8, 8]);
+        let mapping = <m![A, B]>::to_value();
+        assert_eq!(axis_toggle_pattern(&mapping, &Ident::A), vec![0, 0, 8, 8, 0, 0, 8, 8]);
         // Toggle B: cell (a, b) -> (b % 2) << 3. b = position % 2.
-        assert_eq!(axis_toggle_pattern::<m![A, B]>(&Ident::B), vec![0, 8, 0, 8, 0, 8, 0, 8]);
+        assert_eq!(axis_toggle_pattern(&mapping, &Ident::B), vec![0, 8, 0, 8, 0, 8, 0, 8]);
     }
 
     /// `TagMode::Comparison` puts comparison `i` in bit `i` -- the order every kernel's [`TagGuard`]

@@ -21,6 +21,8 @@
 use std::fmt::Debug;
 
 use crate::engine::vector::scalar::VeScalar;
+use std::marker::PhantomData;
+
 use crate::engine::vector::stage::markers::Way;
 use crate::tensor::Tensor;
 use furiosa_mapping::M;
@@ -66,21 +68,25 @@ impl sealed::Sealed for Spent {}
 ///
 /// [module docs]: crate::engine::vector::stash_slot
 #[derive(Debug)]
-pub struct Occupied<D: VeScalar, Mapping: M, const W: Way> {
+pub struct Occupied<D: VeScalar, Mapping: M, W: Way> {
     data: Tensor<D, Mapping>,
+    way: PhantomData<W>,
 }
 
-impl<D: VeScalar, Mapping: M, const W: Way> Occupied<D, Mapping, W> {
+impl<D: VeScalar, Mapping: M, W: Way> Occupied<D, Mapping, W> {
     /// Wraps a tensor into an occupied slot.
     pub(crate) fn new(tensor: Tensor<D, Mapping>) -> Self {
-        Self { data: tensor }
+        Self {
+            data: tensor,
+            way: PhantomData,
+        }
     }
 }
 
-impl<D: VeScalar, Mapping: M, const W: Way> StashState for Occupied<D, Mapping, W> {}
-impl<D: VeScalar, Mapping: M, const W: Way> sealed::Sealed for Occupied<D, Mapping, W> {}
+impl<D: VeScalar, Mapping: M, W: Way> StashState for Occupied<D, Mapping, W> {}
+impl<D: VeScalar, Mapping: M, W: Way> sealed::Sealed for Occupied<D, Mapping, W> {}
 
-impl<D: VeScalar, Mapping: M, const W: Way> Occupied<D, Mapping, W> {
+impl<D: VeScalar, Mapping: M, W: Way> Occupied<D, Mapping, W> {
     /// The stashed tensor in the reader's mapping. Only this state has one, so the read needs no
     /// `Option` and no scalar of its own: `D` here is the scalar the stash was written with.
     pub(crate) fn tensor_as<TargetMapping: M>(&self) -> Tensor<D, TargetMapping> {

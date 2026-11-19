@@ -67,7 +67,13 @@ impl<'l, const T: Tu, P: CanApplyCollect, D: Scalar, Chip: M, Cluster: M, Slice:
     /// already ≤ 32 bytes, only padding is added.
     #[primitive(TuTensor::collect)]
     pub fn collect<Time2: M, Packet2: M>(self) -> CollectTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet2, B> {
-        verify_collect::<D, Time, Packet, Time2, Packet2>();
+        verify_collect(CollectInput {
+            in_time: Time::to_value(),
+            in_packet: Packet::to_value(),
+            out_time: Time2::to_value(),
+            out_packet: Packet2::to_value(),
+            element_bits: D::BITS,
+        });
         CollectTensor::new(self.device, self.inner.transpose(false))
     }
 }
@@ -80,7 +86,14 @@ impl<'l, P: CanApplyToTrf, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Pa
     /// Stores to the tensor register file.
     #[primitive(TuTensor::to_trf)]
     pub fn to_trf<Lane: M, Element: M>(self) -> TrfTensor<D, Chip, Cluster, Slice, Lane, Element, B> {
-        verify_to_trf::<D, Lane, Time, Packet, Element>();
+        verify_to_trf(ToTrfInput {
+            stream_lane: Lane::to_value(),
+            stream_time: Time::to_value(),
+            stream_packet: Packet::to_value(),
+            trf_element: Element::to_value(),
+            capacity: TRF_CAPACITY_BYTES,
+            element_bits: D::BITS,
+        });
         TrfTensor::new(self.inner.transpose(false))
     }
 }
@@ -97,7 +110,14 @@ impl<'l, P: CanApplyToTrf, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Pa
         self,
         _sub: &mut TuContext<{ Tu::Sub }>,
     ) -> TrfTensor<D, Chip, Cluster, Slice, Lane, Element, B> {
-        verify_to_trf::<D, Lane, Time, Packet, Element>();
+        verify_to_trf(ToTrfInput {
+            stream_lane: Lane::to_value(),
+            stream_time: Time::to_value(),
+            stream_packet: Packet::to_value(),
+            trf_element: Element::to_value(),
+            capacity: TRF_CAPACITY_BYTES,
+            element_bits: D::BITS,
+        });
         TrfTensor::new(self.inner.transpose(false))
     }
 }
@@ -110,14 +130,24 @@ impl<'l, P: CanApplyToVrf, D: VrfScalar, Chip: M, Cluster: M, Slice: M, Time: M,
     /// Stores to the vector register file.
     #[primitive(TuTensor::to_vrf)]
     pub fn to_vrf<Element: M>(self) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
-        verify_to_vrf::<D, Time, Packet, Element>();
+        verify_to_vrf(ToVrfInput {
+            stream_time: Time::to_value(),
+            stream_packet: Packet::to_value(),
+            vrf_element: Element::to_value(),
+            element_bits: D::BITS,
+        });
         VrfTensor::from_inner(self.inner.transpose(false))
     }
 
     /// Stores into an existing vector register-file tensor through its whole mutable view.
     #[primitive(TuTensor::to_vrf_view)]
     pub fn to_vrf_view<Element: M>(self, mut dst: VrfTensorViewMut<'l, D, Chip, Cluster, Slice, Element, B>) {
-        verify_to_vrf::<D, Time, Packet, Element>();
+        verify_to_vrf(ToVrfInput {
+            stream_time: Time::to_value(),
+            stream_packet: Packet::to_value(),
+            vrf_element: Element::to_value(),
+            element_bits: D::BITS,
+        });
         dst.inner.transpose(self.inner.view(), false);
     }
 }
@@ -134,7 +164,12 @@ impl<'l, P: CanApplyToVrf, D: VrfScalar, Chip: M, Cluster: M, Slice: M, Time: M,
         self,
         _sub: &mut TuContext<{ Tu::Sub }>,
     ) -> VrfTensor<D, Chip, Cluster, Slice, Element, B> {
-        verify_to_vrf::<D, Time, Packet, Element>();
+        verify_to_vrf(ToVrfInput {
+            stream_time: Time::to_value(),
+            stream_packet: Packet::to_value(),
+            vrf_element: Element::to_value(),
+            element_bits: D::BITS,
+        });
         VrfTensor::from_inner(self.inner.transpose(false))
     }
 
@@ -145,7 +180,12 @@ impl<'l, P: CanApplyToVrf, D: VrfScalar, Chip: M, Cluster: M, Slice: M, Time: M,
         _sub: &mut TuContext<{ Tu::Sub }>,
         mut dst: VrfTensorViewMut<'l, D, Chip, Cluster, Slice, Element, B>,
     ) {
-        verify_to_vrf::<D, Time, Packet, Element>();
+        verify_to_vrf(ToVrfInput {
+            stream_time: Time::to_value(),
+            stream_packet: Packet::to_value(),
+            vrf_element: Element::to_value(),
+            element_bits: D::BITS,
+        });
         dst.inner.transpose(self.inner.view(), false);
     }
 }
@@ -153,26 +193,13 @@ impl<'l, P: CanApplyToVrf, D: VrfScalar, Chip: M, Cluster: M, Slice: M, Time: M,
 
 /// Validates the Collect engine via [`furiosa_opt_lower::config_collect`] (packet / time rules
 /// documented there).
-pub(crate) fn verify_collect<D: Scalar, Time: M, Packet: M, Time2: M, Packet2: M>() {
-    config_collect(CollectInput {
-        in_time: Time::to_value(),
-        in_packet: Packet::to_value(),
-        out_time: Time2::to_value(),
-        out_packet: Packet2::to_value(),
-        element_bits: D::BITS,
-    })
-    .unwrap_or_else(|message| panic!("{message}"));
+pub(crate) fn verify_collect(input: CollectInput) {
+    config_collect(input).unwrap_or_else(|message| panic!("{message}"));
 }
 
 /// Validates `to_vrf` via [`furiosa_opt_lower::config_to_vrf`] (element rule documented there).
-pub(crate) fn verify_to_vrf<D: Scalar, Time: M, Packet: M, Element: M>() {
-    config_to_vrf(ToVrfInput {
-        stream_time: Time::to_value(),
-        stream_packet: Packet::to_value(),
-        vrf_element: Element::to_value(),
-        element_bits: D::BITS,
-    })
-    .unwrap_or_else(|error| panic!("{error}"));
+pub(crate) fn verify_to_vrf(input: ToVrfInput) {
+    config_to_vrf(input).unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// Total TRF capacity in bytes: 8 lanes x 2 banks x 128 rows x 32 bytes. Where a tensor lands in the
@@ -181,16 +208,8 @@ pub const TRF_CAPACITY_BYTES: usize = 65_536;
 
 /// Validates `to_trf` via [`furiosa_opt_lower::config_to_trf`] (lane / capacity / element rules
 /// documented there).
-pub(crate) fn verify_to_trf<D: Scalar, Lane: M, Time: M, Packet: M, Element: M>() {
-    config_to_trf(ToTrfInput {
-        stream_lane: Lane::to_value(),
-        stream_time: Time::to_value(),
-        stream_packet: Packet::to_value(),
-        trf_element: Element::to_value(),
-        capacity: TRF_CAPACITY_BYTES,
-        element_bits: D::BITS,
-    })
-    .unwrap_or_else(|error| match error {
+pub(crate) fn verify_to_trf(input: ToTrfInput) {
+    config_to_trf(input).unwrap_or_else(|error| match error {
         ToTrfError::ExceedsCapacity {
             total_bytes,
             lanes,

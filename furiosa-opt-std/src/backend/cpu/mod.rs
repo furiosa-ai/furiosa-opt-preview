@@ -204,6 +204,18 @@ impl internal::Backend for Cpu {
         BufStorage::zeroed(mapping.size())
     }
 
+    fn spm_local_load<D: Scalar + crate::scalar::RuntimeScalar>(storage: &Self::Storage<D>, index: usize) -> D {
+        storage.get(index)
+    }
+
+    fn spm_local_store<D: Scalar + crate::scalar::RuntimeScalar>(
+        storage: &mut Self::Storage<D>,
+        index: usize,
+        value: D,
+    ) {
+        storage.set(index, value);
+    }
+
     fn into_vec<D: MaterializableScalar>(storage: Self::Storage<D>, mapping: &Mapping) -> Vec<D> {
         storage.into_vec(mapping)
     }

@@ -1,6 +1,8 @@
 //! Where an indirect operation's tensors sit, and what its index may be.
 
-use furiosa_mapping::{Mapping, MappingExt, PaddingKind};
+use furiosa_mapping::{Mapping, MappingExt};
+
+use super::spm::only_position_zero_is_live;
 
 /// Cluster, PE, and element placement of an SPM tensor, outermost first.
 #[derive(Debug, Clone, Copy)]
@@ -110,18 +112,12 @@ pub fn validate_index_chip(index: &Mapping, data: &Mapping) -> Result<(), IndexC
 /// One live position padded across the hardware's, or the same cell broadcast to all of them.
 /// Either way the placement names nothing of its own, so an index it holds is one list.
 pub fn holds_one_copy(placement: &Mapping) -> bool {
-    // `Top` leaves the other positions untouched; `Bottom` would forbid writing them.
-    let one = Mapping::identity()
-        .padding(placement.size(), PaddingKind::Top)
-        .normalize();
-    placement.is_broadcast() || placement.clone().normalize() == one
+    placement.is_broadcast() || only_position_zero_is_live(placement)
 }
 
 /// Checks that an SPM indirect index resides entirely on PE 0.
 pub fn validate_spm_indirect_index(pe: &Mapping) -> Result<(), SpmIndirectIndexError> {
-    // `Top` leaves other PEs untouched; `Bottom` would forbid writing them.
-    let pe_zero = Mapping::identity().padding(pe.size(), PaddingKind::Top).normalize();
-    if pe.clone().normalize() == pe_zero {
+    if only_position_zero_is_live(pe) {
         return Ok(());
     }
     Err(SpmIndirectIndexError::PePlacement { pe: pe.clone() })
@@ -176,6 +172,9 @@ mod tests {
     fn accepts_an_index_kept_on_pe_zero() {
         validate_spm_indirect_index(&<m![1 # 4]>::to_value()).unwrap();
         validate_spm_indirect_index(&<m![1]>::to_value()).unwrap();
+        // The kind names the dead PEs, and the list is read from PE 0 alone.
+        validate_spm_indirect_index(&<m![1 #{!} 4]>::to_value()).unwrap();
+        validate_spm_indirect_index(&<m![1 #{0} 4]>::to_value()).unwrap();
     }
 
     #[test]
@@ -183,7 +182,6 @@ mod tests {
         let placements = [
             <m![4]>::to_value(),
             <m![K % 4]>::to_value(),
-            <m![1 #{!} 4]>::to_value(),
             Mapping::Broadcast { size: 4 },
         ];
         for pe in placements {

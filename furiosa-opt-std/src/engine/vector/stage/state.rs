@@ -34,7 +34,7 @@ impl<Stash: StashState> VeState<Stash> {
     }
 }
 
-impl<D: VeScalar, StashMapping: M, const W: Way> VeState<Occupied<D, StashMapping, W>> {
+impl<D: VeScalar, StashMapping: M, W: Way> VeState<Occupied<D, StashMapping, W>> {
     /// Empties the stash, preserving ALU usage. The read lands in [`Spent`] rather than [`Fresh`] so
     /// the write cannot be re-armed; the data itself was already read by the op that calls this.
     /// The stashed tensor in the reader's mapping; the slot's own scalar is what the reader gets.
@@ -62,7 +62,7 @@ impl VeState<Fresh> {
     /// Stores the stream's tensor in the stash. The slot records that tensor's scalar and mapping and
     /// the pipeline's way, which is what a later read has to match. Not a conversion: a reinterpret
     /// belongs before the write, not at it.
-    pub(crate) fn write_stash<StreamD: VeScalar, StreamMapping: M, const W: Way>(
+    pub(crate) fn write_stash<StreamD: VeScalar, StreamMapping: M, W: Way>(
         self,
         data: &Tensor<StreamD, StreamMapping>,
     ) -> VeState<Occupied<StreamD, StreamMapping, W>> {

@@ -233,20 +233,22 @@ impl<Axes: AxesToSlice, Element: M> M for AxisSlicedMapping<Axes, Element> {
     fn to_value() -> Mapping {
         Axes::axes_to_slice()
             .into_iter()
-            .fold(Element::to_value(), |element, axis| {
-                furiosa_opt_lower::tile_mapping(furiosa_opt_lower::TileMappingInput {
-                    index: axis,
-                    element,
-                    len: 1,
-                    hole_fill: PaddingKind::Top,
-                })
-                .unwrap_or_else(|error| panic!("{error}"))
-            })
+            .fold(Element::to_value(), slice_mapping_axis)
     }
 
     fn map(index: usize) -> Cell {
         Self::to_value().index(index)
     }
+}
+
+fn slice_mapping_axis(element: Mapping, axis: Mapping) -> Mapping {
+    furiosa_opt_lower::tile_mapping(furiosa_opt_lower::TileMappingInput {
+        index: axis,
+        element,
+        len: 1,
+        hole_fill: PaddingKind::Top,
+    })
+    .unwrap_or_else(|error| panic!("{error}"))
 }
 
 impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>

@@ -18,13 +18,29 @@ use crate::tensor::memory::{DmTensor, DmTensorViewMut};
 use crate::tensor::tu::TuTensor;
 
 // ANCHOR: commit_impl
-impl<'l, const T: Tu, P: CanApplyCommit, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+// `D: MaterializableScalar`: a commit writes values data memory can hold.
+impl<
+    'l,
+    const T: Tu,
+    P: CanApplyCommit,
+    D: MaterializableScalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    B: Backend,
+> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
 {
     /// Commits to data memory.
     #[primitive(TuTensor::commit)]
     pub fn commit<Element: M>(self) -> DmTensor<D, Chip, Cluster, Slice, Element, B> {
-        verify_commit::<D, Time, Packet, Element>();
+        verify_commit(CommitInput {
+            in_time: Time::to_value(),
+            in_packet: Packet::to_value(),
+            element: Element::to_value(),
+            element_bits: D::BITS,
+        });
         DmTensor::from_parts(self.inner.transpose(false))
     }
 
@@ -35,7 +51,12 @@ impl<'l, const T: Tu, P: CanApplyCommit, D: Scalar, Chip: M, Cluster: M, Slice: 
         mut dst: DmTensorViewMut<'l, D, Chip, Cluster, DstSlice, Element, B>,
     ) {
         constraints::assert_slice_preserved::<Slice, DstSlice>();
-        verify_commit::<D, Time, Packet, Element>();
+        verify_commit(CommitInput {
+            in_time: Time::to_value(),
+            in_packet: Packet::to_value(),
+            element: Element::to_value(),
+            element_bits: D::BITS,
+        });
         dst.inner.transpose(self.inner.view(), false);
     }
 }
@@ -45,14 +66,8 @@ impl<'l, const T: Tu, P: CanApplyCommit, D: Scalar, Chip: M, Cluster: M, Slice: 
 /// with the commit error on failure. The resolved descriptors are not consumed yet, so they're
 /// explicitly discarded. The dual of `verify_fetch`: it writes the time-ordered `(InTime, InPacket)`
 /// stream into the DM `Element` layout.
-pub(crate) fn verify_commit<D: Scalar, InTime: M, InPacket: M, Element: M>() {
-    let _ = config_commit(CommitInput {
-        in_time: InTime::to_value(),
-        in_packet: InPacket::to_value(),
-        element: Element::to_value(),
-        element_bits: D::BITS,
-    })
-    .unwrap_or_else(|e| panic!("{e}"));
+pub(crate) fn verify_commit(input: CommitInput) {
+    let _ = config_commit(input).unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[cfg(test)]
@@ -70,19 +85,34 @@ mod tests {
         /// Full trim, then a clean multi-axis commit.
         #[test]
         fn full_trim_then_commit() {
-            verify_commit::<i8, m![A, B, C], m![N], m![A, B, C, N]>();
+            verify_commit(CommitInput {
+                in_time: <m![A, B, C]>::to_value(),
+                in_packet: <m![N]>::to_value(),
+                element: <m![A, B, C, N]>::to_value(),
+                element_bits: <i8 as crate::scalar::Scalar>::BITS,
+            });
         }
 
         /// Packet keeps trailing flit padding (partial trim).
         #[test]
         fn partial_trim_then_commit() {
-            verify_commit::<i8, m![A], m![N # 16], m![A, N # 16]>();
+            verify_commit(CommitInput {
+                in_time: <m![A]>::to_value(),
+                in_packet: <m![N # 16]>::to_value(),
+                element: <m![A, N # 16]>::to_value(),
+                element_bits: <i8 as crate::scalar::Scalar>::BITS,
+            });
         }
 
         /// Time axes are transposed across the commit.
         #[test]
         fn time_transpose() {
-            verify_commit::<i8, m![A # 32, B], m![N], m![B, A # 32, N]>();
+            verify_commit(CommitInput {
+                in_time: <m![A # 32, B]>::to_value(),
+                in_packet: <m![N]>::to_value(),
+                element: <m![B, A # 32, N]>::to_value(),
+                element_bits: <i8 as crate::scalar::Scalar>::BITS,
+            });
         }
 
         /// The stream emits the live block four times (`1#2 ⋈ 1#2`); overlapping
@@ -90,7 +120,12 @@ mod tests {
         /// even though an injective placement could not fit.
         #[test]
         fn interleaved_time_padding_overlaps_into_dm_padding() {
-            verify_commit::<i8, m![1 # 2, A, 1 # 2], m![N], m![A, 1 # 3, N]>();
+            verify_commit(CommitInput {
+                in_time: <m![1 # 2, A, 1 # 2]>::to_value(),
+                in_packet: <m![N]>::to_value(),
+                element: <m![A, 1 # 3, N]>::to_value(),
+                element_bits: <i8 as crate::scalar::Scalar>::BITS,
+            });
         }
     }
     /// One case per rejection path, checking the typed commit error directly.

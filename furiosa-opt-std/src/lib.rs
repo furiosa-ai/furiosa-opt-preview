@@ -5,6 +5,7 @@
 #![feature(float_erf)]
 #![feature(float_minimum_maximum)]
 #![feature(inherent_associated_types)]
+#![feature(never_type)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(once_cell_try)]
 #![feature(slice_range)]
@@ -23,7 +24,9 @@ mod context;
 mod control;
 mod engine;
 mod float;
+mod per_cluster;
 mod scalar;
+mod spm_scalar;
 mod storage;
 mod tensor;
 
@@ -34,7 +37,7 @@ pub mod runtime;
 #[doc(hidden)]
 pub mod __private {
     use crate::backend::Runtime;
-    pub use crate::control::__loop_hint_unroll;
+    pub use crate::control::{__loop_hint_bound, __loop_hint_unroll};
     use crate::runtime::{CurrentBackend, DeviceOutput, DeviceSend, Kernel, Launched, Returns, Submitted};
 
     /// Runs `kernel` with `args` on the selected backend, writing its returns where `returns`
@@ -54,7 +57,12 @@ pub mod __private {
     }
 }
 
+pub use per_cluster::{
+    ClusterContext, LocalFamily, LocalResult, PerCluster, ScalarPlacement, ScalarReadFamily, SpmReadFamily,
+    SpmTensorLocal, SpmTensorLocalMut, SpmTensorLocalRef, SpmWriteFamily,
+};
 pub use runtime::{Device, HbmBuffer, Placement, ToPlacements, Topology};
+pub use spm_scalar::SpmScalar;
 
 /// Why a device, a transfer or a launch failed: the runtime refused or failed the work, or a
 /// tensor was not where the operation needs it.
@@ -97,9 +105,10 @@ pub mod prelude {
         HbmBufferSliceMut, HostBuffer, HostBufferSlice, HostBufferSliceMut, Kernel, Loadable, Placement, ToPlacements,
         Topology, launch,
     };
+    pub use super::spm_scalar::SpmScalar;
     pub use super::tensor::memory::*;
     pub use super::tensor::tu::*;
     pub use super::{Error, array_vec::*, constraints::SLICES_PER_PE, scalar::*, storage::*, tensor::*};
     pub use furiosa_mapping::*;
-    pub use furiosa_opt_macro::{DeviceSend, device, unroll};
+    pub use furiosa_opt_macro::{DeviceSend, bound, device, unroll};
 }

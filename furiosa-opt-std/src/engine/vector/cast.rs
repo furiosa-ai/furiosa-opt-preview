@@ -100,7 +100,7 @@ pub(crate) fn cast_stream<
     input: Tensor<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>, B>,
 ) -> VectorCastTensor<'l, T, OutD, Chip, Cluster, Slice, Time, OutPacket, B> {
     verify_cast::<D, OutD, Packet, OutPacket>();
-    VectorCastTensor::new(device, input.map(|value| value.cast()).transpose(false))
+    VectorCastTensor::new(device, input.map(Cast::cast).transpose(false))
 }
 
 /// Validates the VE cast-compaction packet layouts.

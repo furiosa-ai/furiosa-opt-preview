@@ -37,6 +37,7 @@
     * [Cast Compaction](./computing-tensors/vector-engine/cast-compaction.md)
   + [Transpose Engine](./computing-tensors/transpose-engine.md)
   + [Commit Adapter](./computing-tensors/commit-adapter.md)
+  + [Per Cluster](./computing-tensors/per-cluster.md)
 
 
   + [Case Study: Chip/Cluster Reduction](./kernel-examples/chip-cluster-reduce.md)

@@ -127,7 +127,16 @@ impl<'l, const T: Tu, P: CanApplyFetch, D: Scalar, Chip: M, Cluster: M, Slice: M
     /// Runs the Fetch Sequencer.
     #[primitive(TuTensor::fetch)]
     pub fn fetch<OutTime: M, OutPacket: M>(self) -> FetchTensor<'l, T, D, Chip, Cluster, Slice, OutTime, OutPacket, B> {
-        verify_fetch::<Cluster, Slice, Time, Packet, OutTime, OutPacket>();
+        verify_fetch(
+            FetchDimensionsInput {
+                cluster_size: Cluster::SIZE,
+                slice_size: Slice::SIZE,
+            },
+            Time::to_value(),
+            Packet::to_value(),
+            OutTime::to_value(),
+            OutPacket::to_value(),
+        );
         FetchTensor::new(self.device, self.inner.transpose(true))
     }
 }
@@ -155,7 +164,16 @@ impl<
         // ANCHOR_END: fetch_chip_lift
         constraints::assert_chip_preserved::<Chip, OutChip>();
         constraints::assert_lift_factor::<Chip, Time, OutTime>();
-        verify_fetch_lift::<Chip, OutChip, Time, Packet, OutTime>(FetchLiftDimension::Chip);
+        verify_fetch_lift(
+            FetchLiftInput {
+                dimension: FetchLiftDimension::Chip,
+                in_placement: Chip::to_value(),
+                out_placement: OutChip::to_value(),
+            },
+            Time::to_value(),
+            Packet::to_value(),
+            OutTime::to_value(),
+        );
         FetchChipLiftTensor::new(self.device, self.inner.transpose(true))
     }
 }
@@ -182,7 +200,16 @@ impl<
         // ANCHOR_END: fetch_cluster_lift
         constraints::assert_cluster_preserved::<Cluster, OutCluster>();
         constraints::assert_lift_factor::<Cluster, Time, OutTime>();
-        verify_fetch_lift::<Cluster, OutCluster, Time, Packet, OutTime>(FetchLiftDimension::Cluster);
+        verify_fetch_lift(
+            FetchLiftInput {
+                dimension: FetchLiftDimension::Cluster,
+                in_placement: Cluster::to_value(),
+                out_placement: OutCluster::to_value(),
+            },
+            Time::to_value(),
+            Packet::to_value(),
+            OutTime::to_value(),
+        );
         FetchClusterLiftTensor::new(self.device, self.inner.transpose(true))
     }
 }
@@ -209,42 +236,48 @@ impl<
         // ANCHOR_END: fetch_slice_lift
         constraints::assert_slice_preserved::<Slice, OutSlice>();
         constraints::assert_lift_factor::<Slice, Time, OutTime>();
-        verify_fetch_lift::<Slice, OutSlice, Time, Packet, OutTime>(FetchLiftDimension::Slice);
+        verify_fetch_lift(
+            FetchLiftInput {
+                dimension: FetchLiftDimension::Slice,
+                in_placement: Slice::to_value(),
+                out_placement: OutSlice::to_value(),
+            },
+            Time::to_value(),
+            Packet::to_value(),
+            OutTime::to_value(),
+        );
         FetchSliceLiftTensor::new(self.device, self.inner.transpose(true))
     }
 }
 
 /// Validates the Fetch dimensions and synthesizes its read descriptors.
-fn verify_fetch<Cluster: M, Slice: M, Time: M, Packet: M, OutTime: M, OutPacket: M>() {
-    config_fetch_dimensions(FetchDimensionsInput {
-        cluster_size: Cluster::SIZE,
-        slice_size: Slice::SIZE,
-    })
-    .unwrap_or_else(|e| panic!("{e}"));
+fn verify_fetch(
+    dimensions: FetchDimensionsInput,
+    in_time: Mapping,
+    in_packet: Mapping,
+    out_time: Mapping,
+    out_packet: Mapping,
+) {
+    config_fetch_dimensions(dimensions).unwrap_or_else(|e| panic!("{e}"));
     config_fetch(FetchInput {
-        in_time: Time::to_value(),
-        in_packet: Packet::to_value(),
-        out_time: OutTime::to_value(),
-        out_packet: OutPacket::to_value(),
+        in_time,
+        in_packet,
+        out_time,
+        out_packet,
         lifted: None,
     })
     .unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// Validates one placement lift and its `(time, packet, base)` descriptors.
-fn verify_fetch_lift<Placement: M, OutPlacement: M, Time: M, Packet: M, OutTime: M>(dimension: FetchLiftDimension) {
-    let lifted = config_fetch_lift(FetchLiftInput {
-        dimension,
-        in_placement: Placement::to_value(),
-        out_placement: OutPlacement::to_value(),
-    })
-    .unwrap_or_else(|e| panic!("{e}"));
+fn verify_fetch_lift(input: FetchLiftInput, in_time: Mapping, packet: Mapping, out_time: Mapping) {
+    let dimension = input.dimension;
+    let lifted = config_fetch_lift(input).unwrap_or_else(|e| panic!("{e}"));
     // The packet a lift hands on is the one it was given: only `OutTime` loses the lifted axes.
-    let packet = Packet::to_value();
     let _ = config_fetch(FetchInput {
-        in_time: Time::to_value(),
+        in_time,
         in_packet: packet.clone(),
-        out_time: OutTime::to_value(),
+        out_time,
         out_packet: packet,
         lifted: Some(lifted),
     })
@@ -258,12 +291,19 @@ mod tests {
 
     axes![A = 8, B = 8, S = 64, X = 8, L = 16];
 
-    // verify_fetch::<D, Cluster, Slice, Time, Packet, OutTime, OutPacket>; The DM form is the input
-    // `Time ⊗ Packet`; `(OutTime, OutPacket)` is the requested stream.
-
+    // verify_fetch; The DM form is the input `Time ⊗ Packet`; `(OutTime, OutPacket)` is the requested stream.
     #[test]
     fn valid_read() {
-        verify_fetch::<m![1], m![S], m![1], m![A, B], m![A], m![B]>();
+        verify_fetch(
+            FetchDimensionsInput {
+                cluster_size: <m![1]>::SIZE,
+                slice_size: <m![S]>::SIZE,
+            },
+            <m![1]>::to_value(),
+            <m![A, B]>::to_value(),
+            <m![A]>::to_value(),
+            <m![B]>::to_value(),
+        );
     }
     /// The packet must be the DM's own innermost axis: asking for the outer one steps the DM per
     /// element, which is below the read the hardware performs.
@@ -304,18 +344,45 @@ mod tests {
     /// Splits `L`: packet reads `L % 8`, while time walks `L / 8`.
     #[test]
     fn split_axis_across_packet_and_time() {
-        verify_fetch::<m![1], m![S], m![1], m![L], m![L / 8], m![L % 8]>();
+        verify_fetch(
+            FetchDimensionsInput {
+                cluster_size: <m![1]>::SIZE,
+                slice_size: <m![S]>::SIZE,
+            },
+            <m![1]>::to_value(),
+            <m![L]>::to_value(),
+            <m![L / 8]>::to_value(),
+            <m![L % 8]>::to_value(),
+        );
     }
 
     /// Replicates the packet across four stride-zero time steps.
     #[test]
     fn broadcast_time_read() {
-        verify_fetch::<m![1], m![S], m![1], m![A], m![4], m![A]>();
+        verify_fetch(
+            FetchDimensionsInput {
+                cluster_size: <m![1]>::SIZE,
+                slice_size: <m![S]>::SIZE,
+            },
+            <m![1]>::to_value(),
+            <m![A]>::to_value(),
+            <m![4]>::to_value(),
+            <m![A]>::to_value(),
+        );
     }
 
     #[test]
     fn live_input_time_reads() {
-        verify_fetch::<m![1], m![S], m![A], m![B], m![A], m![B]>();
+        verify_fetch(
+            FetchDimensionsInput {
+                cluster_size: <m![1]>::SIZE,
+                slice_size: <m![S]>::SIZE,
+            },
+            <m![A]>::to_value(),
+            <m![B]>::to_value(),
+            <m![A]>::to_value(),
+            <m![B]>::to_value(),
+        );
     }
     /// Rejects a stream that leaves the DM's live `B` axis unread.
     #[test]
@@ -359,30 +426,79 @@ mod tests {
     #[test]
     fn verify_fetch_checks_dimensions() {
         assert!(
-            std::panic::catch_unwind(|| { verify_fetch::<m![3], m![S], m![1], m![A, B], m![A], m![B]>() }).is_err()
+            std::panic::catch_unwind(|| {
+                verify_fetch(
+                    FetchDimensionsInput {
+                        cluster_size: <m![3]>::SIZE,
+                        slice_size: <m![S]>::SIZE,
+                    },
+                    <m![1]>::to_value(),
+                    <m![A, B]>::to_value(),
+                    <m![A]>::to_value(),
+                    <m![B]>::to_value(),
+                )
+            })
+            .is_err()
         );
         assert!(
-            std::panic::catch_unwind(|| { verify_fetch::<m![1], m![100], m![1], m![A, B], m![A], m![B]>() }).is_err()
+            std::panic::catch_unwind(|| {
+                verify_fetch(
+                    FetchDimensionsInput {
+                        cluster_size: <m![1]>::SIZE,
+                        slice_size: <m![100]>::SIZE,
+                    },
+                    <m![1]>::to_value(),
+                    <m![A, B]>::to_value(),
+                    <m![A]>::to_value(),
+                    <m![B]>::to_value(),
+                )
+            })
+            .is_err()
         );
     }
 
     /// Accepts a 4-byte packet because adapters may widen it before final alignment.
     #[test]
     fn unaligned_output_packet_allowed() {
-        verify_fetch::<m![1], m![S], m![1], m![L / 4], m![1], m![L / 4]>();
+        verify_fetch(
+            FetchDimensionsInput {
+                cluster_size: <m![1]>::SIZE,
+                slice_size: <m![S]>::SIZE,
+            },
+            <m![1]>::to_value(),
+            <m![L / 4]>::to_value(),
+            <m![1]>::to_value(),
+            <m![L / 4]>::to_value(),
+        );
     }
-    // verify_fetch_lift::<Placement, OutPlacement, Time, Packet, OutTime>; A lift stage moves axes
-    // out of its own `Time` and into `OutPlacement`; the packet is handed on.
 
+    // verify_fetch_lift; A lift stage moves axes out of its own `Time` and into `OutPlacement`;
+    // the packet is handed on.
     #[test]
     fn valid_lift() {
-        verify_fetch_lift::<m![S, 2], m![S, A / 4], m![A], m![B], m![A % 4]>(FetchLiftDimension::Slice);
+        verify_fetch_lift(
+            FetchLiftInput {
+                dimension: FetchLiftDimension::Slice,
+                in_placement: <m![S, 2]>::to_value(),
+                out_placement: <m![S, A / 4]>::to_value(),
+            },
+            <m![A]>::to_value(),
+            <m![B]>::to_value(),
+            <m![A % 4]>::to_value(),
+        );
     }
 
     #[test]
     fn valid_two_broadcast_lift() {
-        verify_fetch_lift::<m![2, S, 2], m![A / 4, S, B / 4], m![A / 4, B / 4], m![X], m![1]>(
-            FetchLiftDimension::Slice,
+        verify_fetch_lift(
+            FetchLiftInput {
+                dimension: FetchLiftDimension::Slice,
+                in_placement: <m![2, S, 2]>::to_value(),
+                out_placement: <m![A / 4, S, B / 4]>::to_value(),
+            },
+            <m![A / 4, B / 4]>::to_value(),
+            <m![X]>::to_value(),
+            <m![1]>::to_value(),
         );
     }
     /// Rejects renaming a live placement axis; only broadcasts may be filled by a lift.

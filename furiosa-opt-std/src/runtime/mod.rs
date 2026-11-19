@@ -114,6 +114,24 @@ impl Device {
 }
 
 impl<B: Backend> Device<B> {
+    /// Number of chips in the device's opened placement.
+    pub fn num_chip(&self) -> usize {
+        usize::from(B::topology(self.tdma.device()).chips)
+    }
+
+    /// Number of clusters per chip in the device's opened placement.
+    pub fn num_cluster(&self) -> usize {
+        let topology = B::topology(self.tdma.device());
+        let num_chip = usize::from(topology.chips);
+        let clusters = topology.clusters();
+        assert_eq!(
+            clusters % num_chip,
+            0,
+            "a device's {clusters} clusters must divide evenly over its {num_chip} chips",
+        );
+        clusters / num_chip
+    }
+
     /// Prepares a launch of `function` on this device, with `args` as the parameters after it:
     /// `device.launch(f, (&a, &b))` is `launch(f, (&mut device, &a, &b))`.
     pub fn launch<'c, F, Args>(&'c mut self, function: F, args: Args) -> Prepared<Launch<F, Args::Output>>

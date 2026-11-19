@@ -3,6 +3,8 @@
 //! This module provides the actual operation logic (apply functions, operation functions)
 //! separated from type definitions in `op.rs`.
 
+use std::ops::{Add, Div, Mul, Sub};
+
 use super::*;
 use crate::engine::vector::layer::{FpToFxp, FxpToFp, Reinterpret};
 use crate::prelude::VeScalar;
@@ -121,10 +123,10 @@ impl FxpBinaryOp {
     /// Returns the raw binary operation function.
     pub fn op_fn(&self) -> fn(i32, i32) -> i32 {
         match self {
-            Self::AddFxp => |a, b| a.wrapping_add(b),
-            Self::AddFxpSat => |a, b| a.saturating_add(b),
-            Self::SubFxp => |a, b| a.wrapping_sub(b),
-            Self::SubFxpSat => |a, b| a.saturating_sub(b),
+            Self::AddFxp => i32::wrapping_add,
+            Self::AddFxpSat => i32::saturating_add,
+            Self::SubFxp => i32::wrapping_sub,
+            Self::SubFxpSat => i32::saturating_sub,
             Self::LeftShift => |a, b| a << (b as u32),
             Self::LeftShiftSat => |a, b| {
                 let shifted = i64::from(a) << ((b as u32) & 0x1f);
@@ -142,7 +144,7 @@ impl FxpBinaryOp {
                     (((product >> 30) + 1) >> 1) as i32
                 }
             },
-            Self::MulInt => |a, b| a.wrapping_mul(b),
+            Self::MulInt => i32::wrapping_mul,
             Self::LogicRightShift => |a, b| ((a as u32) >> (b as u32)) as i32,
             Self::ArithRightShift => |a, b| a >> (b as u32),
             Self::ArithRightShiftRound => rounding_divide_by_pot,
@@ -175,10 +177,10 @@ impl FpBinaryOp {
     /// Returns the raw binary operation function.
     pub fn op_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
-            Self::AddF => |a, b| apply_float_binary_operation(a, b, |a, b| a + b),
-            Self::SubF => |a, b| apply_float_binary_operation(a, b, |a, b| a - b),
-            Self::MulF(_) => |a, b| apply_float_binary_operation(a, b, |a, b| a * b),
-            Self::DivF => |a, b| apply_float_binary_operation(a, b, |a, b| a / b),
+            Self::AddF => |a, b| apply_float_binary_operation(a, b, Add::add),
+            Self::SubF => |a, b| apply_float_binary_operation(a, b, Sub::sub),
+            Self::MulF(_) => |a, b| apply_float_binary_operation(a, b, Mul::mul),
+            Self::DivF => |a, b| apply_float_binary_operation(a, b, Div::div),
         }
     }
 }
@@ -205,10 +207,10 @@ impl ClipBinaryOpI32 {
     /// Returns the raw binary operation function.
     pub fn op_fn(&self) -> fn(i32, i32) -> i32 {
         match self {
-            Self::AddFxp => |a, b| a.wrapping_add(b),
-            Self::AddFxpSat => |a, b| a.saturating_add(b),
-            Self::Min => |a, b| a.min(b),
-            Self::Max => |a, b| a.max(b),
+            Self::AddFxp => i32::wrapping_add,
+            Self::AddFxpSat => i32::saturating_add,
+            Self::Min => i32::min,
+            Self::Max => i32::max,
             Self::AbsMin => |a, b| {
                 let magnitude = i64::from(a).abs().min(i64::from(b).abs());
                 (if a >= 0 { magnitude } else { -magnitude }) as i32
@@ -226,7 +228,7 @@ impl ClipBinaryOpF32 {
     /// Returns the raw binary operation function.
     pub fn op_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
-            Self::Add => |a, b| apply_float_binary_operation(a, b, |a, b| a + b),
+            Self::Add => |a, b| apply_float_binary_operation(a, b, Add::add),
             Self::Min => |a, b| apply_float_binary_operation(a, b, f32::minimum),
             Self::Max => |a, b| apply_float_binary_operation(a, b, f32::maximum),
             Self::AbsMin => |a, b| apply_float_binary_operation(a, b, |a, b| a.abs().minimum(b.abs()).copysign(a)),
@@ -287,7 +289,7 @@ impl HasConversionOp<f32, i32> for FpToFxp {
 /// [`VeScalar::reinterpret`](crate::prelude::VeScalar::reinterpret).
 impl<D: VeScalar, D2: VeScalar> HasConversionOp<D, D2> for Reinterpret {
     fn conversion_op_fn(&self) -> impl Fn(D) -> D2 + Sync {
-        |x| x.reinterpret::<D2>()
+        D::reinterpret::<D2>
     }
 }
 
@@ -299,9 +301,9 @@ impl IntraSliceReduceOpI32 {
     /// Returns the raw binary reduction function.
     pub fn reduce_fn(&self) -> fn(i32, i32) -> i32 {
         match self {
-            Self::AddSat => |a, b| a.saturating_add(b),
-            Self::Max => |a, b| a.max(b),
-            Self::Min => |a, b| a.min(b),
+            Self::AddSat => i32::saturating_add,
+            Self::Max => i32::max,
+            Self::Min => i32::min,
         }
     }
 
@@ -319,9 +321,9 @@ impl IntraSliceReduceOpF32 {
     /// Returns the raw binary reduction function.
     pub fn reduce_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
-            Self::Add => |a, b| a + b,
-            Self::Max => |a, b| a.max(b),
-            Self::Min => |a, b| a.min(b),
+            Self::Add => Add::add,
+            Self::Max => f32::max,
+            Self::Min => f32::min,
         }
     }
 
@@ -343,10 +345,10 @@ impl InterSliceReduceOpI32 {
     /// Returns the raw binary reduction function.
     pub fn reduce_fn(&self) -> fn(i32, i32) -> i32 {
         match self {
-            Self::Add => |a, b| a.wrapping_add(b),
-            Self::AddSat => |a, b| a.saturating_add(b),
-            Self::Max => |a, b| a.max(b),
-            Self::Min => |a, b| a.min(b),
+            Self::Add => i32::wrapping_add,
+            Self::AddSat => i32::saturating_add,
+            Self::Max => i32::max,
+            Self::Min => i32::min,
         }
     }
 
@@ -364,10 +366,10 @@ impl InterSliceReduceOpF32 {
     /// Returns the raw binary reduction function.
     pub fn reduce_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
-            Self::Add => |a, b| a + b,
-            Self::Max => |a, b| a.max(b),
-            Self::Min => |a, b| a.min(b),
-            Self::Mul => |a, b| a * b,
+            Self::Add => Add::add,
+            Self::Max => f32::max,
+            Self::Min => f32::min,
+            Self::Mul => Mul::mul,
         }
     }
 
@@ -390,7 +392,7 @@ impl FpDivBinaryOp {
     /// Returns the raw binary operation function.
     pub fn op_fn(&self) -> fn(f32, f32) -> f32 {
         match self {
-            Self::DivF => |a, b| apply_float_binary_operation(a, b, |a, b| a / b),
+            Self::DivF => |a, b| apply_float_binary_operation(a, b, Div::div),
         }
     }
 }

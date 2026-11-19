@@ -1,12 +1,25 @@
 //! Macros for virtual ISA.
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
+use syn::spanned::Spanned;
 use syn::visit_mut::{self, VisitMut};
 use syn::{
-    Attribute, Data, DeriveInput, Error, ExprForLoop, Item, Meta, Type, Variant, parse_macro_input, parse_quote,
+    Attribute, Data, DeriveInput, Error, ExprForLoop, Item, Meta, Stmt, Type, Variant, parse_macro_input, parse_quote,
+    parse_quote_spanned,
 };
+
+#[derive(Default)]
+struct LoopHintMarkerInserter {
+    errors: Vec<Error>,
+}
+
+/// A parsed loop hint attribute.
+enum LoopDirective {
+    Unroll,
+    Bound(Box<syn::Expr>),
+}
 
 /// The rev of this macro's source tree, read at first expansion so no build script has to
 /// stamp it (a build-script trigger on the macro would rebuild every dependent crate).
@@ -38,9 +51,8 @@ fn rev() -> &'static str {
     })
 }
 
-/// Fully unrolls the annotated `for` loop before device scheduling.
-///
-/// The loop may be in a [`device`] function or any function reachable from one.
+/// Fully unrolls a zero-based device loop with a positive compile-time end before scheduling.
+/// Takes no arguments and cannot share a loop with [`bound`].
 #[proc_macro_attribute]
 pub fn unroll(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
@@ -49,9 +61,28 @@ pub fn unroll(attr: TokenStream, item: TokenStream) -> TokenStream {
             .into();
     }
 
+    expand_loop_hint(item, LoopDirective::Unroll)
+}
+
+/// Declares a compile-time `usize` bound for a zero-based device loop; incompatible with [`unroll`].
+/// `MAX` must be at least 1 and a compile-time end must equal it; a runtime end above `MAX` runs
+/// the body `MAX` times on the device, and the CPU backend panics.
+#[proc_macro_attribute]
+pub fn bound(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if attr.is_empty() {
+        return Error::new(Span::call_site(), BOUND_ARGUMENT).to_compile_error().into();
+    }
+    let max = parse_macro_input!(attr as syn::Expr);
+    expand_loop_hint(item, LoopDirective::Bound(Box::new(max)))
+}
+
+/// The error for a `#[bound]` written without its one argument.
+const BOUND_ARGUMENT: &str = "`bound` takes one argument, `MAX`: write `#[bound(MAX)]`";
+
+fn expand_loop_hint(item: TokenStream, hint: LoopDirective) -> TokenStream {
     let mut loop_expr = parse_macro_input!(item as ExprForLoop);
     let mut errors = Vec::new();
-    apply_unroll(&mut loop_expr, true, &mut errors);
+    apply_loop_hint(&mut loop_expr, Some(hint), &mut errors);
     if !errors.is_empty() {
         let errors = errors.iter().map(Error::to_compile_error);
         return quote!(#(#errors)*).into();
@@ -59,54 +90,130 @@ pub fn unroll(attr: TokenStream, item: TokenStream) -> TokenStream {
     quote!(#loop_expr).into()
 }
 
-fn insert_unroll_marker(loop_expr: &mut ExprForLoop) {
-    loop_expr
-        .body
-        .stmts
-        .insert(0, parse_quote!(::furiosa_opt_std::__private::__loop_hint_unroll();));
-}
-
-#[derive(Default)]
-struct UnrollMarkerInserter {
-    errors: Vec<Error>,
-}
-
-impl VisitMut for UnrollMarkerInserter {
+impl VisitMut for LoopHintMarkerInserter {
     fn visit_expr_for_loop_mut(&mut self, loop_expr: &mut ExprForLoop) {
         // Consume loop-owned attributes before the generic visitor rejects misplaced ones.
-        apply_unroll(loop_expr, false, &mut self.errors);
+        apply_loop_hint(loop_expr, None, &mut self.errors);
         visit_mut::visit_expr_for_loop_mut(self, loop_expr);
     }
 
     fn visit_attribute_mut(&mut self, attribute: &mut Attribute) {
-        if is_unroll(attribute) {
-            self.errors.push(Error::new_spanned(
-                attribute,
-                "`unroll` goes on a `for` loop, and this is not one",
-            ));
+        if LoopDirective::is_hint(attribute) {
+            let path = attribute.path();
+            let message = format!("`{}` goes on a `for` loop, and this is not one", quote!(#path));
+            self.errors.push(Error::new_spanned(attribute, message));
         }
     }
 }
 
-fn apply_unroll(loop_expr: &mut ExprForLoop, mut requested: bool, errors: &mut Vec<Error>) {
+/// Replaces the loop's sole hint, from attributes or `requested`, with a body-head marker.
+fn apply_loop_hint(loop_expr: &mut ExprForLoop, requested: Option<LoopDirective>, errors: &mut Vec<Error>) {
+    // The loop's single hint so far, with the span its marker reports at.
+    let mut loop_hint = requested.map(|hint| (hint, Span::call_site()));
     loop_expr.attrs.retain(|attribute| {
-        if !is_unroll(attribute) {
+        let Some(hint) = LoopDirective::parse(attribute) else {
             return true;
-        }
-        match attribute.meta {
-            Meta::Path(_) if !requested => requested = true,
-            Meta::Path(_) => errors.push(Error::new_spanned(attribute, "duplicate `unroll` attribute")),
-            _ => errors.push(Error::new_spanned(attribute, "`unroll` takes no arguments")),
+        };
+        match (hint, &loop_hint) {
+            (Ok(hint), Some((previous, _))) => {
+                let message = if std::mem::discriminant(&hint) == std::mem::discriminant(previous) {
+                    format!("duplicate `{}` attribute", hint.name())
+                } else {
+                    format!(
+                        "`{}` and `{}` cannot annotate the same loop",
+                        previous.name(),
+                        hint.name()
+                    )
+                };
+                errors.push(Error::new_spanned(attribute, message));
+            }
+            (Ok(hint), None) => loop_hint = Some((hint, attribute.span())),
+            (Err(error), _) => errors.push(error),
         }
         false
     });
-    if requested {
-        insert_unroll_marker(loop_expr);
+    if let Some((hint, span)) = loop_hint {
+        hint.insert_marker(loop_expr, span);
     }
 }
 
-fn is_unroll(attribute: &Attribute) -> bool {
-    attribute.path().is_ident("unroll")
+/// The loop index the `#[bound]` marker checks on the CPU, read through the loop's pattern; a `_`
+/// is named first, and a pattern that binds no index by value yields `None`.
+fn loop_index(pat: &mut syn::Pat) -> Option<syn::Expr> {
+    match pat {
+        // `i @ p` binds the whole index to `i`, whatever `p` matches. A `ref` index is refused: the
+        // translator cannot read through it.
+        syn::Pat::Ident(pat) if pat.by_ref.is_none() => {
+            let ident = &pat.ident;
+            Some(parse_quote!(#ident))
+        }
+        syn::Pat::Wild(_) => {
+            let index = syn::Ident::new("__bound_index", Span::mixed_site());
+            *pat = parse_quote!(#index);
+            Some(parse_quote!(#index))
+        }
+        syn::Pat::Paren(paren) => loop_index(&mut paren.pat),
+        _ => None,
+    }
+}
+
+impl LoopDirective {
+    /// Whether `attribute` is a loop hint, without parsing its arguments.
+    fn is_hint(attribute: &Attribute) -> bool {
+        let path = attribute.path();
+        path.is_ident("unroll") || path.is_ident("bound")
+    }
+
+    /// Parses a loop hint attribute, or returns `None` for any other attribute.
+    fn parse(attribute: &Attribute) -> Option<syn::Result<Self>> {
+        if !Self::is_hint(attribute) {
+            return None;
+        }
+        let path = attribute.path();
+        Some(if path.is_ident("unroll") {
+            match attribute.meta {
+                Meta::Path(_) => Ok(Self::Unroll),
+                _ => Err(Error::new_spanned(attribute, "`unroll` takes no arguments")),
+            }
+        } else if path.is_ident("bound") {
+            match &attribute.meta {
+                Meta::List(list) if !list.tokens.is_empty() => {
+                    attribute.parse_args().map(|max| Self::Bound(Box::new(max)))
+                }
+                _ => Err(Error::new_spanned(attribute, BOUND_ARGUMENT)),
+            }
+        } else {
+            unreachable!("`is_hint` admits a loop hint that `parse` does not handle")
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Unroll => "unroll",
+            Self::Bound(_) => "bound",
+        }
+    }
+
+    /// Inserts the call that carries this hint to the device translator at the head of the loop body,
+    /// where the translator looks for it.
+    fn insert_marker(self, loop_expr: &mut ExprForLoop, span: Span) {
+        let marker: Stmt = match self {
+            Self::Unroll => {
+                parse_quote_spanned!(span=> ::furiosa_opt_std::__private::__loop_hint_unroll();)
+            }
+            // `const { }` makes rustc evaluate the bound, and unlike a const-generic argument it may
+            // use generic parameters.
+            Self::Bound(max) => match loop_index(&mut loop_expr.pat) {
+                Some(index) => parse_quote_spanned!(span=>
+                    ::furiosa_opt_std::__private::__loop_hint_bound(#index, const { #max });
+                ),
+                None => parse_quote_spanned!(span=>
+                    ::core::compile_error!("`bound` needs its loop variable by value, as a name or `_`");
+                ),
+            },
+        };
+        loop_expr.body.stmts.insert(0, marker);
+    }
 }
 
 #[proc_macro_attribute]
@@ -218,10 +325,10 @@ fn expand_device(attr: &str, item: Item) -> TokenStream2 {
         }
     };
 
-    let mut unroll_markers = UnrollMarkerInserter::default();
-    unroll_markers.visit_block_mut(&mut func.block);
-    if !unroll_markers.errors.is_empty() {
-        let errors = unroll_markers.errors.iter().map(Error::to_compile_error);
+    let mut loop_hints = LoopHintMarkerInserter::default();
+    loop_hints.visit_block_mut(&mut func.block);
+    if !loop_hints.errors.is_empty() {
+        let errors = loop_hints.errors.iter().map(Error::to_compile_error);
         return quote!(#(#errors)*);
     }
 
@@ -434,18 +541,160 @@ mod device_tests {
 mod tests {
     use super::*;
 
+    /// Turns the loop hints in `block` into markers as `#[device]` does, and returns the errors it
+    /// reports.
+    fn insert_device_markers(block: &mut syn::Block) -> Vec<String> {
+        let mut inserter = LoopHintMarkerInserter::default();
+        inserter.visit_block_mut(block);
+        inserter.errors.iter().map(Error::to_string).collect()
+    }
+
+    /// Each hint becomes a marker call at the head of its loop body.
     #[test]
-    fn duplicate_unroll_is_rejected_during_macro_expansion() {
-        let mut block = parse_quote!({
-            #[unroll]
-            #[unroll]
+    fn hints_become_markers_at_the_head_of_the_loop_body() {
+        let cases: [(syn::Block, Stmt); 2] = [
+            (
+                parse_quote!({
+                    #[unroll]
+                    for _ in 0..4 {
+                        body();
+                    }
+                }),
+                parse_quote!(::furiosa_opt_std::__private::__loop_hint_unroll();),
+            ),
+            (
+                parse_quote!({
+                    #[bound(N - 1)]
+                    for _ in 0..n {
+                        body();
+                    }
+                }),
+                parse_quote!(::furiosa_opt_std::__private::__loop_hint_bound(__bound_index, const { N - 1 });),
+            ),
+        ];
+        for (mut block, marker) in cases {
+            assert!(insert_device_markers(&mut block).is_empty());
+            let Stmt::Expr(syn::Expr::ForLoop(loop_expr), _) = &block.stmts[0] else {
+                panic!("expected a `for` loop");
+            };
+            assert!(loop_expr.attrs.is_empty());
+            let stmts = &loop_expr.body.stmts;
+            assert_eq!(quote!(#(#stmts)*).to_string(), quote!(#marker body();).to_string());
+        }
+    }
+
+    /// A loop takes at most one hint, whatever the kinds and their order.
+    #[test]
+    fn a_loop_takes_one_hint() {
+        let cases: [(syn::Block, &str); 4] = [
+            (
+                parse_quote!({
+                    #[unroll]
+                    #[unroll]
+                    for _ in 0..4 {}
+                }),
+                "duplicate `unroll` attribute",
+            ),
+            (
+                parse_quote!({
+                    #[bound(4)]
+                    #[bound(8)]
+                    for _ in 0..4 {}
+                }),
+                "duplicate `bound` attribute",
+            ),
+            (
+                parse_quote!({
+                    #[bound(4)]
+                    #[unroll]
+                    for _ in 0..4 {}
+                }),
+                "`bound` and `unroll` cannot annotate the same loop",
+            ),
+            (
+                parse_quote!({
+                    #[unroll]
+                    #[bound(4)]
+                    for _ in 0..4 {}
+                }),
+                "`unroll` and `bound` cannot annotate the same loop",
+            ),
+        ];
+        for (mut block, message) in cases {
+            assert_eq!(insert_device_markers(&mut block), [message]);
+        }
+    }
+
+    /// A hint names itself when it is written on something other than a `for` loop.
+    #[test]
+    fn a_hint_goes_on_a_for_loop() {
+        let cases: [(syn::Block, &str); 2] = [
+            (
+                parse_quote!({
+                    #[unroll]
+                    if ready() {}
+                }),
+                "`unroll` goes on a `for` loop, and this is not one",
+            ),
+            (
+                parse_quote!({
+                    #[bound(4)]
+                    if ready() {}
+                }),
+                "`bound` goes on a `for` loop, and this is not one",
+            ),
+        ];
+        for (mut block, message) in cases {
+            assert_eq!(insert_device_markers(&mut block), [message]);
+        }
+    }
+
+    /// A hint written with arguments it does not take is rejected.
+    #[test]
+    fn a_hint_takes_its_own_arguments() {
+        let mut unroll = parse_quote!({
+            #[unroll(2)]
             for _ in 0..4 {}
         });
-        let mut inserter = UnrollMarkerInserter::default();
+        assert_eq!(insert_device_markers(&mut unroll), ["`unroll` takes no arguments"]);
 
-        inserter.visit_block_mut(&mut block);
+        let missing: [syn::Block; 2] = [
+            parse_quote!({
+                #[bound]
+                for _ in 0..4 {}
+            }),
+            parse_quote!({
+                #[bound()]
+                for _ in 0..4 {}
+            }),
+        ];
+        for mut block in missing {
+            assert_eq!(insert_device_markers(&mut block), [BOUND_ARGUMENT]);
+        }
 
-        assert_eq!(inserter.errors.len(), 1);
-        assert_eq!(inserter.errors[0].to_string(), "duplicate `unroll` attribute");
+        // `syn` writes the parse error for two arguments, so check only that the bound is rejected
+        // with one error, not the error's wording.
+        let mut two = parse_quote!({
+            #[bound(4, 8)]
+            for _ in 0..4 {}
+        });
+        assert_eq!(insert_device_markers(&mut two).len(), 1);
+    }
+
+    /// When rustc expands `#[bound]` itself, outside a `#[device]` body, a remaining `#[unroll]`
+    /// still conflicts with it.
+    #[test]
+    fn the_bound_attribute_rejects_a_remaining_unroll() {
+        let mut loop_expr: ExprForLoop = parse_quote!(
+            #[unroll]
+            for _ in 0..4 {}
+        );
+        let mut errors = Vec::new();
+        apply_loop_hint(&mut loop_expr, Some(LoopDirective::Bound(parse_quote!(4))), &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].to_string(),
+            "`bound` and `unroll` cannot annotate the same loop"
+        );
     }
 }

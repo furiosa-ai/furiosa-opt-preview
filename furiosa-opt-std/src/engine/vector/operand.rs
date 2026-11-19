@@ -144,40 +144,40 @@ pub trait Plain: sealed::Sealed {}
 /// A live stash at the reader's scalar and way reads:
 /// ```
 /// # #![feature(adt_const_params)]
-/// # use furiosa_opt_std::prelude::{stage::Way, Occupied, Stash, StashState, StashTransition, VeScalar};
+/// # use furiosa_opt_std::prelude::{stage::{Way, Way4, Way8}, Occupied, Stash, StashState, StashTransition, VeScalar};
 /// # use furiosa_mapping::Broadcast;
-/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
-/// reads::<Occupied<f32, Broadcast<1>, { Way::Way8 }>, f32, { Way::Way8 }, Stash>();
+/// # fn reads<S: StashState, RD: VeScalar, W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Occupied<f32, Broadcast<1>, Way8>, f32, Way8, Stash>();
 /// ```
 /// A stash written as `i32` cannot be read by an `f32` op, so undo the conversion or reinterpret first:
 /// ```compile_fail,E0277
 /// # #![feature(adt_const_params)]
-/// # use furiosa_opt_std::prelude::{stage::Way, Occupied, Stash, StashState, StashTransition, VeScalar};
+/// # use furiosa_opt_std::prelude::{stage::{Way, Way4, Way8}, Occupied, Stash, StashState, StashTransition, VeScalar};
 /// # use furiosa_mapping::Broadcast;
-/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
-/// reads::<Occupied<i32, Broadcast<1>, { Way::Way8 }>, f32, { Way::Way8 }, Stash>();
+/// # fn reads<S: StashState, RD: VeScalar, W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Occupied<i32, Broadcast<1>, Way8>, f32, Way8, Stash>();
 /// ```
 /// Nor 4-way by an 8-way op: the operand register is addressed per way, so the reader would get the
 /// wrong elements.
 /// ```compile_fail,E0277
 /// # #![feature(adt_const_params)]
-/// # use furiosa_opt_std::prelude::{stage::Way, Occupied, Stash, StashState, StashTransition, VeScalar};
+/// # use furiosa_opt_std::prelude::{stage::{Way, Way4, Way8}, Occupied, Stash, StashState, StashTransition, VeScalar};
 /// # use furiosa_mapping::Broadcast;
-/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
-/// reads::<Occupied<f32, Broadcast<1>, { Way::Way4 }>, f32, { Way::Way8 }, Stash>();
+/// # fn reads<S: StashState, RD: VeScalar, W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Occupied<f32, Broadcast<1>, Way4>, f32, Way8, Stash>();
 /// ```
 /// Never written, and read twice, are the same missing impl:
 /// ```compile_fail,E0277
 /// # #![feature(adt_const_params)]
-/// # use furiosa_opt_std::prelude::{stage::Way, Fresh, Stash, StashState, StashTransition, VeScalar};
-/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
-/// reads::<Fresh, f32, { Way::Way8 }, Stash>();
+/// # use furiosa_opt_std::prelude::{stage::{Way, Way4, Way8}, Fresh, Stash, StashState, StashTransition, VeScalar};
+/// # fn reads<S: StashState, RD: VeScalar, W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Fresh, f32, Way8, Stash>();
 /// ```
 /// ```compile_fail,E0277
 /// # #![feature(adt_const_params)]
-/// # use furiosa_opt_std::prelude::{stage::Way, Spent, Stash, StashState, StashTransition, VeScalar};
-/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
-/// reads::<Spent, f32, { Way::Way8 }, Stash>();
+/// # use furiosa_opt_std::prelude::{stage::{Way, Way4, Way8}, Spent, Stash, StashState, StashTransition, VeScalar};
+/// # fn reads<S: StashState, RD: VeScalar, W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Spent, f32, Way8, Stash>();
 /// ```
 #[diagnostic::on_unimplemented(
     message = "the stash cannot be read here",
@@ -187,7 +187,7 @@ pub trait Plain: sealed::Sealed {}
     note = "it is written once and read once, so with no earlier `vector_stash` the slot is empty, and a \
             second `Stash` operand finds it spent"
 )]
-pub trait StashTransition<S: StashState, RD: VeScalar, const W: Way> {
+pub trait StashTransition<S: StashState, RD: VeScalar, W: Way> {
     /// Stash typestate after this operand.
     type Next: StashState;
 
@@ -201,7 +201,7 @@ pub trait StashTransition<S: StashState, RD: VeScalar, const W: Way> {
     fn stashed<Mapping: M>(state: &VeState<S>) -> Option<Tensor<RD, Mapping>>;
 }
 
-impl<S: StashState, RD: VeScalar, T: Plain, const W: Way> StashTransition<S, RD, W> for T {
+impl<S: StashState, RD: VeScalar, T: Plain, W: Way> StashTransition<S, RD, W> for T {
     type Next = S;
     fn transition(state: VeState<S>) -> VeState<S> {
         state
@@ -211,7 +211,7 @@ impl<S: StashState, RD: VeScalar, T: Plain, const W: Way> StashTransition<S, RD,
     }
 }
 
-impl<D: VeScalar, StashMapping: M, const W: Way> StashTransition<Occupied<D, StashMapping, W>, D, W> for Stash {
+impl<D: VeScalar, StashMapping: M, W: Way> StashTransition<Occupied<D, StashMapping, W>, D, W> for Stash {
     type Next = Spent;
     fn transition(state: VeState<Occupied<D, StashMapping, W>>) -> VeState<Spent> {
         state.consume_stash()
@@ -223,7 +223,7 @@ impl<D: VeScalar, StashMapping: M, const W: Way> StashTransition<Occupied<D, Sta
 
 // Ternary `(Stash, c)`: same read-once rule; the stash is operand0. Delegates to the `Stash`
 // transition so the two share one body.
-impl<D: VeScalar, StashMapping: M, const W: Way> StashTransition<Occupied<D, StashMapping, W>, D, W> for (Stash, f32) {
+impl<D: VeScalar, StashMapping: M, W: Way> StashTransition<Occupied<D, StashMapping, W>, D, W> for (Stash, f32) {
     type Next = Spent;
     fn transition(state: VeState<Occupied<D, StashMapping, W>>) -> VeState<Spent> {
         <Stash as StashTransition<Occupied<D, StashMapping, W>, D, W>>::transition(state)
@@ -504,12 +504,12 @@ fn assert_fill(filled: Result<(), SlotDefect>) {
 /// ```
 /// # #![feature(adt_const_params)]
 /// use furiosa_opt_std::prelude::{
-///     stage::Way, StashTransition, IntoBranchedOperand, VeOperandBuilder, AtRf, Stash, TagGuard,
+///     stage::{Way, Way8}, StashTransition, IntoBranchedOperand, VeOperandBuilder, AtRf, Stash, TagGuard,
 ///     WithStash, Occupied, StashState, VeScalar, M, Branched,
 /// };
 /// use furiosa_mapping::Broadcast;
 /// // The same bound `vector_fp_binary`/`vector_fxp` put on their operand `Op`.
-/// fn op_operand<'l, SD, S, Map, const W: Way, Op>()
+/// fn op_operand<'l, SD, S, Map, W: Way, Op>()
 /// where
 ///     SD: VeScalar, S: StashState, Map: M,
 ///     Op: IntoBranchedOperand<'l, SD, Map> + StashTransition<S, SD, W>,
@@ -517,9 +517,9 @@ fn assert_fill(filled: Result<(), SlotDefect>) {
 /// // A `WithStash` builder sits at `AtRf` by construction: the stash fills the rf port.
 /// op_operand::<
 ///     f32,
-///     Occupied<f32, Broadcast<1>, { Way::Way8 }>,
+///     Occupied<f32, Broadcast<1>, Way8>,
 ///     Broadcast<1>,
-///     { Way::Way8 },
+///     Way8,
 ///     VeOperandBuilder<'_, f32, Broadcast<1>, f32, WithStash, AtRf>,
 /// >();
 /// // Filling the stash slot is what produces that `WithStash` operand.
@@ -529,18 +529,18 @@ fn assert_fill(filled: Result<(), SlotDefect>) {
 /// second read anywhere in the chain finds no impl.
 /// ```compile_fail,E0277
 /// # #![feature(adt_const_params)]
-/// # use furiosa_opt_std::prelude::{stage::Way, StashTransition, VeOperandBuilder, WithStash, AtRf, Spent, StashState, VeScalar};
+/// # use furiosa_opt_std::prelude::{stage::{Way, Way4, Way8}, StashTransition, VeOperandBuilder, WithStash, AtRf, Spent, StashState, VeScalar};
 /// # use furiosa_mapping::Broadcast;
-/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
-/// reads::<Spent, f32, { Way::Way8 }, VeOperandBuilder<'_, f32, Broadcast<1>, f32, WithStash, AtRf>>();
+/// # fn reads<S: StashState, RD: VeScalar, W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Spent, f32, Way8, VeOperandBuilder<'_, f32, Broadcast<1>, f32, WithStash, AtRf>>();
 /// ```
 /// Negative: the same operand on a `Fresh` (never-written) slot -- nothing to read.
 /// ```compile_fail,E0277
 /// # #![feature(adt_const_params)]
-/// # use furiosa_opt_std::prelude::{stage::Way, StashTransition, VeOperandBuilder, WithStash, AtRf, Fresh, StashState, VeScalar};
+/// # use furiosa_opt_std::prelude::{stage::{Way, Way4, Way8}, StashTransition, VeOperandBuilder, WithStash, AtRf, Fresh, StashState, VeScalar};
 /// # use furiosa_mapping::Broadcast;
-/// # fn reads<S: StashState, RD: VeScalar, const W: Way, Op: StashTransition<S, RD, W>>() {}
-/// reads::<Fresh, f32, { Way::Way8 }, VeOperandBuilder<'_, f32, Broadcast<1>, f32, WithStash, AtRf>>();
+/// # fn reads<S: StashState, RD: VeScalar, W: Way, Op: StashTransition<S, RD, W>>() {}
+/// reads::<Fresh, f32, Way8, VeOperandBuilder<'_, f32, Broadcast<1>, f32, WithStash, AtRf>>();
 /// ```
 #[derive(Debug, Clone)]
 pub struct VeOperandBuilder<
@@ -814,7 +814,7 @@ impl<'l, D: VeScalar, Mapping: M, Reg: RegPayload<'l, D, Mapping>, Slot> Plain
 // so a second read later in the chain has no impl (read-once). Pinned to `AtRf` because only an `rf`
 // fill produces a `WithStash` builder, which makes "a `WithStash` builder is already at the rf port"
 // a fact of the type rather than a comment.
-impl<'l, D: VeScalar, StashMapping: M, Mapping: M, Reg: RegPayload<'l, D, Mapping>, const W: Way>
+impl<'l, D: VeScalar, StashMapping: M, Mapping: M, Reg: RegPayload<'l, D, Mapping>, W: Way>
     StashTransition<Occupied<D, StashMapping, W>, D, W> for VeOperandBuilder<'l, D, Mapping, Reg, WithStash, AtRf>
 {
     type Next = Spent;

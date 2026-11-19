@@ -62,11 +62,7 @@ pub fn stotrf_table_lookup_gemm(
         let weight_dm: DmTensor<f4e2m1, Chip, GemmCl, TokSlice, m![Out % 8, Red]> =
             weight_group.to_dm(&mut device.tdma);
 
-        // Table lookup is a main-context fetch stage, so the packed f4e2m1 weight is decoded to
-        // f8e4m3 in a main-context fetch that commits the decoded stream to a resident DM. The fetch
-        // reads the packed f4 (2 codes/byte) and `fetch_table_lookup::<f8e4m3>()` decodes each 4-bit
-        // code to its e4m3 value. The decoded weight lands in a resident DM, not a transient
-        // `commit()` scratch, so the sub-context StoTrf below can read it back.
+        // Decode packed f4e2m1 weights into resident DM so the sub-context StoTrf can read them.
         let mut weight_f8_dm: DmTensor<f8e4m3, Chip, GemmCl, TokSlice, m![Out % 8, Red]> = DmTensor::new();
         device
             .main

@@ -12,6 +12,7 @@
 
 pub mod bias_partition_broadcast;
 pub mod binary_add;
+pub mod bound_loop;
 pub mod chip_reduce;
 pub mod closure;
 pub mod cluster_chip_shuffle_slice;
@@ -45,6 +46,7 @@ pub mod runtime_loop;
 pub mod scalar;
 pub mod scatter_gather;
 pub mod scatter_gather_topology;
+pub mod spm_scalar;
 pub mod stotrf_table_lookup;
 pub mod sub_context_engines;
 pub mod switch_assertions;

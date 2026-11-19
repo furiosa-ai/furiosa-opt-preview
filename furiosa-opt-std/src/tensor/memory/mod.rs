@@ -21,6 +21,6 @@ pub use hbm_scalar::HbmScalar;
 pub use host::HostTensor;
 pub use redistribute::*;
 pub use register_file::{TrfTensor, VrfTensor, VrfTensorView, VrfTensorViewMut};
-pub use spm::SpmTensor;
+pub use spm::{SpmTensor, SpmTensorView, SpmTensorViewMut};
 
 use dm::SliceIndexing;

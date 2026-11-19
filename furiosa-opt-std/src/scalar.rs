@@ -213,6 +213,24 @@ impl RuntimeScalar for usize {
     }
 }
 
+/// An integer device index, checked for non-negativity when evaluated on the host.
+pub trait RuntimeIndex: RuntimeScalar {
+    /// Converts an index to the host's address type without truncation.
+    fn into_usize(self) -> usize;
+}
+
+macro_rules! runtime_indices {
+    ($($ty:ty),*) => { $(
+        impl RuntimeIndex for $ty {
+            fn into_usize(self) -> usize {
+                usize::try_from(self)
+                    .unwrap_or_else(|_| panic!("device index must be non-negative and fit usize, got {self:?}"))
+            }
+        }
+    )* };
+}
+runtime_indices!(i32, u32, i64, u64, usize);
+
 mod runtime_scalar_sealed {
     pub trait Sealed {}
 
@@ -323,7 +341,7 @@ impl<D: Add<Output = D>> Add for Opt<D> {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Opt<D> {
-        self.zip_map(rhs, |l, r| l + r)
+        self.zip_map(rhs, Add::add)
     }
 }
 
@@ -331,7 +349,7 @@ impl<D: Mul<Output = D>> Mul for Opt<D> {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Opt<D> {
-        self.zip_map(rhs, |l, r| l * r)
+        self.zip_map(rhs, Mul::mul)
     }
 }
 

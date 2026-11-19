@@ -21,6 +21,7 @@ use crate::scalar::{MaterializableScalar, Scalar};
 use crate::tensor::Tensor;
 use crate::tensor::memory::{
     DmTensor, DmTensorView, DmTensorViewMut, HbmTensor, HbmTensorView, HbmTensorViewMut, HostTensor, SpmTensor,
+    SpmTensorView, SpmTensorViewMut,
 };
 use std::future::Future;
 
@@ -85,6 +86,15 @@ impl<D: MaterializableScalar, Chip: M, Element: M, B: Backend> HbmTensor<D, Chip
     ) -> HbmTensor<D, Chip, Element2, B> {
         HbmTensor::from_value(dma, &self.read(dma).transpose(true))
     }
+
+    /// Copies HBM values directly into scratchpad memory with the requested placement.
+    #[primitive(HbmTensor::to_spm)]
+    pub fn to_spm<Cluster: M, Pe: M, Element2: M>(
+        &self,
+        dma: &mut DmaContext<{ Dma::Tensor }, B>,
+    ) -> SpmTensor<D, Chip, Cluster, Pe, Element2, B> {
+        SpmTensor::new(self.read(dma).transpose(true))
+    }
 }
 
 impl<'l, D: Scalar, Chip: M, Element: M, B: Backend, Chips> HbmTensorView<'l, D, Chip, Element, B, Chips> {
@@ -118,9 +128,42 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend, Chips> HbmTensorView<'l, D,
     }
 }
 
+impl<'a, D: Scalar, Chip: M, Element: M, B: Backend> HbmTensorView<'a, D, Chip, Element, B> {
+    /// Copies this HBM region into a fresh SPM tensor.
+    #[primitive(HbmTensorView::to_spm)]
+    pub fn to_spm<C2: M, P2: M, E2: M>(
+        self,
+        dma: &mut DmaContext<{ Dma::Tensor }, B>,
+    ) -> SpmTensor<D, Chip, C2, P2, E2, B> {
+        let mut output = SpmTensor::new(crate::tensor::Tensor::zeroed());
+        self.read(dma, |src| output.inner.view_mut().transpose(src, true));
+        output
+    }
+
+    /// Writes this HBM region into an existing SPM destination view.
+    #[primitive(HbmTensorView::to_spm_view)]
+    pub fn to_spm_view<C2: M, Cl2: M, P2: M, E2: M>(
+        self,
+        dma: &mut DmaContext<{ Dma::Tensor }, B>,
+        mut dst: SpmTensorViewMut<'_, D, C2, Cl2, P2, E2, B>,
+    ) {
+        self.read(dma, |src| dst.inner.transpose(src, true));
+    }
+}
+
 impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend, Chips>
     HbmTensorView<'l, D, Chip, Element, B, Chips>
 {
+    /// Copies this HBM region into a fresh HBM allocation.
+    #[primitive(HbmTensorView::to_hbm)]
+    pub fn to_hbm<const DMA: Dma, Element2: M>(
+        self,
+        dma: &mut DmaContext<{ DMA }, B>,
+    ) -> HbmTensor<D, Chip, Element2, B> {
+        let dma = &*dma;
+        self.read(dma, |src| HbmTensor::from_value(dma, &src.read().transpose(true)))
+    }
+
     /// Converts to data memory tensor.
     #[primitive(HbmTensorView::to_dm)]
     pub fn to_dm<Cluster: M, Slice: M, Element2: M>(
@@ -139,21 +182,95 @@ impl<'l, D: MaterializableScalar, Chip: M, Element: M, B: Backend, Chips>
 }
 
 impl<D: Scalar, Chip: M, Cluster: M, Pe: M, Element: M, B: Backend> SpmTensor<D, Chip, Cluster, Pe, Element, B> {
+    /// Copies scratchpad values directly into a fresh HBM tensor.
+    #[primitive(SpmTensor::to_hbm)]
+    pub fn to_hbm<Element2: M>(&self, dma: &mut DmaContext<{ Dma::Tensor }, B>) -> HbmTensor<D, Chip, Element2, B> {
+        HbmTensor::from_value(dma, &self.inner.transpose(true))
+    }
+
+    /// Copies scratchpad values into a fresh tensor with a different placement or layout.
+    #[primitive(SpmTensor::to_spm)]
+    pub fn to_spm<Cluster2: M, Pe2: M, Element2: M>(
+        &self,
+        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+    ) -> SpmTensor<D, Chip, Cluster2, Pe2, Element2, B> {
+        SpmTensor::new(self.inner.transpose(true))
+    }
+
     /// Converts to a fresh DM tensor.
     #[primitive(SpmTensor::to_dm)]
     pub fn to_dm<Slice2: M, Element2: M>(
         &self,
         _dma: &mut DmaContext<{ Dma::Tensor }, B>,
     ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
-        constraints::assert_pe_matches_slice::<Pe, Slice2>();
-        assert_dma_layout::<
-            D,
-            m![{ Cluster }, { Pe }, { Element }],
-            Element,
-            m![{ Cluster }, { Slice2 }, { Element2 }],
-            Element2,
-        >(DM_WRITE_ALIGN_BYTES);
+        assert_spm_to_dm::<D, Cluster, Pe, Element, Slice2, Element2>();
         DmTensor::from_parts(self.inner.transpose(true))
+    }
+}
+
+impl<'a, D: Scalar, Chip: M, Cluster: M, Pe: M, Element: M, B: Backend>
+    SpmTensorView<'a, D, Chip, Cluster, Pe, Element, B>
+{
+    /// Copies this region into a fresh HBM tensor.
+    #[primitive(SpmTensorView::to_hbm)]
+    pub fn to_hbm<E2: M>(self, dma: &mut DmaContext<{ Dma::Tensor }, B>) -> HbmTensor<D, Chip, E2, B> {
+        let mut staged = crate::tensor::Tensor::<D, Pair<Chip, E2>, B>::zeroed();
+        staged.view_mut().transpose(self.inner, true);
+        HbmTensor::from_value(dma, &staged)
+    }
+
+    /// Writes this region into an existing HBM destination view.
+    #[primitive(SpmTensorView::to_hbm_view)]
+    pub fn to_hbm_view<C2: M, E2: M, Chips>(
+        self,
+        dma: &mut DmaContext<{ Dma::Tensor }, B>,
+        dst: HbmTensorViewMut<'_, D, C2, E2, B, Chips>,
+    ) {
+        dst.write(dma, |mut dst| dst.transpose(self.inner, true));
+    }
+
+    /// Copies this region into a fresh SPM tensor.
+    #[primitive(SpmTensorView::to_spm)]
+    pub fn to_spm<C2: M, P2: M, E2: M>(
+        self,
+        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+    ) -> SpmTensor<D, Chip, C2, P2, E2, B> {
+        let mut output = SpmTensor::new(crate::tensor::Tensor::zeroed());
+        output.inner.view_mut().transpose(self.inner, true);
+        output
+    }
+
+    /// Writes this region into an existing SPM destination view.
+    #[primitive(SpmTensorView::to_spm_view)]
+    pub fn to_spm_view<C2: M, Cl2: M, P2: M, E2: M>(
+        self,
+        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+        mut dst: SpmTensorViewMut<'_, D, C2, Cl2, P2, E2, B>,
+    ) {
+        dst.inner.transpose(self.inner, true);
+    }
+
+    /// Copies this region into a fresh DM tensor.
+    #[primitive(SpmTensorView::to_dm)]
+    pub fn to_dm<Slice2: M, Element2: M>(
+        self,
+        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+    ) -> DmTensor<D, Chip, Cluster, Slice2, Element2, B> {
+        assert_spm_to_dm::<D, Cluster, Pe, Element, Slice2, Element2>();
+        let mut output = DmTensor::from_parts(Tensor::zeroed());
+        output.inner.view_mut().transpose(self.inner, true);
+        output
+    }
+
+    /// Writes this region into an existing DM destination view.
+    #[primitive(SpmTensorView::to_dm_view)]
+    pub fn to_dm_view<C2: M, Cl2: M, S2: M, E2: M>(
+        self,
+        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+        mut dst: DmTensorViewMut<'_, D, C2, Cl2, S2, E2, B>,
+    ) {
+        assert_spm_to_dm::<D, Cluster, Pe, Element, S2, E2>();
+        dst.inner.transpose(self.inner, true);
     }
 }
 
@@ -191,6 +308,14 @@ impl<D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend> DmTensor<
 impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     DmTensorView<'l, D, Chip, Cluster, Slice, Element, B>
 {
+    /// Copies this DM view into a fresh HBM allocation.
+    #[primitive(DmTensorView::to_hbm)]
+    pub fn to_hbm<Element2: M>(self, dma: &mut DmaContext<{ Dma::Tensor }, B>) -> HbmTensor<D, Chip, Element2, B> {
+        let mut staged = Tensor::<D, Pair<Chip, Element2>, B>::zeroed();
+        staged.view_mut().transpose(self.inner, true);
+        HbmTensor::from_value(dma, &staged)
+    }
+
     /// Writes data to a mutable tensor view for HBM. `Chip2` is free of the
     /// source's `Chip`: a read source (Top) may target a `view_mut` destination
     /// (Bottom). `transpose` validates the live layout.
@@ -215,6 +340,31 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         output
     }
 
+    /// Writes this DM view into an existing SPM destination view.
+    #[primitive(DmTensorView::to_spm_view)]
+    pub fn to_spm_view<C2: M, Cl2: M, P2: M, E2: M>(
+        self,
+        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+        mut dst: SpmTensorViewMut<'_, D, C2, Cl2, P2, E2, B>,
+    ) {
+        assert_spm_staging::<D, Cluster, Slice, Element, P2, E2>();
+        dst.inner.transpose(self.inner, true);
+    }
+
+    /// Copies this DM view into a fresh DM tensor with the requested dimension mappings.
+    #[primitive(DmTensorView::to_dm)]
+    pub fn to_dm<Chip2: M, Cluster2: M, Slice2: M, Element2: M>(
+        self,
+        _dma: &mut DmaContext<{ Dma::Tensor }, B>,
+    ) -> DmTensor<D, Chip2, Cluster2, Slice2, Element2, B> {
+        assert_dm_dma_layout::<D, Chip, Cluster, Slice, Element, Chip2, Cluster2, Slice2, Element2>(
+            DM_WRITE_ALIGN_BYTES,
+        );
+        let mut output = DmTensor::from_parts(Tensor::zeroed());
+        output.inner.view_mut().transpose(self.inner, true);
+        output
+    }
+
     /// Writes data to a mutable tensor view for data memory. `Chip2`/`Cluster2`
     /// are free of the source's: a read source (Top) may target a `view_mut`
     /// destination (Bottom). `transpose` validates the live layout.
@@ -234,6 +384,18 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         >(DM_WRITE_ALIGN_BYTES);
         dst.inner.transpose(self.inner, true);
     }
+}
+
+/// The layout rule an SPM source and a DM destination must satisfy to move in one transfer.
+fn assert_spm_to_dm<D: Scalar, Cluster: M, Pe: M, Element: M, Slice2: M, Element2: M>() {
+    constraints::assert_pe_matches_slice::<Pe, Slice2>();
+    assert_dma_layout::<
+        D,
+        m![{ Cluster }, { Pe }, { Element }],
+        Element,
+        m![{ Cluster }, { Slice2 }, { Element2 }],
+        Element2,
+    >(DM_WRITE_ALIGN_BYTES);
 }
 
 /// The layout rule a DM source and an SPM destination must satisfy to stage in one transfer.

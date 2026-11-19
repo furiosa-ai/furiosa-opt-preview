@@ -212,7 +212,7 @@ impl<
     where
         D: TableLookupCast<OutD>,
     {
-        FetchTableLookupTensor::new(self.device, self.inner.map(|v| v.lookup()))
+        FetchTableLookupTensor::new(self.device, self.inner.map(D::lookup))
     }
 }
 // ANCHOR_END: fetch_table_lookup_impl
@@ -240,7 +240,7 @@ impl<
     where
         D: FetchCast<OutD>,
     {
-        FetchCastTensor::new(self.device, self.inner.map(|v| v.cast()))
+        FetchCastTensor::new(self.device, self.inner.map(D::cast))
     }
 }
 // ANCHOR_END: fetch_cast_impl
@@ -361,7 +361,7 @@ mod tests {
         }
     }
 
-    /// Same decode at tensor granularity (the primitive body `input.map(|v| v.lookup())`),
+    /// Same decode at tensor granularity (the primitive body `input.map(D::lookup)`),
     /// bit-compared so the `-0.0` code is pinned here too.
     #[test]
     fn table_lookup_tensor_map_matches_spec() {

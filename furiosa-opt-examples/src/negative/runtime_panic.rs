@@ -1,17 +1,10 @@
-//! Rejection fixture for the `Call { target: None }` (diverging panic) arm of
-//! MIR->vISA translation. The body contains a *runtime*
-//! `assert!` over a value-dependent condition, which lowers to a diverging
-//! `core::panicking::panic*` call. MIR->vISA must reject this with a clean
-//! diagnostic ("runtime `panic!`/`assert!` is not supported in a `#[device]`
-//! body ...") rather than ICE with `not yet implemented`. Device bodies allow
-//! only compile-time shape guards (`const { assert!(..) }`).
+//! Rejection fixture for an unsupported runtime device assertion.
 
 use furiosa_opt_std::prelude::*;
 
 axes![A = 512, B = 32];
 
-/// Transpose `[A, B]` to `[B, A]`, guarded by a *runtime* `assert!` on a
-/// value-dependent condition (the loop index), which MIR->vISA must reject.
+/// Transposes `[A, B]` to `[B, A]` with a runtime assertion that compilation must reject.
 #[device(chip = 1)]
 pub fn runtime_panic(
     device: &mut Device,
@@ -19,7 +12,10 @@ pub fn runtime_panic(
 ) -> HbmTensor<i8, m![1], m![B, A]> {
     let mut output = HbmTensor::<i8, m![1], m![B, A]>::new();
     for b in 0..<m![B]>::SIZE {
-        assert!(b < 1000, "runtime guard that must be rejected");
+        // A branch result is a runtime scalar even when its condition is not, so the guard
+        // survives to lowering instead of folding to `true` and taking the panic with it.
+        let bound = if b == 0 { 1000 } else { 1 };
+        assert!(b < bound, "runtime guard that must be rejected");
         let input_slice = input.tile::<m![B], 1, m![A, 1 # 32]>(b);
         let output_slice = output.view_mut().tile::<m![B], 1, m![1 #{!} 32, A]>(b);
         input_slice.to_hbm_view(&mut device.tdma, output_slice);

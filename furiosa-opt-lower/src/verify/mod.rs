@@ -29,6 +29,7 @@ mod gather;
 mod indirect;
 mod scatter;
 mod slice;
+mod spm;
 
 pub use engine::{
     CastError, CastKind, CollectError, CollectInput, CommitCastError, CommitCastInput, CommitCastKind, CommitTrimError,
@@ -55,6 +56,7 @@ pub use scatter::{
     ScatterPayload, ScatterValidationError, scatter_payload, validate_scatter_payload, validate_scatter_updates,
 };
 pub use slice::*;
+pub use spm::{SpmScalarPeError, validate_spm_scalar_pe};
 
 /// Why an element count cannot be represented as an exact byte count.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

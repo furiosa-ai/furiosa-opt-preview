@@ -8,12 +8,8 @@ use crate::backend::{Backend, internal};
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 
-/// Checks a tile over one level of a placement: `LEN` cells of `Source` from a compile-time start
-/// must spell `Target`.
-///
-/// `hole_fill` is what the cells outside the tile become. A read source leaves them accessible
-/// ([`PaddingKind::Top`]); a write destination forbids them ([`PaddingKind::Bottom`]) so the commit
-/// sequencer never writes them.
+/// Validates that a compile-time tile of `Source` has mapping `Target`.
+/// `hole_fill` permits source overreads and prevents destination writes outside the tile.
 pub(crate) fn assert_tile<Index: M, Source: M, Target: M, const LEN: usize>(hole_fill: PaddingKind) {
     config_tile(TileInput {
         index: Index::to_value(),
@@ -236,7 +232,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
     /// Splits the tensor view by tiling. As a write destination, the cells outside
     /// the tile must be down padding ([`PaddingKind::Bottom`]) so the commit
     /// sequencer never writes them.
-    pub fn tile<I: M, E2: M, const LEN: usize>(self, start: usize) -> TensorViewMut<'l, D, E2, B> {
+    pub fn tile<I: M, E2: M, const LEN: usize>(self, start: impl RuntimeIndex) -> TensorViewMut<'l, D, E2, B> {
+        let start = start.into_usize();
         assert_tile::<I, E, E2, LEN>(PaddingKind::Bottom);
         self.retile::<I, E2>(start, LEN)
     }
@@ -326,7 +323,8 @@ impl<'l, D: Scalar, E: M, B: Backend> TensorViewMut<'l, D, E, B> {
 impl<'l, D: Scalar, E: M, B: Backend> TensorView<'l, D, E, B> {
     /// Splits the tensor view by tiling. As a read source, the cells outside the
     /// tile stay accessible ([`PaddingKind::Top`]).
-    pub fn tile<I: M, E2: M, const LEN: usize>(&self, start: usize) -> TensorView<'l, D, E2, B> {
+    pub fn tile<I: M, E2: M, const LEN: usize>(&self, start: impl RuntimeIndex) -> TensorView<'l, D, E2, B> {
+        let start = start.into_usize();
         assert_tile::<I, E, E2, LEN>(PaddingKind::Top);
         self.retile::<I, E2>(start, LEN)
     }

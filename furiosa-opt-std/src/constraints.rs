@@ -188,6 +188,24 @@ pub(crate) fn assert_hbm_reshape_dimension_preserved<Chip: M, Chip2: M, Element:
     assert_element_preserved::<Element, Element2>();
 }
 
+/// Asserts an SPM `reshape` preserves its whole `Chip` / `Cluster` / `Pe` / `Element` partition
+/// (it relabels the mapping, it moves no data).
+pub(crate) fn assert_spm_reshape_dimension_preserved<
+    Chip: M,
+    Chip2: M,
+    Cluster: M,
+    Cluster2: M,
+    Pe: M,
+    Pe2: M,
+    Element: M,
+    Element2: M,
+>() {
+    assert_chip_preserved::<Chip, Chip2>();
+    assert_cluster_preserved::<Cluster, Cluster2>();
+    assert_pe_preserved::<Pe, Pe2>();
+    assert_element_preserved::<Element, Element2>();
+}
+
 /// Asserts the size-level half of the lift rule: the lifted axes leave `Time`, so `Time` shrinks by a
 /// power-of-two product that divides the dimension's size. Which broadcast is filled, and by what, is a
 /// mapping value, so `config_fetch_lift` checks that at run time.
@@ -238,6 +256,11 @@ pub(crate) fn assert_cluster_preserved<Cluster: M, Cluster2: M>() {
 /// Asserts the `Slice` size is preserved across a transfer, reshape or fetch lift.
 pub(crate) fn assert_slice_preserved<Slice: M, Slice2: M>() {
     const { assert!(Slice::SIZE == Slice2::SIZE, "Slice size must be preserved") };
+}
+
+/// Asserts the `Pe` size is preserved across a transfer, reshape or fetch lift.
+pub(crate) fn assert_pe_preserved<Pe: M, Pe2: M>() {
+    const { assert!(Pe::SIZE == Pe2::SIZE, "PE size must be preserved") };
 }
 
 /// Asserts the `Element` size is preserved across a transfer / reshape.

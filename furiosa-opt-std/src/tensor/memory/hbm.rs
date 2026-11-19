@@ -347,8 +347,9 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend, Chips> HbmTensorView<'l, D,
     #[primitive(HbmTensorView::chip_tile)]
     pub fn chip_tile<Index: M, const LEN: usize, Chip2: M>(
         &self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> HbmTensorView<'l, D, Chip2, Element, B, SomeChips> {
+        let start = start.into_usize();
         assert_tile::<Index, Chip, Chip2, LEN>(PaddingKind::Top);
         HbmTensorView {
             inner: View {
@@ -368,8 +369,9 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend, Chips> HbmTensorView<'l, D,
     #[primitive(HbmTensorView::tile)]
     pub fn tile<Index: M, const LEN: usize, Element2: M>(
         &self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> HbmTensorView<'l, D, Chip, Element2, B, Chips> {
+        let start = start.into_usize();
         assert_tile::<Index, Element, Element2, LEN>(PaddingKind::Top);
         HbmTensorView {
             inner: View {
@@ -525,8 +527,9 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend, Chips> HbmTensorViewMut<'l,
     #[primitive(HbmTensorViewMut::chip_tile)]
     pub fn chip_tile<Index: M, const LEN: usize, Chip2: M>(
         self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> HbmTensorViewMut<'l, D, Chip2, Element, B, SomeChips> {
+        let start = start.into_usize();
         assert_tile::<Index, Chip, Chip2, LEN>(PaddingKind::Bottom);
         HbmTensorViewMut {
             inner: View {
@@ -542,8 +545,9 @@ impl<'l, D: Scalar, Chip: M, Element: M, B: Backend, Chips> HbmTensorViewMut<'l,
     #[primitive(HbmTensorViewMut::tile)]
     pub fn tile<Index: M, const LEN: usize, Element2: M>(
         self,
-        start: usize,
+        start: impl RuntimeIndex,
     ) -> HbmTensorViewMut<'l, D, Chip, Element2, B, Chips> {
+        let start = start.into_usize();
         assert_tile::<Index, Element, Element2, LEN>(PaddingKind::Bottom);
         HbmTensorViewMut {
             inner: View {
@@ -749,6 +753,16 @@ mod tests {
                 start * row_bytes..allocation_bytes
             );
         }
+    }
+
+    #[test]
+    fn tile_accepts_integer_indices_without_usize_casts() {
+        axes![A = 4];
+        let device = Device::<Cpu>::new(Topology { chips: 1, pes: 8 }).unwrap();
+        let input = HbmTensor::<i32, m![1], m![A], Cpu>::from_value(&device.tdma, &Tensor::from_vec([11, 22, 33, 44]));
+        let view = input.view();
+        assert_eq!(view.tile::<m![A], 1, m![1 # 4]>(2u32).window().start, 8);
+        assert_eq!(view.tile::<m![A], 1, m![1 # 4]>(1i32).window().start, 4);
     }
 
     #[test]

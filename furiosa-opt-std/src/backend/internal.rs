@@ -147,6 +147,16 @@ pub trait Backend: Runtime {
     /// constructor.
     fn zeroed<D: Scalar>(mapping: &Mapping) -> Self::Storage<D>;
 
+    /// Reads an SPM element at a physical storage offset.
+    fn spm_local_load<D: Scalar + crate::scalar::RuntimeScalar>(storage: &Self::Storage<D>, index: usize) -> D;
+
+    /// Writes an SPM element at a physical storage offset.
+    fn spm_local_store<D: Scalar + crate::scalar::RuntimeScalar>(
+        storage: &mut Self::Storage<D>,
+        index: usize,
+        value: D,
+    );
+
     /// A runtime-owned DM tensor on `group` (see
     /// [`crate::tensor::memory::DmTensor::alloc`]). `Npu` takes a resident SRAM allocation the
     /// tensor owns; the host-side backends hold bytes.

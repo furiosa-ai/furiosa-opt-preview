@@ -200,7 +200,7 @@ pub fn redistribute_element_tile(
 ) -> HbmTensor<i32, m![A], m![C, D]> {
     let full: DmTensor<i32, m![A], m![1 # 2], m![1 # 256], m![B, X, C, D]> = hbm.to_dm(&mut device.tdma);
     full.view()
-        .tile::<m![X], 1, m![B, X = 1 # 2, C, D]>(1)
+        .tile::<m![X], 1, m![B, X = 1 # 2, C, D]>(1u32)
         .chip_slice::<m![B], m![X = 1 # 2, C, D]>([0, 1, 2, 3])
         .to_dm::<m![X = 1 # 2, C, D]>(&mut device.tdma)
         .to_hbm(&mut device.tdma)

@@ -15,11 +15,9 @@ use furiosa_mapping::*;
 
 /// The broadcast portion of `dst` for `Tensor::transpose`, the part `src` does not cover;
 /// `BufStorage`'s write loop iterates over it. Panics on ill-formed mappings.
-pub(crate) fn transpose_broadcast<Src: M, Dst: M>(allow_broadcast: bool) -> Mapping {
-    let src_mapping = Src::to_value();
-    let dst_mapping = Dst::to_value();
+pub(crate) fn transpose_broadcast(src: &Mapping, dst: &Mapping, allow_broadcast: bool) -> Mapping {
     // Carve `src` out of `dst` via the matcher; the leftover is the broadcast portion.
-    let broadcast = dst_mapping.carve(&src_mapping);
+    let broadcast = dst.carve(src);
     if !allow_broadcast {
         assert!(broadcast.is_padding());
     }

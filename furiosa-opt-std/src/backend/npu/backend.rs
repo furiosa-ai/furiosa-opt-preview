@@ -73,6 +73,18 @@ impl internal::Backend for Npu {
         Ok(tensor)
     }
 
+    fn spm_local_load<D: Scalar + crate::scalar::RuntimeScalar>(storage: &Self::Storage<D>, index: usize) -> D {
+        storage.get(index)
+    }
+
+    fn spm_local_store<D: Scalar + crate::scalar::RuntimeScalar>(
+        storage: &mut Self::Storage<D>,
+        index: usize,
+        value: D,
+    ) {
+        storage.set(index, value);
+    }
+
     fn zeroed<D: Scalar>(mapping: &Mapping) -> Self::Storage<D> {
         BufStorage::zeroed(mapping.size())
     }

@@ -148,7 +148,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     where
         D: Zero + MaterializableScalar,
     {
-        self.reduce::<Dst>(|a, b| a + b, D::zero(), false)
+        self.reduce::<Dst>(std::ops::Add::add, D::zero(), false)
     }
 
     /// Reduces the factors of `self`'s mapping that are absent in `Dst`. Axes that `Dst` adds beyond
@@ -191,7 +191,7 @@ impl<D: Scalar, Mapping: M, B: Backend> Tensor<D, Mapping, B> {
     where
         StandardUniform: rand::distr::Distribution<D>,
     {
-        Self::from_vec((0..Mapping::SIZE).map(|_| rng.random::<D>()))
+        Self::from_vec(rng.random_iter().take(Mapping::SIZE))
     }
 
     /// Performs contraction between two tensors: a generalized matmul that multiplies `lhs` and `rhs`

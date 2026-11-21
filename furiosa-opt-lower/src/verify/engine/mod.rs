@@ -2,6 +2,7 @@
 
 mod collect;
 mod commit_adapter;
+mod commit_slice;
 mod contraction;
 mod fetch;
 mod fetch_adapter;
@@ -15,6 +16,7 @@ pub use commit_adapter::{
     CommitCastError, CommitCastInput, CommitCastKind, CommitTrimError, CommitTrimInput, config_commit_cast,
     config_commit_trim,
 };
+pub use commit_slice::{CommitSliceError, CommitSliceInput, commit_skipped_slices, config_commit_slice};
 pub use contraction::{
     ContractLaneError, ContractLaneInput, ContractPacketError, ContractPacketInput, ContractTimeError,
     ContractTimeInput, LaneMode, StreamAdapterError, StreamAdapterInput, config_contract_lane, config_contract_packet,

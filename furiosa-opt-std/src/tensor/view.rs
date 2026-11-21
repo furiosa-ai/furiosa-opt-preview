@@ -21,6 +21,14 @@ pub(crate) fn assert_tile<Index: M, Source: M, Target: M, const LEN: usize>(hole
     .unwrap_or_else(|error| panic!("{error}"));
 }
 
+/// A Slice tile that starts past slice 0 is not supported yet, on the device or here.
+pub(crate) fn assert_slice_tile_starts_at_zero(start: usize) {
+    assert!(
+        start == 0,
+        "a slice_tile at a non-zero index ({start}) is not supported yet"
+    );
+}
+
 /// A tile mapping derived from its source mapping instead of supplied by an API caller.
 #[derive(Debug, Clone)]
 pub(crate) struct Tiled<Index, Element, const LEN: usize, const HOLE_FILL: PaddingKind>(PhantomData<(Index, Element)>);

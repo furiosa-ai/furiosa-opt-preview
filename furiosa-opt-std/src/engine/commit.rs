@@ -7,13 +7,14 @@
 use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
 
-use furiosa_opt_lower::{CommitInput, config_commit};
+use furiosa_opt_lower::{CommitInput, CommitSliceInput, config_commit};
 
 use crate::backend::Backend;
 use crate::constraints;
 use crate::context::*;
 use crate::engine::CanApplyCommit;
 use crate::scalar::*;
+use crate::tensor::Tensor;
 use crate::tensor::memory::{DmTensor, DmTensorViewMut};
 use crate::tensor::tu::TuTensor;
 
@@ -35,16 +36,13 @@ impl<
     /// Commits to data memory.
     #[primitive(TuTensor::commit)]
     pub fn commit<Element: M>(self) -> DmTensor<D, Chip, Cluster, Slice, Element, B> {
-        verify_commit(CommitInput {
-            in_time: Time::to_value(),
-            in_packet: Packet::to_value(),
-            element: Element::to_value(),
-            element_bits: D::BITS,
-        });
-        DmTensor::from_parts(self.inner.transpose(false))
+        let mut output = DmTensor::from_parts(Tensor::zeroed());
+        self.commit_view(output.view_mut());
+        output
     }
 
-    /// Commits to a mutable tensor view in data memory.
+    /// Commits to a mutable DM view, skipping its `Bottom` slices.
+    /// Panics when a slice would move or an undefined stream slice would reach a defined one.
     #[primitive(TuTensor::commit_view)]
     pub fn commit_view<DstSlice: M, Element: M>(
         self,
@@ -57,7 +55,20 @@ impl<
             element: Element::to_value(),
             element_bits: D::BITS,
         });
-        dst.inner.transpose(self.inner.view(), false);
+        furiosa_opt_lower::config_commit_slice(CommitSliceInput {
+            stream: Slice::to_value(),
+            destination: DstSlice::to_value(),
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+        // A commit writes each slice in place, so the stream's slice `p` is read as the
+        // destination's slice `p`; the stream may hold axes the destination's `Slice` narrows away.
+        // SAFETY: the relabel keeps every slice at its position, and `config_commit_slice` has
+        // checked that both name the same coordinates wherever the destination holds a value.
+        let in_place = unsafe {
+            self.inner
+                .reshape::<m![{ Chip }, { Cluster }, { DstSlice }, { Time }, { Packet }]>()
+        };
+        dst.inner.transpose(in_place.view(), false);
     }
 }
 // ANCHOR_END: commit_impl

@@ -10,7 +10,7 @@ Choose Commit when a computed Tensor Unit stream must become a DM tensor with a 
 A `TuTensor` carries `Chip`, `Cluster`, `Slice`, `Time`, and `Packet` dimensions at the end of the Tensor Unit pipeline.
 Its `Time` reflects the temporal unrolling of the computation, and `Packet` is the element layout in the output stream.
 
-`.commit()` writes the stream to a `DmTensor` in DM.
+`.commit()` writes the stream to a new `DmTensor` in DM, and `.commit_view(destination)` writes it to an existing mutable DM view.
 
 ```rust,ignore
 {{#include ../../../furiosa-opt-std/src/engine/commit.rs:commit_impl}}
@@ -50,6 +50,93 @@ fn cast_commit<'l, const T: Tu>(
 #
 # Ok(())
 # }
+```
+
+## Slice placement
+
+A commit writes each stream slice to the same slice of the destination.
+`commit_view(destination)` therefore writes all slices or only part of them, and never moves data between slices.
+
+Use `slice_tile()` on a mutable destination view to write only the slices inside the tile and preserve the others.
+The following function writes the slices with `B < 4` and preserves those with `B >= 4`:
+
+```rust,no_run
+# #![feature(adt_const_params)]
+# extern crate furiosa_opt_std;
+# use furiosa_opt_std::prelude::*;
+axes![A = 8, B = 8, P = 8];
+
+fn copy_first_half<'l>(
+    device: &'l mut Device,
+    source: DmTensorView<'l, i32, m![1], m![1], m![A, B], m![P]>,
+    destination: DmTensorViewMut<'l, i32, m![1], m![1], m![A, B], m![P]>,
+) {
+    let destination = destination.slice_tile::<m![B / 4], 1, m![A, B % 4 #{!} 8]>(0);
+    device.main.begin(source).fetch::<m![1], m![P]>().collect::<m![1], m![P]>()
+        .commit_trim::<m![P]>().commit_view(destination);
+}
+```
+
+The stream from `source` holds a value in all 64 slices, while the mutable tile marks the destination slices with `B >= 4` as `#{!}` padding.
+The commit drops the stream values that land on `#{!}` padding, so the destination may hold fewer valid slices than the stream.
+The compiler derives a slice bitmap from that padding, one bit per slice, and the commit skips the slices whose bit is off.
+Destination `#` padding is written with don't-care values; only `#{!}` padding is skipped.
+
+For a stream `Slice` placement `m![A, B, C]` with `C = 8`, the following destination forms are supported:
+
+| Destination `Slice` | Slices the commit writes |
+| --- | --- |
+| `m![A, B, C]` | All |
+| `m![A, B, C = 4 #{!} 8]` | `C < 4` |
+| `m![A, B, 1 #{!} 8]` | `C = 0` |
+| `m![A, B, 1 # 8]` | All, and the slices with `C > 0` hold don't-care values |
+
+At every non-padding destination slice, the stream and destination `Slice` placements must produce the same `Index`, the logical coordinates of that slice.
+Coordinates are compared per axis; an axis absent from a placement has coordinate 0.
+
+Reordering `Slice` axes is rejected, as in this call:
+
+```rust,ignore
+axes![A = 8, B = 8, P = 8];
+fn moved_slices<'l>(
+    stream: CommitTrimTensor<'l, { Tu::Main }, i32,
+        m![1], m![1], m![A, B], m![1], m![P]>,
+    destination: DmTensorViewMut<'l, i32, m![1], m![1], m![B, A], m![P]>,
+) {
+    stream.commit_view(destination); // Rejected: the Slice placements disagree at slice 1.
+}
+```
+
+With `A = 8` and `B = 8`, slice 1 has coordinates `A = 0, B = 1` in the stream but `A = 1, B = 0` in the destination.
+
+Destination `#{0}` padding promises zero, so only stream `#{0}` padding may reach it.
+A stream slice that holds a value is rejected there; pad the destination with `#` or `#{!}` instead.
+
+Stream `#` and `#{!}` padding has no defined value, so the corresponding destination slice must also use `#` or `#{!}` padding.
+A stream from a tiled source therefore cannot be written to an untiled destination:
+
+```rust,ignore
+axes![A = 8, B = 8, P = 8];
+fn untiled_destination<'l>(
+    stream: CommitTrimTensor<'l, { Tu::Main }, i32,
+        m![1], m![1], m![A, B % 4 # 8], m![1], m![P]>,
+    destination: DmTensorViewMut<'l, i32, m![1], m![1], m![A, B], m![P]>,
+) {
+    stream.commit_view(destination); // Rejected: the slices with B >= 4 hold no value.
+}
+```
+
+`slice_tile()` currently supports only the constant start index `0`.
+A start index moves the window along the tiled axis: `m![A = 2 #{!} 8]` at start index 1 writes the slices with `1 <= A < 3`.
+A nonzero or runtime start index is not implemented yet.
+Until then the compiler reports it as unsupported, and the CPU backend panics on a nonzero one.
+
+```rust,ignore
+axes![A = 8, B = 8, P = 8];
+fn windows<'l>(source: DmTensorView<'l, i32, m![1], m![1], m![A, B], m![P]>, start: usize) {
+    source.slice_tile::<m![B / 4], 1, m![A, B % 4 # 8]>(1);     // Unsupported: nonzero start index.
+    source.slice_tile::<m![B / 4], 1, m![A, B % 4 # 8]>(start); // Unsupported: runtime start index.
+}
 ```
 
 ## Constraints
@@ -123,7 +210,6 @@ fn transpose_with_trimming<'l, const T: Tu>(
 # Ok(())
 # }
 ```
-
 
 ## Optimizations
 

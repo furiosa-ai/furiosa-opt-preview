@@ -15,6 +15,11 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   `PositionVectorCast`, respectively.
 - Generic VRF storage code uses `D: VrfScalar` instead of `D: VeScalar`; VRF operand code uses
   `D: VrfOperandScalar`. Vector Engine stream bounds remain `D: VeScalar`.
+- A commit skips the destination's `#{!}` slices and keeps their previous values; `commit()`
+  leaves them unwritten.
+- `commit_view()` refuses a commit that would move a slice to another one, write a stream slice
+  with no value (`#`, `#{!}`) into a destination slice that holds one or is `#{0}`, or write a
+  stream slice that holds a value into a `#{0}` destination slice.
 
 ### Added
 
@@ -56,6 +61,9 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
   across chips and clusters when their arms execute statements; selecting between existing scalar
   values can vary per chip and cluster. Runtime `panic!` and `assert!` are not yet supported,
   including the assertion emitted by `clamp`.
+- `slice_tile()` on a DM view compiles for the device: `commit_view` into a mutable Slice tile
+  writes only the tile's slices. Only the constant start index `0` is supported yet; the CPU
+  backend panics on any other.
 
 ## [v0.10.0]
 

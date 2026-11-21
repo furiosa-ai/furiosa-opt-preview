@@ -13,6 +13,7 @@
 
 pub mod blocking_flits;
 pub mod bound_loop;
+pub mod commit_slice;
 pub mod contract_outer_assertions;
 pub mod dm_slice;
 pub mod dma;

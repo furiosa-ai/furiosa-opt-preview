@@ -11,7 +11,7 @@ use crate::context::*;
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
-use crate::tensor::view::{TensorView, TensorViewMut, Tiled, assert_tile};
+use crate::tensor::view::{TensorView, TensorViewMut, Tiled, assert_slice_tile_starts_at_zero, assert_tile};
 
 /// Tensor stored in data memory.
 #[primitive(DmTensor)]
@@ -305,6 +305,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     }
 
     /// Creates immutable views by splitting along a tile expression over Slice.
+    /// Panics unless `start` is 0: a window that starts at another slice is not supported yet.
     #[primitive(DmTensorView::slice_tile)]
     pub fn slice_tile<Index: M, const LEN: usize, Slice2: M>(
         &self,
@@ -313,6 +314,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         let start = start.into_usize();
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
         assert_tile::<Index, Slice, Slice2, LEN>(PaddingKind::Top);
+        assert_slice_tile_starts_at_zero(start);
         let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorView { inner }
     }
@@ -453,6 +455,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
     }
 
     /// Creates mutable views by splitting along a tile expression over Slice.
+    /// Panics unless `start` is 0: a window that starts at another slice is not supported yet.
     #[primitive(DmTensorViewMut::slice_tile)]
     pub fn slice_tile<Index: M, const LEN: usize, Slice2: M>(
         self,
@@ -461,6 +464,7 @@ impl<'l, D: Scalar, Chip: M, Cluster: M, Slice: M, Element: M, B: Backend>
         let start = start.into_usize();
         constraints::assert_dm_to_dm_dimension_preserved::<Chip, Chip, Cluster, Cluster, Slice, Slice2>();
         assert_tile::<Index, Slice, Slice2, LEN>(PaddingKind::Bottom);
+        assert_slice_tile_starts_at_zero(start);
         let inner = self.inner.retile::<Index, _>(start, LEN);
         DmTensorViewMut { inner }
     }

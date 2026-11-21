@@ -18,6 +18,36 @@ fn derives_the_tile_mapping_without_an_expected_type() {
     assert_eq!(mapping, <m![I = 1 # 3, A]>::to_value().normalize());
 }
 
+/// A tile narrows the indexed axis in place, so its window sits on the cells index 0 holds in the
+/// base layout. A slice tile at index 0 therefore moves no slice.
+#[test]
+fn a_tile_window_sits_on_the_base_cells_of_index_zero() {
+    // `I` is the inner axis of three, so index 0 is every third cell.
+    let tile = tile_mapping(TileMappingInput {
+        index: <m![I]>::to_value(),
+        element: <m![A, I]>::to_value(),
+        len: 1,
+        hole_fill: PaddingKind::Bottom,
+    })
+    .unwrap();
+    let base = <m![A, I]>::to_value();
+    for position in 0..tile.size() {
+        let cell = tile.index(position);
+        if position % 3 == 0 {
+            let (Cell::Index(window), Cell::Index(expected)) = (cell, base.index(position)) else {
+                panic!("{position}: the window and the base must both hold a value");
+            };
+            assert_eq!(
+                window.finalize().into_result(),
+                expected.finalize().into_result(),
+                "{position}"
+            );
+        } else {
+            assert_eq!(cell, Cell::Padding(PaddingKind::Bottom), "{position}");
+        }
+    }
+}
+
 /// A tile must state every padding the split leaves, its own hole and the base layout's alike.
 mod states_the_split_in_full {
     use super::*;

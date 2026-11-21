@@ -46,6 +46,7 @@ pub mod runtime_loop;
 pub mod scalar;
 pub mod scatter_gather;
 pub mod scatter_gather_topology;
+pub mod slice_tile_commit;
 pub mod spm_scalar;
 pub mod stotrf_table_lookup;
 pub mod sub_context_engines;

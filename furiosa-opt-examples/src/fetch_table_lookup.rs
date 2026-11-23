@@ -72,6 +72,27 @@ pub fn fetch_table_lookup_decode_e2m1_to_f8e5m2(
     decoded.to_hbm(&mut device.tdma)
 }
 
+/// The `bf16` value encoding of the paired decode, for a contraction against `bf16` activations.
+/// The 16 codes fill one 32-byte flit as `bf16`, and their packed 8 bytes meet the DMA tail minimum.
+#[device(chip = 1)]
+pub fn fetch_table_lookup_decode_e2m1_to_bf16(
+    device: &mut Device,
+    input: &HbmTensor<f4e2m1, m![1], m![A, B]>,
+) -> HbmTensor<bf16, m![1], m![B, A]> {
+    let input_dm = input.to_dm::<Cluster, m![A / 16], m![A / 8 % 2, A % 8, B]>(&mut device.tdma);
+
+    let decoded: DmTensor<bf16, Chip, Cluster, m![A / 16], m![A / 8 % 2, A % 8, B]> = device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![A / 8 % 2], m![A % 8, B]>()
+        .fetch_table_lookup::<bf16>()
+        .collect::<m![A / 8 % 2, A % 8], m![B]>()
+        .commit_trim::<m![B]>()
+        .commit();
+
+    decoded.to_hbm(&mut device.tdma)
+}
+
 // MXFP4's 32-element scale block is twice the NVFP4 16-element block, so the MXFP4 twin doubles
 // the fetched axis (`AM = 2 * A`) to keep the same 256-slice partitioning (`AM / 32 == A / 16`)
 // while the fetch packet spans a 32-element MXFP4 block instead of a 16-element NVFP4 block.

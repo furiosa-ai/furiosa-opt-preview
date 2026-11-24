@@ -6,9 +6,9 @@
 //!   zipped result of a binary op, so they cannot `stash()` or `filter()` again.
 //! - **Stage markers** (Tag, Logic, Fxp, …) mirror the hardware pipeline. Transition traits
 //!   (`CanTransitionTo`) ensure the Rust type system disallows illegal stage ordering.
-//! - **Way**: each stage names the packet width of the stream it emits (`Stage::Way`, `Way8` or
-//!   `Way4`). That is the width the next operation receives, so an operation bounds the current
-//!   stage's `Way`, and a 4-way stream cannot exit or filter.
+//! - **Way**: each stage names the packet width it receives (`Stage::InputWay`) and the width it
+//!   emits (`Stage::OutputWay`), each `Way8` or `Way4`. An operation bounds the current stage's
+//!   `OutputWay`, so a 4-way stream cannot exit or filter.
 //! - **Commit gating**: only contexts that represent a full tensor (`Standalone`, `Zipped`)
 //!   implement `Commitable`, preventing accidental commits of intermediate group states.
 //!
@@ -128,9 +128,11 @@ impl Way for Way4 {
 
 /// Trait for pipeline stage markers.
 pub trait Stage {
-    /// The packet width of the stream this stage emits, which is what the next operation receives:
-    /// `Narrow` emits `Way4` from 8-way input, and `Widen` emits `Way8` from 4-way input.
-    type Way: Way;
+    /// The packet width of the stream entering this stage.
+    type InputWay: Way;
+    /// The packet width of the stream this stage emits. Only `Narrow` (8 to 4) and `Widen` (4 to 8)
+    /// differ from `InputWay`.
+    type OutputWay: Way;
 }
 
 /// Trait for intra-slice chain (intra-slice) stages: Tag through Clip.
@@ -149,7 +151,8 @@ pub trait Stashable: Stage {}
 #[derive(Debug, Clone, Copy)]
 pub struct Tag;
 impl Stage for Tag {
-    type Way = Way8;
+    type InputWay = Way8;
+    type OutputWay = Way8;
 }
 impl IntraSliceStage for Tag {}
 impl Stashable for Tag {}
@@ -162,7 +165,8 @@ impl Logic {
     pub const MAX_OPS: usize = 5;
 }
 impl Stage for Logic {
-    type Way = Way8;
+    type InputWay = Way8;
+    type OutputWay = Way8;
 }
 impl IntraSliceStage for Logic {}
 impl Stashable for Logic {}
@@ -175,7 +179,8 @@ impl Fxp {
     pub const MAX_OPS: usize = 4;
 }
 impl Stage for Fxp {
-    type Way = Way8;
+    type InputWay = Way8;
+    type OutputWay = Way8;
 }
 impl IntraSliceStage for Fxp {}
 impl Stashable for Fxp {}
@@ -184,7 +189,8 @@ impl Stashable for Fxp {}
 #[derive(Debug, Clone, Copy)]
 pub struct FxpToFp;
 impl Stage for FxpToFp {
-    type Way = Way8;
+    type InputWay = Way8;
+    type OutputWay = Way8;
 }
 impl IntraSliceStage for FxpToFp {}
 
@@ -192,7 +198,8 @@ impl IntraSliceStage for FxpToFp {}
 #[derive(Debug, Clone, Copy)]
 pub struct Narrow;
 impl Stage for Narrow {
-    type Way = Way4;
+    type InputWay = Way8;
+    type OutputWay = Way4;
 }
 impl IntraSliceStage for Narrow {}
 impl Stashable for Narrow {}
@@ -205,7 +212,8 @@ impl Fp {
     pub const MAX_OPS: usize = 5;
 }
 impl Stage for Fp {
-    type Way = Way4;
+    type InputWay = Way4;
+    type OutputWay = Way4;
 }
 impl IntraSliceStage for Fp {}
 impl Stashable for Fp {}
@@ -214,7 +222,8 @@ impl Stashable for Fp {}
 #[derive(Debug, Clone, Copy)]
 pub struct IntraSliceReduce;
 impl Stage for IntraSliceReduce {
-    type Way = Way4;
+    type InputWay = Way4;
+    type OutputWay = Way4;
 }
 impl IntraSliceStage for IntraSliceReduce {}
 
@@ -222,7 +231,8 @@ impl IntraSliceStage for IntraSliceReduce {}
 #[derive(Debug, Clone, Copy)]
 pub struct FpDiv;
 impl Stage for FpDiv {
-    type Way = Way4;
+    type InputWay = Way4;
+    type OutputWay = Way4;
 }
 impl IntraSliceStage for FpDiv {}
 impl Stashable for FpDiv {}
@@ -231,7 +241,8 @@ impl Stashable for FpDiv {}
 #[derive(Debug, Clone, Copy)]
 pub struct Widen;
 impl Stage for Widen {
-    type Way = Way8;
+    type InputWay = Way4;
+    type OutputWay = Way8;
 }
 impl IntraSliceStage for Widen {}
 
@@ -239,7 +250,8 @@ impl IntraSliceStage for Widen {}
 #[derive(Debug, Clone, Copy)]
 pub struct FpToFxp;
 impl Stage for FpToFxp {
-    type Way = Way8;
+    type InputWay = Way8;
+    type OutputWay = Way8;
 }
 impl IntraSliceStage for FpToFxp {}
 
@@ -251,7 +263,8 @@ impl Clip {
     pub const MAX_OPS: usize = 3;
 }
 impl Stage for Clip {
-    type Way = Way8;
+    type InputWay = Way8;
+    type OutputWay = Way8;
 }
 impl IntraSliceStage for Clip {}
 impl Stashable for Clip {}
@@ -260,7 +273,8 @@ impl Stashable for Clip {}
 #[derive(Debug, Clone, Copy)]
 pub struct InterSliceReduce;
 impl Stage for InterSliceReduce {
-    type Way = Way8;
+    type InputWay = Way8;
+    type OutputWay = Way8;
 }
 impl InterSliceStage for InterSliceReduce {}
 
@@ -268,14 +282,16 @@ impl InterSliceStage for InterSliceReduce {}
 #[derive(Debug, Clone, Copy)]
 pub struct Filter;
 impl Stage for Filter {
-    type Way = Way8;
+    type InputWay = Way8;
+    type OutputWay = Way8;
 }
 
 /// Vector Engine cast-compaction stage.
 #[derive(Debug, Clone, Copy)]
 pub struct Cast;
 impl Stage for Cast {
-    type Way = Way8;
+    type InputWay = Way8;
+    type OutputWay = Way8;
 }
 
 // ============================================================================
@@ -283,12 +299,11 @@ impl Stage for Cast {
 // ============================================================================
 
 /// Generic marker trait for stage transitions.
-/// `CanTransitionTo<Target>` indicates that a stage can transition to `Target`.
-/// Target must implement `Stage` trait.
-pub trait CanTransitionTo<Target: Stage> {}
+/// `CanTransitionTo<Target>` indicates that a stage can transition to `Target`, and requires the
+/// stage to emit the width `Target` receives.
+pub trait CanTransitionTo<Target: Stage>: Stage<OutputWay = Target::InputWay> {}
 
-// Each block lists the stages that may move into one stage. A stage's method also requires the
-// current stage's `Way`, so only sources of that width appear.
+// Each block lists the stages that may move into one stage.
 
 // Tag transitions (re-entering the intra-slice chain after the inter-slice reducer)
 impl CanTransitionTo<Tag> for InterSliceReduce {}

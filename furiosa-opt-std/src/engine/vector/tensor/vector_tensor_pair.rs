@@ -66,7 +66,7 @@ use super::vector_tensor::{
 // ============================================================================
 
 /// Type alias for group tensor data with Group state.
-type GroupTensorData<S, D, Chip, Cluster, Slice, Time, Packet, W = <S as stage::Stage>::Way> =
+type GroupTensorData<S, D, Chip, Cluster, Slice, Time, Packet, W = <S as stage::Stage>::OutputWay> =
     VeTensorData<S, D, Chip, Cluster, Slice, Time, Packet, Fresh, { VeOrder::IntraFirst }, stage::Group, W>;
 
 // ============================================================================
@@ -85,13 +85,13 @@ pub struct VectorTensorPair<
     'l,
     const T: Tu,
     D: VeScalar,
-    S: stage::Stage<Way = W>,
+    S: stage::Stage<OutputWay = W>,
     Chip: M,
     Cluster: M,
     Slice: M,
     SplitTime: M,
     Packet: M,
-    W: Way = <S as stage::Stage>::Way,
+    W: Way = <S as stage::Stage>::OutputWay,
 > {
     pub(crate) device: &'l mut TuContext<{ T }>,
 
@@ -158,7 +158,7 @@ impl<
     'l,
     const T: Tu,
     D: VeScalar,
-    S: stage::Stage<Way = W>,
+    S: stage::Stage<OutputWay = W>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -178,7 +178,7 @@ impl<
         group1_operand: GroupOperand<'l, D, VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
     ) -> VectorTensorPair<'l, T, D, TargetStage, Chip, Cluster, Slice, SplitTime, Packet, W>
     where
-        TargetStage: stage::Stage<Way = W>,
+        TargetStage: stage::Stage<OutputWay = W>,
         Op: HasAlu + HasBinaryOp<D>,
     {
         let alu = op.alu();
@@ -213,7 +213,7 @@ impl<
         fn_group1: Option<F1>,
     ) -> VectorTensorPair<'l, T, D, TargetStage, Chip, Cluster, Slice, SplitTime, Packet, W>
     where
-        TargetStage: stage::Stage<Way = W>,
+        TargetStage: stage::Stage<OutputWay = W>,
         F0: FnOnce(
             Tensor<D, m![{ Chip }, { Cluster }, { Slice }, { SplitTime }, { Packet }]>,
         ) -> Tensor<D, m![{ Chip }, { Cluster }, { Slice }, { SplitTime }, { Packet }]>,
@@ -260,7 +260,7 @@ impl<
         op: Op,
     ) -> VectorTensorPair<'l, T, D2, TargetStage, Chip, Cluster, Slice, SplitTime, Packet, W>
     where
-        TargetStage: stage::Stage<Way = W>,
+        TargetStage: stage::Stage<OutputWay = W>,
         Op: HasConversionOp<D, D2>,
     {
         let op_fn = op.conversion_op_fn();
@@ -289,7 +289,7 @@ impl<
 // VectorTensorPair - Internal helpers for f32-specific operations (unary, ternary)
 // ============================================================================
 
-impl<'l, const T: Tu, S: stage::Stage<Way = W>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M, W: Way>
+impl<'l, const T: Tu, S: stage::Stage<OutputWay = W>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M, W: Way>
     VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, W>
 {
     /// Internal helper for applying unary operations to both groups.
@@ -301,7 +301,7 @@ impl<'l, const T: Tu, S: stage::Stage<Way = W>, Chip: M, Cluster: M, Slice: M, S
         group1_apply: bool,
     ) -> VectorTensorPair<'l, T, f32, TargetStage, Chip, Cluster, Slice, SplitTime, Packet, W>
     where
-        TargetStage: stage::Stage<Way = W>,
+        TargetStage: stage::Stage<OutputWay = W>,
         Op: HasAlu + HasUnaryOp<f32>,
     {
         let op_fn = op.unary_op_fn();
@@ -328,7 +328,7 @@ impl<'l, const T: Tu, S: stage::Stage<Way = W>, Chip: M, Cluster: M, Slice: M, S
         group1_operand: GroupTernaryOperand<'l, VeTensorShape<Chip, Cluster, Slice, SplitTime, Packet>>,
     ) -> VectorTensorPair<'l, T, f32, TargetStage, Chip, Cluster, Slice, SplitTime, Packet, W>
     where
-        TargetStage: stage::Stage<Way = W>,
+        TargetStage: stage::Stage<OutputWay = W>,
         Op: HasAlu + HasTernaryOp<f32>,
     {
         let alu = op.alu();
@@ -358,16 +358,8 @@ impl<'l, const T: Tu, S: stage::Stage<Way = W>, Chip: M, Cluster: M, Slice: M, S
 // Stage order: Logic comes after Tag
 // ============================================================================
 
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Logic>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    SplitTime: M,
-    Packet: M,
-> VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Logic>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M>
+    VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
 {
     /// Logic binary operation on both groups simultaneously. Requires `Way8` mode.
     ///
@@ -413,16 +405,8 @@ impl<
     }
 }
 
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Logic>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    SplitTime: M,
-    Packet: M,
-> VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Logic>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M>
+    VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
 {
     /// Logic binary operation on both groups simultaneously. Requires `Way8` mode.
     ///
@@ -473,16 +457,8 @@ impl<
 // Stage order: Fxp comes after Logic
 // ============================================================================
 
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Fxp>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    SplitTime: M,
-    Packet: M,
-> VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Fxp>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M>
+    VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
 {
     /// Fixed-point binary operation on both groups simultaneously. Requires `Way8` mode.
     ///
@@ -540,16 +516,8 @@ impl<
 // Stage order: FxpToFp comes after Fxp
 // ============================================================================
 
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::FxpToFp>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    SplitTime: M,
-    Packet: M,
-> VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::FxpToFp>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M>
+    VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
 {
     /// Converts i32 to f32 for both groups simultaneously. Requires `Way8` mode.
     /// This is a common operation that must be applied to both groups.
@@ -571,7 +539,7 @@ impl<
     'l,
     const T: Tu,
     D: VeScalar,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Narrow>,
+    S: CanTransitionTo<stage::Narrow>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -640,16 +608,8 @@ impl<
 // Stage order: Fp comes after Narrow
 // ============================================================================
 
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way4> + CanTransitionTo<stage::Fp>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    SplitTime: M,
-    Packet: M,
-> VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, Way4>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Fp>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M>
+    VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, Way4>
 {
     /// Floating-point unary operation on both groups simultaneously.
     ///
@@ -756,16 +716,8 @@ impl<
 // Stage order: FpDiv comes after Fp (skipping Reduce)
 // ============================================================================
 
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way4> + CanTransitionTo<stage::FpDiv>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    SplitTime: M,
-    Packet: M,
-> VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, Way4>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::FpDiv>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M>
+    VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, Way4>
 {
     /// Floating-point division on both groups simultaneously.
     ///
@@ -818,7 +770,7 @@ impl<
     'l,
     const T: Tu,
     D: VeScalar,
-    S: stage::Stage<Way = Way4> + CanTransitionTo<stage::Widen>,
+    S: CanTransitionTo<stage::Widen>,
     Chip: M,
     Cluster: M,
     Slice: M,
@@ -875,16 +827,8 @@ impl<
 // Stage order: FpToFxp comes after Widen
 // ============================================================================
 
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::FpToFxp>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    SplitTime: M,
-    Packet: M,
-> VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::FpToFxp>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M>
+    VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
 {
     /// Converts f32 to i32 for both groups simultaneously. Requires `Way8` mode.
     /// This is a common operation that must be applied to both groups.
@@ -902,16 +846,8 @@ impl<
 // Stage order: Clip comes after FpToFxp
 // ============================================================================
 
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Clip>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    SplitTime: M,
-    Packet: M,
-> VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Clip>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M>
+    VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
 {
     /// Clip binary operation on both groups simultaneously. Requires `Way8` mode.
     ///
@@ -957,16 +893,8 @@ impl<
     }
 }
 
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Clip>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    SplitTime: M,
-    Packet: M,
-> VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Clip>, Chip: M, Cluster: M, Slice: M, SplitTime: M, Packet: M>
+    VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, SplitTime, Packet, Way8>
 {
     /// Clip binary operation on both groups simultaneously. Requires `Way8` mode.
     ///
@@ -1022,16 +950,8 @@ impl<
 // ============================================================================
 
 // Logic combine (i32)
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Logic>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    Time: M,
-    Packet: M,
-> VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, Time, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Logic>, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
+    VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, Time, Packet, Way8>
 {
     /// Binary logic operation merging Group 0 and Group 1. Requires `Way8` mode.
     #[primitive(VectorTensorPair::vector_logic_zip)]
@@ -1089,16 +1009,8 @@ impl<
 }
 
 // Logic combine (f32)
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Logic>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    Time: M,
-    Packet: M,
-> VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, Time, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Logic>, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
+    VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, Time, Packet, Way8>
 {
     /// Binary logic operation merging Group 0 and Group 1. Requires `Way8` mode.
     #[primitive(VectorTensorPair::vector_logic_zip)]
@@ -1156,16 +1068,8 @@ impl<
 }
 
 // Fxp combine
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Fxp>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    Time: M,
-    Packet: M,
-> VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, Time, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Fxp>, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
+    VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, Time, Packet, Way8>
 {
     /// Binary fxp operation merging Group 0 and Group 1. Requires `Way8` mode.
     #[primitive(VectorTensorPair::vector_fxp_zip)]
@@ -1223,16 +1127,8 @@ impl<
 }
 
 // Fp combine
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way4> + CanTransitionTo<stage::Fp>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    Time: M,
-    Packet: M,
-> VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, Time, Packet, Way4>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Fp>, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
+    VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, Time, Packet, Way4>
 {
     /// Binary fp operation merging Group 0 and Group 1.
     #[primitive(VectorTensorPair::vector_fp_zip)]
@@ -1290,16 +1186,8 @@ impl<
 }
 
 // Clip combine (i32)
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Clip>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    Time: M,
-    Packet: M,
-> VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, Time, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Clip>, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
+    VectorTensorPair<'l, T, i32, S, Chip, Cluster, Slice, Time, Packet, Way8>
 {
     /// Binary clip operation merging Group 0 and Group 1. Requires `Way8` mode.
     #[primitive(VectorTensorPair::vector_clip_zip)]
@@ -1357,16 +1245,8 @@ impl<
 }
 
 // Clip combine (f32)
-impl<
-    'l,
-    const T: Tu,
-    S: stage::Stage<Way = Way8> + CanTransitionTo<stage::Clip>,
-    Chip: M,
-    Cluster: M,
-    Slice: M,
-    Time: M,
-    Packet: M,
-> VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, Time, Packet, Way8>
+impl<'l, const T: Tu, S: CanTransitionTo<stage::Clip>, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
+    VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, Time, Packet, Way8>
 {
     /// Binary clip operation merging Group 0 and Group 1. Requires `Way8` mode.
     #[primitive(VectorTensorPair::vector_clip_zip)]
@@ -1431,7 +1311,7 @@ impl<
     'l,
     const T: Tu,
     D: VeScalar,
-    S: stage::Stage<Way = W>,
+    S: stage::Stage<OutputWay = W>,
     Chip: M,
     Cluster: M,
     Slice: M,

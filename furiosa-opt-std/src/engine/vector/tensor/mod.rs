@@ -38,8 +38,8 @@
 //! ```text
 //! Tag → Logic → Fxp → FxpToFp → Narrow(Way4) → Fp → IntraSliceReduce → FpDiv → Widen(Way8) → FpToFxp → Clip
 //! ```
-//! Each stage's `Stage::Way` is the packet width of the stream it emits: Narrow, Fp, IntraSliceReduce
-//! and FpDiv emit `Way4`, and Widen emits `Way8` again.
+//! Each stage's `Stage::OutputWay` is the packet width of the stream it emits: Narrow, Fp,
+//! IntraSliceReduce and FpDiv emit `Way4`, and Widen emits `Way8` again.
 //!
 //! # Filter
 //! `vector_filter()` applies branch filtering after intra-slice computation or inter-slice reduction.

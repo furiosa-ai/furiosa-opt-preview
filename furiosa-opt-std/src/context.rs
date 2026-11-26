@@ -38,6 +38,10 @@ pub struct TuContext<const T: Tu> {
 }
 
 /// Context for a DMA engine.
+///
+/// Cloning this handle shares the same opened device; it does not open another device or duplicate
+/// device memory. Each clone may be borrowed independently, while backend synchronization and
+/// transfer ordering continue to apply.
 #[primitive(DmaContext)]
 pub struct DmaContext<const DMA: Dma, B: Runtime = crate::runtime::CurrentBackend> {
     device: B::Device,
@@ -47,6 +51,15 @@ pub struct DmaContext<const DMA: Dma, B: Runtime = crate::runtime::CurrentBacken
 impl<const DMA: Dma, B: Runtime> Debug for DmaContext<DMA, B> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("DmaContext").finish_non_exhaustive()
+    }
+}
+
+impl<const DMA: Dma, B: Runtime> Clone for DmaContext<DMA, B> {
+    fn clone(&self) -> Self {
+        Self {
+            device: self.device.clone(),
+            _marker: PhantomData,
+        }
     }
 }
 

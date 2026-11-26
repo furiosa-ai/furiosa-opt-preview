@@ -19,6 +19,13 @@ How entries are written:
 
 ### Changed
 
+- The crates of a package share its compiled kernels: a kernel that the package's library, unit
+  tests, integration tests and binaries launch with the same arguments compiles once, and each
+  crate then reads it. A change to a kernel used by many test binaries recompiled it once per
+  binary. A kernel whose arguments name a crate's own types still compiles in that crate.
+- Kernel compilation runs within cargo's job limit: the workers of every crate that cargo builds at
+  once together take at most `-j` jobs, as rustc's own code generation does. Each crate ran as many
+  workers as the machine has CPUs, so a build that changed most kernels could run out of memory.
 - Kernels with thousands of DMAs compile faster: the completion-id analysis, which reruns once per
   coloring round, no longer redoes work an earlier test decides, lowers no code on its visits and
   keeps the DMA-holding entries indexed. The emitted images are unchanged.

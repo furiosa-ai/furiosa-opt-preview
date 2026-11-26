@@ -4,7 +4,7 @@ mod cast;
 mod operand;
 mod tensor;
 
-pub use cast::{CastError, CastKind, VectorCastInput, config_vector_cast};
+pub use cast::{VectorCastError, VectorCastInput, VectorCastKind, config_vector_cast};
 pub use operand::{UnreadableCause, VrfOperandError, VrfOperandInput, config_vrf_operand};
 pub use tensor::{
     ReduceLabelInput, VectorError, VectorIntraSliceUnzipInput, VectorNarrowSplitInput, VectorNarrowTrimInput,

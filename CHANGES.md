@@ -20,8 +20,29 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - `commit_view()` refuses a commit that would move a slice to another one, write a stream slice
   with no value (`#`, `#{!}`) into a destination slice that holds one or is `#{0}`, or write a
   stream slice that holds a value into a `#{0}` destination slice.
+- `vector_filter::<Time2>(guard)`, which had no implementation, becomes two filters:
+  `vector_filter_by_tag::<Time2, Packet2>(guard)` and
+  `vector_filter_by_bitmap::<BITMAP, Time2, Packet2>()`. See
+  [Filter](docs/src/computing-tensors/vector-engine/filter.md).
+- `TuTensor` takes a time extent `E` after the backend `B`, `FixedPackets` by default.
+  `VectorFilterTensor`, `VectorCastTensor`, `VectorFinalTensor`, `CommitTrimTensor` and
+  `CommitCastTensor` take `E` the same way.
 
 ### Added
+
+- `vector_filter_by_tag` packs the elements a `TagGuard` admits, so each slice emits only the
+  packets its survivors fill, the `k`-th survivor at output position `k`, which the output names with
+  new axes. The stream's extent is `TagFiltered`, as in
+  `VectorFinalTensor<.., m![P], CurrentBackend, TagFiltered>`. It reaches data memory only through `commit_view`,
+  which writes the packets that arrive and keeps the rest of the destination. A written slice with
+  more survivors than the output holds is an error, and a padded slice of the stream must go to a
+  `#{!}` slice of the destination. On padded chips or clusters the output holds every packet a slice
+  reads. It cannot follow the Inter-Slice Reducer, which clears every
+  tag bit.
+- `vector_filter_by_bitmap` keeps fixed positions of every packet, which is also how packet padding
+  is dropped or kept in part. The output names the kept positions with the stream's own axes or
+  renames them with new ones when the input holds no padding. It fills every output packet, so the stream goes wherever a
+  `FixedPackets` stream does.
 
 - `to_vrf` and `to_vrf_view` support `i4` storage alongside `f32` and `i32`, including from
   finalized Vector Engine output. VRF operand reads still accept only `f32` and `i32`.

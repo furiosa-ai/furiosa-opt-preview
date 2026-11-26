@@ -64,6 +64,10 @@ pub use per_cluster::{
 pub use runtime::{Device, HbmBuffer, Placement, ToPlacements, Topology};
 pub use spm_scalar::SpmScalar;
 
+/// The packets each slice of a tag-filtered stream emitted, which the host model and the LIR
+/// executor both commit.
+pub use engine::vector::filtered_packets::{FilteredPackets, PacketCount, PacketOverflow};
+
 /// Why a device, a transfer or a launch failed: the runtime refused or failed the work, or a
 /// tensor was not where the operation needs it.
 #[derive(thiserror::Error, Debug)]

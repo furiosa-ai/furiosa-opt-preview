@@ -27,7 +27,10 @@
 use std::marker::PhantomData;
 
 use furiosa_mapping::*;
-use furiosa_opt_lower::{ReduceLabelInput, config_reduce_label};
+use furiosa_opt_common_ir::CollectBitmap;
+use furiosa_opt_lower::{
+    FilterInput, ReduceLabelInput, config_filter_by_bitmap, config_filter_by_tag, config_reduce_label,
+};
 use furiosa_opt_macro::primitive;
 
 use super::VeTensorShape;
@@ -42,6 +45,7 @@ use crate::engine::vector::branch::{
 };
 use crate::engine::vector::cast::VectorCast;
 use crate::engine::vector::cast::{VectorCastTensor, cast_stream};
+use crate::engine::vector::filter::VectorFilterTensor;
 use crate::engine::vector::layer::{FpToFxp, FxpToFp, Reinterpret};
 use crate::engine::vector::op::semantics::HasConversionOp;
 use crate::engine::vector::op::semantics::{HasBinaryOp, HasTernaryOp, HasUnaryOp};
@@ -52,6 +56,7 @@ use crate::engine::vector::op::{
 };
 use crate::runtime::CurrentBackend;
 use crate::scalar::Scalar;
+use crate::tensor::tu::{FixedPackets, TagFiltered};
 use crate::tensor::*;
 
 use crate::engine::vector::operand::{
@@ -91,7 +96,7 @@ impl<'l, const T: Tu, D: VeScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packe
         D: VectorCast<OutD>,
         // ANCHOR_END: cast_impl
     {
-        cast_stream(self.device, self.inner)
+        cast_stream(self.device, self.inner, FixedPackets)
     }
 
     /// Creates a new VectorInitTensor.
@@ -140,9 +145,9 @@ pub struct VeTensorData<
 /// compile-time verification of stage transitions via the `CanTransitionTo` trait.
 ///
 /// The `FS` type parameter represents the tensor context:
-/// - `Standalone`: Single-stream context (default). `vector_filter` and `vector_stash` are available.
-/// - `Group`: Per-group context after `vector_intra_slice_unzip`. `vector_filter` and `vector_stash` are NOT available.
-/// - `Zipped`: After merging the two groups via a `_zip` method. `vector_filter` and `vector_stash` are NOT available.
+/// - `Standalone`: Single-stream context (default). The `vector_filter_*` methods and `vector_stash` are available.
+/// - `Group`: Per-group context after `vector_intra_slice_unzip`. The `vector_filter_*` methods and `vector_stash` are NOT available.
+/// - `Zipped`: After merging the two groups via a `_zip` method. The `vector_filter_*` methods and `vector_stash` are NOT available.
 ///
 /// The `W` type parameter represents the way:
 /// - `Way8`: Default 8-element flit mode. Float operations are NOT available.
@@ -492,7 +497,7 @@ impl<
 }
 
 // ============================================================================
-// Cast compaction
+// Cast
 // ============================================================================
 
 impl<
@@ -518,7 +523,7 @@ impl<
     where
         D: VectorCast<OutD>,
     {
-        cast_stream(self.device, self.data.inner)
+        cast_stream(self.device, self.data.inner, FixedPackets)
     }
 }
 
@@ -925,22 +930,6 @@ pub type VectorClipTensor<
     FS = stage::Standalone,
     W = Way8,
 > = VectorTensor<'l, T, stage::Clip, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
-
-/// Tensor after filter operation.
-pub type VectorFilterTensor<
-    'l,
-    const T: Tu,
-    D,
-    Chip,
-    Cluster,
-    Slice,
-    Time,
-    Packet,
-    Stash,
-    const VE_ORDER: VeOrder,
-    FS = stage::Standalone,
-    W = Way8,
-> = VectorTensor<'l, T, stage::Filter, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, FS, W>;
 
 // ============================================================================
 // Helper functions for applying operations with tag
@@ -1460,12 +1449,30 @@ fn verify_reduce_label(time: Mapping, packet: Mapping, out_time: Mapping, out_pa
     .unwrap_or_else(|message| panic!("{message}"));
 }
 
-/// Reduces tag tensor by keeping the last value (hardware semantics: all reduced
-/// elements share the same tag).
+/// Reduces the tag tensor as the device does: a reduced element keeps the tag of the first position
+/// of the last flit it covers.
 fn reduce_tag<Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, OutTime: M, OutPacket: M>(
     tag: Tensor<u8, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>,
 ) -> Tensor<u8, VeTensorShape<Chip, Cluster, Slice, OutTime, OutPacket>> {
-    tag.reduce::<VeTensorShape<Chip, Cluster, Slice, OutTime, OutPacket>>(|_, y| y, 0, false)
+    // Rank each tag by its flit, then by its position counted from the end, so the maximum is the
+    // first position of the last flit; the tag rides in the low bits.
+    const TAG_BITS: u32 = 4;
+    const TAG_MASK: i32 = (1 << TAG_BITS) - 1;
+    let ranked = tag
+        .into_vec()
+        .into_iter()
+        .enumerate()
+        .map(|(index, tag)| {
+            assert!(i32::from(tag) <= TAG_MASK, "a tag holds {TAG_BITS} bits, got {tag}");
+            let position = index % Packet::SIZE;
+            let flit = index / Packet::SIZE % Time::SIZE;
+            let rank = flit * Packet::SIZE + (Packet::SIZE - 1 - position);
+            i32::try_from(rank << TAG_BITS).expect("a slice's flits number far below 2^27") | i32::from(tag)
+        })
+        .collect::<Vec<_>>();
+    Tensor::<i32, VeTensorShape<Chip, Cluster, Slice, Time, Packet>>::from_vec(ranked)
+        .reduce::<VeTensorShape<Chip, Cluster, Slice, OutTime, OutPacket>>(i32::max, -1, false)
+        .map(|ranked| u8::try_from(ranked.max(0) & TAG_MASK).expect("a masked tag fits u8"))
 }
 
 // ANCHOR: intra_slice_reduce_i32
@@ -1875,14 +1882,51 @@ impl<
     const VE_ORDER: VeOrder,
 > VectorTensor<'l, T, S, D, Chip, Cluster, Slice, Time, Packet, Stash, VE_ORDER, stage::Standalone, Way8>
 {
-    /// Filter by branch ID. Requires `Way8` mode and the `Standalone` context (not `Group` or `Zipped`).
-    #[primitive(VectorTensor::vector_filter)]
-    pub fn vector_filter<Time2: M>(
+    /// Packs the elements `guard` admits into `Time2` × `Packet2`; each slice emits only the
+    /// packets its survivors fill.
+    #[primitive(VectorTensor::vector_filter_by_tag)]
+    // ANCHOR: vector_filter_by_tag
+    pub fn vector_filter_by_tag<Time2: M, Packet2: M>(
         self,
-        _config: TagGuard,
-    ) -> VectorFilterTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet, Stash, VE_ORDER, stage::Standalone, Way8>
+        guard: TagGuard,
+    ) -> VectorFilterTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet2, CurrentBackend, TagFiltered>
+    where
+        S: stage::CarriesTag,
     {
-        todo!("Implement vector_filter operation")
+        // ANCHOR_END: vector_filter_by_tag
+        let layouts = FilterInput {
+            in_time: Time::to_value(),
+            in_packet: Packet::to_value(),
+            out_time: Time2::to_value(),
+            out_packet: Packet2::to_value(),
+        };
+        config_filter_by_tag(layouts, &<m![{ Chip }, { Cluster }]>::to_value())
+            .unwrap_or_else(|error| panic!("{error}"));
+        let (device, inner, tag, _) = self.into_parts();
+        let input_elements = Time::SIZE * Packet::SIZE;
+        let tags = tag.into_vec().into_iter().map(exec_id).collect::<Vec<_>>();
+        VectorFilterTensor::select(device, &inner.into_vec(), &tags, input_elements, guard)
+    }
+
+    /// Keeps the packet positions `BITMAP` names (bit `i` is position `i`) of every packet and packs
+    /// them into `Time2` × `Packet2`, which names them with the stream's own axes or with new ones.
+    #[primitive(VectorTensor::vector_filter_by_bitmap)]
+    // ANCHOR: vector_filter_by_bitmap
+    pub fn vector_filter_by_bitmap<const BITMAP: u8, Time2: M, Packet2: M>(
+        self,
+    ) -> VectorFilterTensor<'l, T, D, Chip, Cluster, Slice, Time2, Packet2> {
+        // ANCHOR_END: vector_filter_by_bitmap
+        let bitmap = CollectBitmap::from(BITMAP);
+        let layouts = FilterInput {
+            in_time: Time::to_value(),
+            in_packet: Packet::to_value(),
+            out_time: Time2::to_value(),
+            out_packet: Packet2::to_value(),
+        };
+        config_filter_by_bitmap(layouts, bitmap).unwrap_or_else(|error| panic!("{error}"));
+        let (device, inner, _, _) = self.into_parts();
+        // A bitmap names packet positions rather than axes, so the kept elements move by position.
+        VectorFilterTensor::keep(device, &inner.into_vec(), Time::SIZE * Packet::SIZE, bitmap)
     }
 }
 
@@ -1924,6 +1968,22 @@ mod tests {
     use furiosa_opt_common_ir::{BitReq, BranchedOperand, TagGuard};
 
     use super::*;
+
+    /// A reduced element keeps the tag of the first position of the last flit it covers, as measured
+    /// on the device for a sum over flits and for a sum inside a packet.
+    #[test]
+    fn a_reduced_element_keeps_the_first_position_of_its_last_flit() {
+        axes![T2 = 2, P4 = 4];
+        type Unit = m![1];
+        // Flit `t`, position `p` is tagged `t * 4 + p`, so each tag names its element.
+        let tags = || Tensor::<u8, VeTensorShape<Unit, Unit, Unit, m![T2], m![P4]>>::from_vec(0..8);
+        let over_flits = reduce_tag::<Unit, Unit, Unit, m![T2], m![P4], Unit, m![P4]>(tags());
+        assert_eq!(over_flits.into_vec(), [4, 5, 6, 7]);
+        let in_packet = reduce_tag::<Unit, Unit, Unit, m![T2], m![P4], m![T2], m![1 # 4]>(tags()).into_vec();
+        assert_eq!((in_packet[0], in_packet[4]), (0, 4));
+        let both = reduce_tag::<Unit, Unit, Unit, m![T2], m![P4], Unit, m![1 # 4]>(tags()).into_vec();
+        assert_eq!(both[0], 4);
+    }
 
     /// One branch per element, so a cell an earlier slot claimed is not combined again by a later one.
     /// `Max` makes the difference visible: applying both slots to cell 0 would give `max(0, 10, 50) = 50`

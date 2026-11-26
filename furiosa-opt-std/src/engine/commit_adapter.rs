@@ -27,7 +27,7 @@ use crate::engine::{CanApplyCommitCast, CanApplyCommitTrim, CanApplyCommitValidC
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
-use crate::tensor::tu::{Position, TuTensor};
+use crate::tensor::tu::{FixedPackets, Position, TimeExtent, TuTensor};
 
 /// After the Commit Adapter's trimming stage.
 #[derive(Debug)]
@@ -36,11 +36,21 @@ pub struct PositionCommitTrim;
 impl Position for PositionCommitTrim {}
 
 /// Tensor streamed after `commit_trim`.
-pub type CommitTrimTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
-    TuTensor<'l, { T }, PositionCommitTrim, D, Chip, Cluster, Slice, Time, Packet, B>;
+pub type CommitTrimTensor<
+    'l,
+    const T: Tu,
+    D,
+    Chip,
+    Cluster,
+    Slice,
+    Time,
+    Packet,
+    B = CurrentBackend,
+    E = FixedPackets,
+> = TuTensor<'l, { T }, PositionCommitTrim, D, Chip, Cluster, Slice, Time, Packet, B, E>;
 
-impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    CommitTrimTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend, E: TimeExtent>
+    CommitTrimTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B, E>
 {
     fn check_constraints() {
         constraints::assert_cluster_size::<Cluster>();
@@ -49,12 +59,13 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
     }
 
     #[doc(hidden)]
-    pub(crate) fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+    pub(crate) fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>, time_extent: E) -> Self {
         Self::check_constraints();
 
         Self {
             device,
             inner,
+            time_extent,
             _position: PhantomData,
         }
     }
@@ -67,11 +78,21 @@ pub struct PositionCommitCast;
 impl Position for PositionCommitCast {}
 
 /// Tensor streamed after `commit_cast` or `commit_cast_relu`.
-pub type CommitCastTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
-    TuTensor<'l, { T }, PositionCommitCast, D, Chip, Cluster, Slice, Time, Packet, B>;
+pub type CommitCastTensor<
+    'l,
+    const T: Tu,
+    D,
+    Chip,
+    Cluster,
+    Slice,
+    Time,
+    Packet,
+    B = CurrentBackend,
+    E = FixedPackets,
+> = TuTensor<'l, { T }, PositionCommitCast, D, Chip, Cluster, Slice, Time, Packet, B, E>;
 
-impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    CommitCastTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend, E: TimeExtent>
+    CommitCastTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B, E>
 {
     fn check_constraints() {
         constraints::assert_cluster_size::<Cluster>();
@@ -79,12 +100,13 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
     }
 
     #[doc(hidden)]
-    pub(crate) fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+    pub(crate) fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>, time_extent: E) -> Self {
         Self::check_constraints();
 
         Self {
             device,
             inner,
+            time_extent,
             _position: PhantomData,
         }
     }
@@ -115,6 +137,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
         Self {
             device,
             inner,
+            time_extent: FixedPackets,
             _position: PhantomData,
         }
     }
@@ -133,7 +156,8 @@ impl<
     Time: M,
     Packet: M,
     B: Backend,
-> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+    E: TimeExtent,
+> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B, E>
 {
     /// Runs the Commit Adapter's trimming stage.
     ///
@@ -142,32 +166,42 @@ impl<
     /// promises; the compiler derives the trim count from the input and
     /// output mappings.
     #[primitive(TuTensor::commit_trim)]
-    pub fn commit_trim<OutPacket: M>(self) -> CommitTrimTensor<'l, T, D, Chip, Cluster, Slice, Time, OutPacket, B> {
+    pub fn commit_trim<OutPacket: M>(self) -> CommitTrimTensor<'l, T, D, Chip, Cluster, Slice, Time, OutPacket, B, E> {
         verify_commit_trim(CommitTrimInput {
             in_packet: Packet::to_value(),
             out_packet: OutPacket::to_value(),
             element_bits: D::BITS,
         });
         // `transpose(false)` is type-system filler; real trim lowering lands with the backend wiring.
-        CommitTrimTensor::new(self.device, self.inner.transpose(false))
+        CommitTrimTensor::new(self.device, self.inner.transpose(false), self.time_extent)
     }
 }
 // ANCHOR_END: commit_trim_impl
 
 // ANCHOR: commit_cast_impl
-impl<'l, P: CanApplyCommitCast, D: MaterializableScalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    TuTensor<'l, { Tu::Main }, P, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<
+    'l,
+    P: CanApplyCommitCast,
+    D: MaterializableScalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    B: Backend,
+    E: TimeExtent,
+> TuTensor<'l, { Tu::Main }, P, D, Chip, Cluster, Slice, Time, Packet, B, E>
 {
     /// Casts `f32` to `bf16` on the main commit path, leaving the Vector Engine free.
     #[primitive(TuTensor::commit_cast)]
     pub fn commit_cast<OutD: Scalar>(
         self,
-    ) -> CommitCastTensor<'l, { Tu::Main }, OutD, Chip, Cluster, Slice, Time, Packet, B>
+    ) -> CommitCastTensor<'l, { Tu::Main }, OutD, Chip, Cluster, Slice, Time, Packet, B, E>
     where
         D: CommitCast<OutD>,
     {
         verify_commit_cast::<Packet>();
-        CommitCastTensor::new(self.device, self.inner.map(D::cast))
+        CommitCastTensor::new(self.device, self.inner.map(D::cast), self.time_extent)
     }
 
     /// The same cast with a ReLU fused in, clamping negative values to zero.
@@ -179,12 +213,12 @@ impl<'l, P: CanApplyCommitCast, D: MaterializableScalar, Chip: M, Cluster: M, Sl
     #[primitive(TuTensor::commit_cast_relu)]
     pub fn commit_cast_relu<OutD: Scalar>(
         self,
-    ) -> CommitCastTensor<'l, { Tu::Main }, OutD, Chip, Cluster, Slice, Time, Packet, B>
+    ) -> CommitCastTensor<'l, { Tu::Main }, OutD, Chip, Cluster, Slice, Time, Packet, B, E>
     where
         D: CommitCast<OutD>,
     {
         verify_commit_cast::<Packet>();
-        CommitCastTensor::new(self.device, self.inner.map(D::cast_relu))
+        CommitCastTensor::new(self.device, self.inner.map(D::cast_relu), self.time_extent)
     }
 }
 // ANCHOR_END: commit_cast_impl

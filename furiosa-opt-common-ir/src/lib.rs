@@ -7,8 +7,9 @@
 // is defined, so it is registered here as well as in `furiosa-opt-std`.
 #![register_tool(furiosa_opt)]
 
-//! The VE branch vocabulary the eDSL and the compiler IR both speak: the guard types and the slot
-//! layout, so the compiler side can name them without depending on the eDSL's standard library.
+//! The VE vocabulary the eDSL and the compiler IR both speak: the guard types, the slot layout and
+//! the packet bitmap a bitmap filter keeps, so the compiler side can name them without depending on
+//! the eDSL's standard library.
 //!
 //! Only the vocabulary. Each side's own payloads stay where they are used.
 
@@ -16,6 +17,10 @@ use std::fmt::{self, Display, Formatter};
 
 use furiosa_opt_macro::primitive;
 use serde::{Deserialize, Serialize};
+
+mod collect_bitmap;
+
+pub use collect_bitmap::CollectBitmap;
 
 /// One of the two groups Filter and pair mode split elements into: bit 3 of the execution id.
 ///

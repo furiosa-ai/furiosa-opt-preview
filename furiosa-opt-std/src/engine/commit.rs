@@ -7,7 +7,9 @@
 use furiosa_mapping::*;
 use furiosa_opt_macro::primitive;
 
-use furiosa_opt_lower::{CommitInput, CommitSliceInput, config_commit};
+use furiosa_opt_lower::{
+    CommitInput, CommitSliceInput, StreamPackets, commit_skipped_slices, config_commit, config_commit_slice,
+};
 
 use crate::backend::Backend;
 use crate::constraints;
@@ -16,7 +18,7 @@ use crate::engine::CanApplyCommit;
 use crate::scalar::*;
 use crate::tensor::Tensor;
 use crate::tensor::memory::{DmTensor, DmTensorViewMut};
-use crate::tensor::tu::TuTensor;
+use crate::tensor::tu::{TagFiltered, TuTensor};
 
 // ANCHOR: commit_impl
 // `D: MaterializableScalar`: a commit writes values data memory can hold.
@@ -49,20 +51,22 @@ impl<
         mut dst: DmTensorViewMut<'l, D, Chip, Cluster, DstSlice, Element, B>,
     ) {
         constraints::assert_slice_preserved::<Slice, DstSlice>();
-        verify_commit(CommitInput {
-            in_time: Time::to_value(),
-            in_packet: Packet::to_value(),
-            element: Element::to_value(),
-            element_bits: D::BITS,
-        });
-        furiosa_opt_lower::config_commit_slice(CommitSliceInput {
-            stream: Slice::to_value(),
-            destination: DstSlice::to_value(),
-        })
-        .unwrap_or_else(|error| panic!("{error}"));
+        verify_commit_view_layout(
+            CommitSliceInput {
+                stream: Slice::to_value(),
+                destination: DstSlice::to_value(),
+                packets: StreamPackets::Fixed,
+            },
+            CommitInput {
+                in_time: Time::to_value(),
+                in_packet: Packet::to_value(),
+                element: Element::to_value(),
+                element_bits: D::BITS,
+            },
+        );
         // A commit writes each slice in place, so the stream's slice `p` is read as the
         // destination's slice `p`; the stream may hold axes the destination's `Slice` narrows away.
-        // SAFETY: the relabel keeps every slice at its position, and `config_commit_slice` has
+        // SAFETY: the relabel keeps every slice at its position, and `verify_commit_view_layout` has
         // checked that both name the same coordinates wherever the destination holds a value.
         let in_place = unsafe {
             self.inner
@@ -73,12 +77,90 @@ impl<
 }
 // ANCHOR_END: commit_impl
 
+// A tag filter's stream reaches data memory through this `commit_view` alone.
+impl<
+    'l,
+    const T: Tu,
+    P: CanApplyCommit,
+    D: MaterializableScalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    B: Backend,
+> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B, TagFiltered>
+{
+    /// Writes the packets that arrive into `dst`, preserving every destination value they do not
+    /// reach. A slice keeps its leading `Time` packets and drops the rest, as the device does.
+    #[primitive(TuTensor::commit_view)]
+    pub fn commit_view<DstSlice: M, Element: M>(
+        self,
+        mut dst: DmTensorViewMut<'l, D, Chip, Cluster, DstSlice, Element, B>,
+    ) {
+        constraints::assert_slice_preserved::<Slice, DstSlice>();
+        verify_commit_view_layout(
+            CommitSliceInput {
+                stream: Slice::to_value(),
+                destination: DstSlice::to_value(),
+                packets: StreamPackets::TagFiltered,
+            },
+            CommitInput {
+                in_time: Time::to_value(),
+                in_packet: Packet::to_value(),
+                element: Element::to_value(),
+                element_bits: D::BITS,
+            },
+        );
+        // 1. Count the leading elements of each slice that the commit writes: the packets its
+        //    filter emitted. A commit skips the destination's `Bottom` slices, so none of their
+        //    elements count. Every chip and cluster repeats the destination's `Slice`.
+        let TagFiltered(filtered) = &self.time_extent;
+        let skipped = commit_skipped_slices(&DstSlice::to_value());
+        let arrived = (filtered.written_packets(|slice| !skipped.contains(&(slice % DstSlice::SIZE))))
+            .unwrap_or_else(|error| panic!("{error}"))
+            .into_iter()
+            .map(|packets| packets.0 * Packet::SIZE)
+            .collect::<Vec<_>>();
+        // 2. Read what the destination holds now, in the stream's layout. A commit writes each slice
+        //    in place, so slice `p` of one is slice `p` of the other.
+        let previous = dst
+            .inner
+            .read()
+            .transpose::<m![{ Chip }, { Cluster }, { DstSlice }, { Time }, { Packet }]>(false)
+            .into_vec();
+        // 3. Past its counted elements a slice of the stream holds padding. Put the destination's
+        //    own values there.
+        let mut stream = self.inner.into_vec();
+        restore_unwritten(&mut stream, &previous, &arrived);
+        // 4. Write the whole stream. Only the counted elements differ from the destination.
+        let stream: Tensor<D, m![{ Chip }, { Cluster }, { DstSlice }, { Time }, { Packet }], B> =
+            Tensor::from_vec(stream);
+        dst.inner.transpose(stream.view(), false);
+    }
+}
+
+/// Checks the slices and packet layout shared by both `commit_view` entry points.
+fn verify_commit_view_layout(slices: CommitSliceInput, commit: CommitInput) {
+    config_commit_slice(slices).unwrap_or_else(|error| panic!("{error}"));
+    verify_commit(commit);
+}
+
 /// Validates the Commit engine and synthesizes the write config via [`config_commit`], panicking
 /// with the commit error on failure. The resolved descriptors are not consumed yet, so they're
 /// explicitly discarded. The dual of `verify_fetch`: it writes the time-ordered `(InTime, InPacket)`
 /// stream into the DM `Element` layout.
 pub(crate) fn verify_commit(input: CommitInput) {
     let _ = config_commit(input).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Restores each slice of `stream` past its `arrived` elements to the same elements of `previous`.
+fn restore_unwritten<V: Clone>(stream: &mut [V], previous: &[V], arrived: &[usize]) {
+    let slice_elements = stream.len() / arrived.len();
+    for (slice, arrived) in arrived.iter().enumerate() {
+        let unwritten = slice * slice_elements + arrived..(slice + 1) * slice_elements;
+        stream[unwritten.clone()].clone_from_slice(&previous[unwritten]);
+    }
 }
 
 #[cfg(test)]

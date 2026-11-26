@@ -1,6 +1,7 @@
-# Cast Compaction
+# Cast
 
-The Vector Engine's output cast-compaction stage converts `i32` and `f32` results to lower-precision types.
+The Vector Engine's output Cast stage converts `i32` and `f32` results to lower-precision types.
+It sits outside the Intra-Slice Chain and Inter-Slice Reducer blocks and converts each emitted packet independently.
 
 ## Interface
 
@@ -8,11 +9,13 @@ The Vector Engine's output cast-compaction stage converts `i32` and `f32` result
 {{#include ../../../../furiosa-opt-std/src/engine/vector/tensor/vector_tensor.rs:cast_impl}}
 ```
 
-`vector_cast()` is a Vector Engine stage between `vector_init()` and `vector_final()`.
+Call `vector_cast()` after `vector_init()`, at a compatible 8-way point in either computation block, or after [Filter](./filter.md).
+[Vector Engine output stages](./index.md#output-stages) shows these paths.
+The cast result proceeds to `vector_final()`; it does not return to either computation block.
 
 `.vector_cast::<OutD, OutPacket>()` converts each element to type `OutD` and pads the output back to one 32-byte flit.
 
-Cast compaction changes element precision while preserving the tensor’s logical shape; it is not a [mathematical tensor move](../../mapping-tensors/tensor-semantics.md#mathematical-tensor-move).
+Cast changes element precision while preserving the tensor’s logical shape; it is not a [mathematical tensor move](../../mapping-tensors/tensor-semantics.md#mathematical-tensor-move).
 All dimensions pass through unchanged, except for the `Packet` layout, which repads so the output still fits one 32-byte flit.
 
 The example below casts an 8-element `i32` packet (8 × 4 = 32 bytes) to `i8`.
@@ -77,5 +80,5 @@ The supported source types are `f32` and `i32`, each with specific target types:
 
 ## Performance
 
-Cast compaction processes one flit per cycle regardless of how much of the flit carries valid data.
+Cast processes one flit per cycle regardless of how much of the flit carries valid data.
 The downstream [Commit Engine](../../moving-tensors/commit-engine.md) aggregates under-utilized flits into dense DM writes, so no DM bandwidth is wasted.

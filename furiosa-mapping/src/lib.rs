@@ -78,6 +78,8 @@ pub trait MappingExt: Sized {
     fn has_bottom_pad(&self) -> bool;
     /// Whether every physical position resolves to a live cell, after combining composite contributions.
     fn has_no_padding(&self) -> bool;
+    /// Whether some physical position resolves to padding, after combining composite contributions.
+    fn has_padding(&self) -> bool;
     /// A lazy iterator over where this mapping's cells land in a buffer laid out by `axes`, each offset
     /// shifted by `base`: one `Option<usize>` per physical cell in canonical order (`Some(off)` live,
     /// `None` padding). `padding` picks the traversal: `true` visits every physical cell (the wire order
@@ -246,7 +248,11 @@ impl MappingExt for Mapping {
     }
 
     fn has_no_padding(&self) -> bool {
-        !unsafe { sys::mapping_has_padding(self, false) }
+        !self.has_padding()
+    }
+
+    fn has_padding(&self) -> bool {
+        unsafe { sys::mapping_has_padding(self, false) }
     }
 
     fn iter(&self, axes: &[AxisTerm], base: &Index, padding: bool) -> MappingIter {

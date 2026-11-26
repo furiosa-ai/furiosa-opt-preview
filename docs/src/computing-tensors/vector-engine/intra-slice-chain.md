@@ -58,7 +58,7 @@ The chain starts (as shown above) with `vector_intra_slice_tag()` (right after [
 {{#include ../../../../furiosa-opt-std/src/engine/vector/tensor/vector_tensor.rs:vector_intra_slice_unzip}}
 ```
 
-After entry, the chain steps through the pipeline stages below in a fixed order; software chains the relevant ones and skips the rest, as the example skips `Logic`, `FpDiv`, and `Filter`.
+After entry, the chain steps through the pipeline stages below in a fixed order; software chains the relevant ones and skips the rest, as the example skips `Logic` and `FpDiv`.
 Each row lists the stage's position in the chain (`#`), its name (`Stage`), the API method that triggers it (`Method`), the way it runs in (`Way`, either 8 or 4 elements per cycle), and whether it accepts an operand (`Operand`).
 The type system enforces every stage transition at compile time, so methods become callable only after the preceding chain reaches a compatible state.
 Per-stage detail is in [Stages](#stages) below.
@@ -76,7 +76,6 @@ Per-stage detail is in [Stages](#stages) below.
 | 9 | Widen | `vector_widen_concat()` / `vector_widen_pad()` | Way4 → Way8 | – | yes |
 | 10 | FpToFxp | `vector_fp_to_fxp()` | Way8 | – | yes |
 | 11 | Clip | `vector_clip()` | Way8 | yes | yes |
-| 12 | Filter | `vector_filter()` | Way8 | – | – |
 
 `vector_reinterpret()` is deliberately absent from the table: it occupies no stage and can sit between any two of them (see [Reinterpret](#reinterpret)).
 
@@ -87,7 +86,8 @@ The example does exactly this: `vector_narrow_trim` then `vector_fp_unary(Sigmoi
 
 <a id="transitioning-to-the-inter-slice-reducer"></a>
 
-The chain can transition to the [Inter-Slice Reducer](./inter-slice-reducer.md) via `vector_inter_slice_reduce()`, to [Cast Compaction](./cast-compaction.md) via `vector_cast()`, or finalize the Vector Engine via `vector_final()`.
+The chain can transition to the [Inter-Slice Reducer](./inter-slice-reducer.md) via `vector_inter_slice_reduce()`.
+It can also leave the computation blocks for [Filter](./filter.md), [Cast](./cast.md), or `vector_final()` at a compatible 8-way stage, without executing the remaining intra-slice stages.
 These transitions require 8-way, so any active 4-way stage must pass through `Widen` first.
 
 ### Operands
@@ -175,7 +175,7 @@ For example, `BinaryArgMode::Mode10` swaps the slots so `SubFxp` computes `opera
 
 Pair mode runs the chain on a tensor whose elements split into two interleaved groups, so an op can relate the two groups (e.g., pair-wise add, asymmetric scale).
 Entry is `vector_intra_slice_unzip()` directly after `vector_init()`, applied to a collected tensor that carries a 2-way grouping axis.
-Starting the chain with `vector_intra_slice_unzip()` precludes the [Filter](#filter) stage downstream.
+Starting the chain with `vector_intra_slice_unzip()` precludes the [Filter](./filter.md) stage downstream.
 Under the hood, `vector_intra_slice_unzip()` derives each element's `GroupId` from its position along the 2-way grouping axis, driving the branch unit's count augmenter rather than any `TagMode`.
 The tag the chain was started with is untouched, which is why this is the supported route to a group split and `TagMode::AxisToggle` is not.
 
@@ -202,7 +202,7 @@ Pair mode reinterprets [`BinaryArgMode`](#argument-modes) depending on the op: p
 | `Mode11` | group1 / group1 | `op(group1, group1)` |
 
 Pair-mode constraints:
-- `stash()` and `filter()` are unavailable throughout pair mode (both paired and merged phases).
+- `vector_stash()` and the filters are unavailable throughout pair mode (both paired and merged phases).
 - [`vector_intra_slice_reduce()`](./intra-slice-reduce.md) is unavailable throughout pair mode as well, before and after the `_zip`: the reducer takes no group condition.
 - Before `_zip` (the paired phase), the chain cannot transition to the [inter-slice reducer](./inter-slice-reducer.md), since `vector_inter_slice_reduce()` is not available on per-group tensors.
   After `_zip` (the merged phase), the result is `Commitable` again and can call `vector_inter_slice_reduce()` if the current stage supports the transition.
@@ -550,17 +550,11 @@ The stage exposes three ALU classes (`ClipAdd`, `ClipMax`, `ClipMin`), each runn
 | `AbsMax` | `ClipMax` | absolute maximum |
 | `Add` | `ClipAdd` | floating-point add |
 
-### Filter
-
-The Filter stage applies an execution mask derived from a `TagGuard` (typically matching on the `GroupId` MSB of each element's `Tag`) to filter output flits.
-Available 8-way and `Standalone` context only.
-The source `impl` lives on `VectorTensor` for any stage with `CanTransitionTo<Filter>`, which covers every intra-slice stage and `InterSliceReduce`.
-
-
 ### Output
 
 `vector_final()` closes the Vector Engine pipeline.
-The result can be stored in VRF, or continue to the [Transpose Engine](../transpose-engine.md) or [Commit Engine](../../moving-tensors/commit-engine.md).
+An ordinary stream can be stored in VRF or continue to the [Transpose Engine](../transpose-engine.md) or [Commit Engine](../../moving-tensors/commit-engine.md).
+A tag-filtered stream takes only the [output paths that keep its runtime packet count](./filter.md#supported-output-paths).
 
 ## Reinterpret
 

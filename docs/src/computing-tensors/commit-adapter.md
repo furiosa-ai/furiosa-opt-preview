@@ -3,7 +3,8 @@
 The Commit Adapter applies element-wise transformations to the packet stream before the [Commit Engine](../moving-tensors/commit-engine.md) writes it to DM.
 It mirrors the [Fetch Adapter](./fetch-adapter.md) on the output side of the Tensor Unit.
 
-The adapter's stages chain as dedicated `.commit_xxx(...)` methods on the upstream tensor, and the chain always ends in `.commit(...)` for the actual DM write.
+The adapter's stages chain as dedicated `.commit_xxx(...)` methods on the upstream tensor, ending in `.commit(...)` or `.commit_view(...)` for the actual DM write.
+A [tag-filtered stream](./vector-engine/filter.md#supported-output-paths) uses `.commit_view(...)` so unwritten destination values are preserved.
 [Trimming](#trimming) is the mandatory first stage: `.commit()` / `.commit_view()` are reachable only after `.commit_trim(...)`, so every commit is trimmed first (it is how flit padding is dropped).
 After trimming, type casting is optional and available only in the main context.
 Generate Mode is a separate sub-context path used internally by `memset` for immediate fills; it does not chain off a `TuTensor`.
@@ -93,7 +94,7 @@ fn commit_trim_i4_no_trim<'l, const T: Tu>(
 
 `commit_cast::<bf16>()` converts `f32` to `bf16` on the commit path; `commit_cast_relu::<bf16>()` also applies ReLU.
 
-The Vector Engine's [`vector_cast()`](./vector-engine/cast-compaction.md) also supports `f32` → `bf16`, but the main and sub contexts share that engine.
+The Vector Engine's [`vector_cast()`](./vector-engine/cast.md) also supports `f32` → `bf16`, but the main and sub contexts share that engine.
 Use `commit_cast` in the main context to convert `f32` to `bf16` while the sub context runs Vector Engine operations.
 
 ```rust,ignore

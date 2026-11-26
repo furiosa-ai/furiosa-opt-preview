@@ -6,6 +6,16 @@ use furiosa_mapping::{Cell, Ident, IndexExt, Mapping, MappingExt, PaddingKind, R
 pub struct CommitSliceInput {
     pub stream: Mapping,
     pub destination: Mapping,
+    pub packets: StreamPackets,
+}
+
+/// How many packets each slice of a committed stream carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamPackets {
+    /// Every slice carries the same packets.
+    Fixed,
+    /// A tag filter's survivors decide each slice's packets.
+    TagFiltered,
 }
 
 /// A `Slice` pair no commit can take.
@@ -21,6 +31,16 @@ pub enum CommitSliceError {
          undefined (`#`) or unwritten (`#{{!}}`)"
     )]
     UndefinedSlice {
+        slice_position: usize,
+        stream: Mapping,
+        destination: Mapping,
+    },
+    #[error(
+        "slice {slice_position} is undefined in the tag-filtered stream ({stream}), so its undefined values decide how \
+         many packets it emits, and a slice that emits past its output stops the device; the destination \
+         ({destination}) must skip it (`#{{!}}`)"
+    )]
+    UndefinedFilteredSlice {
         slice_position: usize,
         stream: Mapping,
         destination: Mapping,
@@ -64,14 +84,18 @@ enum SliceContent {
 ///
 /// | stream \ destination | Top | Zero | Bottom | Index |
 /// | --- | --- | --- | --- | --- |
-/// | Top, Bottom | ok | `UndefinedSlice` | ok | `UndefinedSlice` |
+/// | Top, Bottom | ok, `UndefinedFilteredSlice` if tag-filtered | `UndefinedSlice` | ok | `UndefinedSlice` |
 /// | Zero | ok | ok | ok | ok |
 /// | Index | ok | `NonZeroSlice` | ok | `MovedSlice` unless the coordinates agree |
 ///
 /// Whether an accepted slice is written is the destination's alone: a `Bottom` slice is skipped
 /// ([`commit_skipped_slices`]).
 pub fn config_commit_slice(input: CommitSliceInput) -> Result<(), CommitSliceError> {
-    let CommitSliceInput { stream, destination } = input;
+    let CommitSliceInput {
+        stream,
+        destination,
+        packets,
+    } = input;
     if stream.size() != destination.size() {
         return Err(CommitSliceError::SliceCountMismatch {
             stream_slices: stream.size(),
@@ -86,6 +110,17 @@ pub fn config_commit_slice(input: CommitSliceInput) -> Result<(), CommitSliceErr
             // A slice with no value cannot reach one that promises a value.
             (SliceContent::NoValue, SliceContent::Value(_) | SliceContent::Zero) => {
                 return Err(CommitSliceError::UndefinedSlice {
+                    slice_position,
+                    stream,
+                    destination,
+                });
+            }
+            // A written slice's undefined values could pass the guard and overflow (Arena 329503),
+            // while a skipped one cannot (Arena 329504).
+            (SliceContent::NoValue, SliceContent::NoValue)
+                if packets == StreamPackets::TagFiltered && !is_skipped(&destination, slice_position) =>
+            {
+                return Err(CommitSliceError::UndefinedFilteredSlice {
                     slice_position,
                     stream,
                     destination,
@@ -121,8 +156,13 @@ pub fn config_commit_slice(input: CommitSliceInput) -> Result<(), CommitSliceErr
 /// The positions of the destination's `Bottom` slices, ascending.
 pub fn commit_skipped_slices(destination: &Mapping) -> Vec<usize> {
     (0..destination.size())
-        .filter(|&position| matches!(destination.index(position), Cell::Padding(PaddingKind::Bottom)))
+        .filter(|&position| is_skipped(destination, position))
         .collect()
+}
+
+/// Whether a commit skips slice `position` of `destination`.
+fn is_skipped(destination: &Mapping, position: usize) -> bool {
+    matches!(destination.index(position), Cell::Padding(PaddingKind::Bottom))
 }
 
 /// What slice `position` of `placement` holds. A cell whose coordinates overshoot reads as the
@@ -150,7 +190,36 @@ mod tests {
     axes![A = 8, B = 8];
 
     fn commit_slice(stream: Mapping, destination: Mapping) -> Result<(), CommitSliceError> {
-        config_commit_slice(CommitSliceInput { stream, destination })
+        config_commit_slice(CommitSliceInput {
+            stream,
+            destination,
+            packets: StreamPackets::Fixed,
+        })
+    }
+
+    fn commit_filtered_slice(stream: Mapping, destination: Mapping) -> Result<(), CommitSliceError> {
+        config_commit_slice(CommitSliceInput {
+            stream,
+            destination,
+            packets: StreamPackets::TagFiltered,
+        })
+    }
+
+    #[test]
+    fn an_undefined_slice_of_a_tag_filtered_stream_commits_only_to_a_skipped_slice() {
+        let stream = <m![A, B % 4 # 8]>::to_value();
+        assert_eq!(
+            commit_filtered_slice(stream.clone(), <m![A, B % 4 #{!} 8]>::to_value()),
+            Ok(())
+        );
+        assert!(matches!(
+            commit_filtered_slice(stream, <m![A, B % 4 # 8]>::to_value()),
+            Err(CommitSliceError::UndefinedFilteredSlice { slice_position: 4, .. })
+        ));
+        assert!(matches!(
+            commit_filtered_slice(<m![A, B % 4 #{!} 8]>::to_value(), <m![A, B % 4 # 8]>::to_value()),
+            Err(CommitSliceError::UndefinedFilteredSlice { slice_position: 4, .. })
+        ));
     }
 
     #[test]

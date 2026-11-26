@@ -286,7 +286,7 @@ impl Stage for Filter {
     type OutputWay = Way8;
 }
 
-/// Vector Engine cast-compaction stage.
+/// Vector Engine cast stage.
 #[derive(Debug, Clone, Copy)]
 pub struct Cast;
 impl Stage for Cast {
@@ -382,6 +382,17 @@ impl CanTransitionTo<Filter> for Widen {}
 impl CanTransitionTo<Filter> for FpToFxp {}
 impl CanTransitionTo<Filter> for Clip {}
 impl CanTransitionTo<Filter> for InterSliceReduce {}
+
+/// Stages whose stream still carries the tags `vector_intra_slice_tag` set, which a tag filter
+/// reads. The inter-slice reducer clears every tag bit, so a tag filter cannot follow it.
+pub trait CarriesTag: CanTransitionTo<Filter> {}
+impl CarriesTag for Tag {}
+impl CarriesTag for Logic {}
+impl CarriesTag for Fxp {}
+impl CarriesTag for FxpToFp {}
+impl CarriesTag for Widen {}
+impl CarriesTag for FpToFxp {}
+impl CarriesTag for Clip {}
 
 // Cast transitions (after either computation block; a filter's output casts on its own position)
 impl CanTransitionTo<Cast> for Tag {}

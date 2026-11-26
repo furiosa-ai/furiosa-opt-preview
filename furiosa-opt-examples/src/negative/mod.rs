@@ -18,6 +18,7 @@ pub mod contract_outer_assertions;
 pub mod dm_slice;
 pub mod dma;
 pub mod fetch_lift;
+pub mod filter;
 pub mod generic_device;
 pub mod memset;
 pub mod runtime_if;

@@ -33,6 +33,9 @@
 //! inter → intra: vector_init → inter → intra → [filter] → [cast] → vector_final
 //! cast only:     vector_init → cast                             → vector_final
 //! ```
+//! Filter and cast sit outside both computation blocks: they read the last block's result,
+//! whichever order the blocks ran in. The inter-slice reducer clears every tag bit, so a tag filter
+//! needs the intra-slice block after it.
 //!
 //! # Intra-Slice Stage Flow (IntraSliceStage)
 //! ```text
@@ -42,8 +45,7 @@
 //! IntraSliceReduce and FpDiv emit `Way4`, and Widen emits `Way8` again.
 //!
 //! # Filter
-//! `vector_filter()` applies branch filtering after intra-slice computation or inter-slice reduction.
-//! It requires `Way8` mode and the `Standalone` context.
+//! `vector_filter_by_tag()` and `vector_filter_by_bitmap()` pack part of each slice into whole packets. They require `Way8` mode and the `Standalone` context.
 //!
 //! # VeOrder Tracking
 //! The `const VE_ORDER: VeOrder` parameter tracks which unit was entered first:
@@ -71,7 +73,7 @@ use crate::engine::vector::scalar::VeScalar;
 use crate::runtime::CurrentBackend;
 use crate::scalar::Scalar;
 use crate::tensor::Tensor;
-use crate::tensor::tu::{Position, TuTensor};
+use crate::tensor::tu::{FixedPackets, Position, TimeExtent, TuTensor};
 
 /// A VE stream's five-axis mapping, which the operand impls name to say an operand is read at the
 /// stream's own partition. Public because those impls are, and their headers spell it out.
@@ -84,11 +86,21 @@ pub struct PositionVectorFinal;
 impl Position for PositionVectorFinal {}
 
 /// Tensor after the vector engine (after `vector_final()`).
-pub type VectorFinalTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
-    TuTensor<'l, { T }, PositionVectorFinal, D, Chip, Cluster, Slice, Time, Packet, B>;
+pub type VectorFinalTensor<
+    'l,
+    const T: Tu,
+    D,
+    Chip,
+    Cluster,
+    Slice,
+    Time,
+    Packet,
+    B = CurrentBackend,
+    E = FixedPackets,
+> = TuTensor<'l, { T }, PositionVectorFinal, D, Chip, Cluster, Slice, Time, Packet, B, E>;
 
-impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    VectorFinalTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend, E: TimeExtent>
+    VectorFinalTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B, E>
 {
     fn check_constraints() {
         constraints::assert_cluster_size::<Cluster>();
@@ -96,15 +108,29 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
         constraints::assert_packet_one_flit::<D, Packet>();
     }
 
-    #[doc(hidden)]
-    pub fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+    /// The Vector Engine's output with `time_extent`, as a filter leaves it.
+    pub(crate) fn new_with_time_extent(
+        device: &'l mut TuContext<{ T }>,
+        inner: Tensor<D, Self::Mapping, B>,
+        time_extent: E,
+    ) -> Self {
         Self::check_constraints();
 
         Self {
             device,
             inner,
+            time_extent,
             _position: PhantomData,
         }
+    }
+}
+
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
+    VectorFinalTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+{
+    #[doc(hidden)]
+    pub fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+        Self::new_with_time_extent(device, inner, FixedPackets)
     }
 }
 

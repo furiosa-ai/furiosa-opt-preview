@@ -15,7 +15,7 @@ use crate::engine::CanApplyTranspose;
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
-use crate::tensor::tu::{Position, TuTensor};
+use crate::tensor::tu::{FixedPackets, Position, TuTensor};
 
 /// After the transpose engine.
 #[derive(Debug)]
@@ -43,6 +43,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
         Self {
             device,
             inner,
+            time_extent: FixedPackets,
             _position: PhantomData,
         }
     }

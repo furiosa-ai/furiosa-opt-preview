@@ -7,6 +7,8 @@
 pub mod alu;
 pub mod branch;
 pub mod cast;
+pub mod filter;
+pub mod filtered_packets;
 pub mod layer;
 pub mod op;
 pub mod operand;
@@ -17,3 +19,5 @@ pub mod tensor;
 
 pub use branch::{BitReq, TagGuard, TagMode};
 pub use operand::{Branched, Stash};
+
+pub use filter::{PositionVectorFilter, VectorFilterTensor};

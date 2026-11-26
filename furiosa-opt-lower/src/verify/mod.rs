@@ -32,18 +32,19 @@ mod slice;
 mod spm;
 
 pub use engine::{
-    CastError, CastKind, CollectError, CollectInput, CommitCastError, CommitCastInput, CommitCastKind,
-    CommitSliceError, CommitSliceInput, CommitTrimError, CommitTrimInput, ContractLaneError, ContractLaneInput,
-    ContractPacketError, ContractPacketInput, ContractTimeError, ContractTimeInput, FetchContext, FetchDimensionsInput,
-    FetchLiftDimension, FetchLiftError, FetchLiftInput, FetchVolumeError, LaneMode, ReduceLabelInput,
-    StreamAdapterError, StreamAdapterInput, ToTrfError, ToTrfInput, ToVrfError, ToVrfInput, UnreadableCause,
-    VectorCastInput, VectorError, VectorIntraSliceUnzipInput, VectorNarrowSplitInput, VectorNarrowTrimInput,
-    VectorWidenConcatInput, VectorWidenPadInput, VrfOperandError, VrfOperandInput, commit_skipped_slices,
-    config_collect, config_commit_cast, config_commit_slice, config_commit_trim, config_contract_lane,
-    config_contract_packet, config_contract_time, config_fetch_dimensions, config_fetch_lift, config_fetch_volume,
-    config_reduce_label, config_stream_adapter, config_to_trf, config_to_vrf, config_vector_cast,
-    config_vector_intra_slice_unzip, config_vector_narrow_split, config_vector_narrow_trim, config_vector_widen_concat,
-    config_vector_widen_pad, config_vrf_operand,
+    CollectError, CollectInput, CommitCastError, CommitCastInput, CommitCastKind, CommitSliceError, CommitSliceInput,
+    CommitTrimError, CommitTrimInput, ContractLaneError, ContractLaneInput, ContractPacketError, ContractPacketInput,
+    ContractTimeError, ContractTimeInput, FetchContext, FetchDimensionsInput, FetchLiftDimension, FetchLiftError,
+    FetchLiftInput, FetchVolumeError, FilterError, FilterInput, LaneMode, ReduceLabelInput, StreamAdapterError,
+    StreamAdapterInput, StreamPackets, ToTrfError, ToTrfInput, ToVrfError, ToVrfInput, UnreadableCause,
+    VectorCastError, VectorCastInput, VectorCastKind, VectorError, VectorIntraSliceUnzipInput, VectorNarrowSplitInput,
+    VectorNarrowTrimInput, VectorWidenConcatInput, VectorWidenPadInput, VrfOperandError, VrfOperandInput,
+    commit_skipped_slices, config_collect, config_commit_cast, config_commit_slice, config_commit_trim,
+    config_contract_lane, config_contract_packet, config_contract_time, config_fetch_dimensions, config_fetch_lift,
+    config_fetch_volume, config_filter_by_bitmap, config_filter_by_tag, config_reduce_label, config_stream_adapter,
+    config_to_trf, config_to_vrf, config_vector_cast, config_vector_intra_slice_unzip, config_vector_narrow_split,
+    config_vector_narrow_trim, config_vector_widen_concat, config_vector_widen_pad, config_vrf_operand,
+    verify_trf_allocation,
 };
 pub use gather::{
     GatherMappingError, GatherPayload, GatherValidationError, gather_payload, validate_gather_output,

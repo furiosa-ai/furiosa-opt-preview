@@ -193,22 +193,7 @@ pub fn config_to_trf(input: ToTrfInput) -> Result<(), ToTrfError> {
         element_bits,
     } = input;
     let lane_size = stream_lane.size();
-    if !is_valid_lane_size(lane_size) {
-        return Err(ToTrfError::LaneSize(lane_size));
-    }
-
-    let element_count = lane_size
-        .checked_mul(trf_element.size())
-        .expect("a lane count times a TRF element extent stays inside usize");
-    let total_trf_bytes = size_in_bytes(element_bits, element_count)?;
-    if total_trf_bytes > capacity {
-        return Err(ToTrfError::ExceedsCapacity {
-            total_bytes: total_trf_bytes,
-            lanes: lane_size,
-            per_lane_bytes: size_in_bytes(element_bits, trf_element.size())?,
-            capacity,
-        });
-    }
+    verify_trf_allocation(lane_size, trf_element.size(), element_bits, capacity)?;
 
     let time_size = stream_time.size();
     if !time_size.is_multiple_of(lane_size) {
@@ -237,6 +222,32 @@ pub fn config_to_trf(input: ToTrfInput) -> Result<(), ToTrfError> {
         return Err(ToTrfError::ElementMismatch {
             expected: expected_element,
             got: element_n,
+        });
+    }
+    Ok(())
+}
+
+/// A TRF tensor of `lanes` lanes, each `element_size` elements of `element_bits` bits: `lanes` must
+/// be 1/2/4/8 and the whole must fit `capacity` bytes.
+pub fn verify_trf_allocation(
+    lanes: usize,
+    element_size: usize,
+    element_bits: usize,
+    capacity: usize,
+) -> Result<(), ToTrfError> {
+    if !is_valid_lane_size(lanes) {
+        return Err(ToTrfError::LaneSize(lanes));
+    }
+    let element_count = lanes
+        .checked_mul(element_size)
+        .expect("a lane count times a TRF element extent stays inside usize");
+    let total_bytes = size_in_bytes(element_bits, element_count)?;
+    if total_bytes > capacity {
+        return Err(ToTrfError::ExceedsCapacity {
+            total_bytes,
+            lanes,
+            per_lane_bytes: size_in_bytes(element_bits, element_size)?,
+            capacity,
         });
     }
     Ok(())

@@ -14,6 +14,7 @@
 
 use std::marker::PhantomData;
 
+use crate::engine::vector::filtered_packets::FilteredPackets;
 use furiosa_mapping::*;
 
 use crate::backend::Backend;
@@ -32,6 +33,24 @@ pub struct PositionBegin;
 
 impl Position for PositionBegin {}
 
+/// How far along `Time` each slice of a stream carries packets.
+pub trait TimeExtent: std::fmt::Debug + sealed::Sealed {}
+
+/// Every slice carries all of its `Time` packets.
+#[derive(Debug)]
+pub struct FixedPackets;
+
+impl TimeExtent for FixedPackets {}
+impl sealed::Sealed for FixedPackets {}
+
+/// A tag filter's result: `Time` is a bound, and each slice carries a runtime prefix of it, which
+/// `FilteredPackets` records.
+#[derive(Debug)]
+pub struct TagFiltered(pub(crate) FilteredPackets);
+
+impl TimeExtent for TagFiltered {}
+impl sealed::Sealed for TagFiltered {}
+
 /// Tensor streamed through the Tensor Unit pipeline.
 #[derive(Debug)]
 pub struct TuTensor<
@@ -45,14 +64,27 @@ pub struct TuTensor<
     Time: M,
     Packet: M,
     B: Backend = CurrentBackend,
+    E: TimeExtent = FixedPackets,
 > {
     pub(crate) device: &'l mut TuContext<{ T }>,
     pub(crate) inner: Tensor<D, Pair<Chip, Pair<Cluster, Pair<Slice, Pair<Time, Packet>>>>, B>,
+    pub(crate) time_extent: E,
     pub(crate) _position: PhantomData<P>,
 }
 
-impl<'l, const T: Tu, P: Position, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<
+    'l,
+    const T: Tu,
+    P: Position,
+    D: Scalar,
+    Chip: M,
+    Cluster: M,
+    Slice: M,
+    Time: M,
+    Packet: M,
+    B: Backend,
+    E: TimeExtent,
+> TuTensor<'l, T, P, D, Chip, Cluster, Slice, Time, Packet, B, E>
 {
     /// Mapping type alias.
     pub type Mapping = m![{ Chip }, { Cluster }, { Slice }, { Time }, { Packet }];
@@ -77,7 +109,12 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
         Self {
             device,
             inner,
+            time_extent: FixedPackets,
             _position: PhantomData,
         }
     }
+}
+
+mod sealed {
+    pub trait Sealed {}
 }

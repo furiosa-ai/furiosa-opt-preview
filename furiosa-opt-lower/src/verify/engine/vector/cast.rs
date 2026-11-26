@@ -1,4 +1,4 @@
-//! VE cast compaction: a one-flit input recast to `out_bits` and repadded to a one-flit output.
+//! VE cast: a one-flit input recast to `out_bits` and repadded to a one-flit output.
 
 use furiosa_mapping::{Mapping, MappingExt, PaddingKind};
 
@@ -6,9 +6,9 @@ use crate::verify::{
     ElementSizeError, FLIT_BYTES, OneFlitPacketError, PacketSide, length_from_bytes, require_one_flit, size_in_bytes,
 };
 
-/// A conversion supported by the VE cast compaction.
+/// A conversion supported by the VE cast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CastKind {
+pub enum VectorCastKind {
     I32ToI4,
     I32ToI8,
     I32ToI16,
@@ -17,9 +17,9 @@ pub enum CastKind {
     F32ToBf16,
 }
 
-/// Why a cast is not realizable on the VE cast compaction.
+/// Why a cast is not realizable on the VE cast.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum CastError {
+pub enum VectorCastError {
     /// The element width cannot describe a whole byte sequence.
     #[error(transparent)]
     ElementSize(#[from] ElementSizeError),
@@ -36,14 +36,14 @@ pub enum CastError {
     },
 }
 
-/// Inputs used to configure the VE cast compaction.
+/// Inputs used to configure the VE cast.
 pub struct VectorCastInput {
     pub in_packet: Mapping,
     pub out_packet: Mapping,
-    pub kind: CastKind,
+    pub kind: VectorCastKind,
 }
 
-impl CastKind {
+impl VectorCastKind {
     fn widths(self) -> (usize, usize) {
         match self {
             Self::I32ToI4 => (32, 4),
@@ -55,7 +55,7 @@ impl CastKind {
 }
 
 /// Checks the one-flit input and output mappings for a supported Cast conversion.
-pub fn config_vector_cast(input: VectorCastInput) -> Result<(), CastError> {
+pub fn config_vector_cast(input: VectorCastInput) -> Result<(), VectorCastError> {
     let VectorCastInput {
         in_packet,
         out_packet,
@@ -73,7 +73,7 @@ pub fn config_vector_cast(input: VectorCastInput) -> Result<(), CastError> {
 
     let out_packet = out_packet.normalize();
     if expected_packet != out_packet {
-        return Err(CastError::PacketMismatch {
+        return Err(VectorCastError::PacketMismatch {
             expected: expected_packet,
             got: out_packet,
         });
@@ -95,7 +95,7 @@ mod tests {
             config_vector_cast(VectorCastInput {
                 in_packet: <m![Packet]>::to_value(),
                 out_packet: <m![Packet # 64]>::to_value(),
-                kind: CastKind::I32ToI4,
+                kind: VectorCastKind::I32ToI4,
             }),
             Ok(())
         );
@@ -107,9 +107,9 @@ mod tests {
             config_vector_cast(VectorCastInput {
                 in_packet: <m![Packet]>::to_value(),
                 out_packet: <m![Packet]>::to_value(),
-                kind: CastKind::F32ToBf16,
+                kind: VectorCastKind::F32ToBf16,
             }),
-            Err(CastError::PacketSize(OneFlitPacketError {
+            Err(VectorCastError::PacketSize(OneFlitPacketError {
                 side: PacketSide::Output,
                 elements: 8,
                 bytes: 16,

@@ -37,7 +37,7 @@ flowchart TB
         FE[Fetch] --> FA[Fetch Adapter] --> SW[Switching] --> CO[Collect] --> CE[Contraction] --> VE
         subgraph VE[Vector Engine]
             direction TB
-            VC[VAU / VRU computation] --> VF[Filter compaction] --> CA[Cast compaction]
+            VC[VAU / VRU computation] --> VF[Filter] --> CA[Cast]
         end
         CA --> TR[Transpose] --> CMA[Commit Adapter] --> CM[Commit]
     end
@@ -54,8 +54,8 @@ flowchart TB
     click CO "./collect-engine.html" "Collect Engine"
     click CE "./contraction-engine/index.html" "Contraction Engine"
     click VC "./vector-engine/index.html#interface" "VAU / VRU computation"
-    click VF "./vector-engine/intra-slice-chain.html#filter" "Filter compaction"
-    click CA "./vector-engine/cast-compaction.html" "Cast compaction"
+    click VF "./vector-engine/filter.html" "Filter"
+    click CA "./vector-engine/cast.html" "Cast"
     click TR "./transpose-engine.html" "Transpose Engine"
     click CMA "./commit-adapter.html" "Commit Adapter"
     click CM "../moving-tensors/commit-engine.html" "Commit Engine"
@@ -68,7 +68,7 @@ flowchart TB
 | [Switching](./switch-engine.md) | Move data across slices | Ring network, `Slice` can change |
 | [Collect](./collect-engine.md) | Normalize packets to 32-byte flits | Output = exactly one flit |
 | [Contraction](./contraction-engine/index.md) | Einsum: matmul, convolution, attention | One operand resident in TRF. The other streams |
-| [Vector](./vector-engine/index.md) | Elementwise, binary, reduction, filtering, and [cast compaction](./vector-engine/cast-compaction.md) | Only i32/f32 input |
+| [Vector](./vector-engine/index.md) | Elementwise, binary, reduction, filtering, and [cast](./vector-engine/cast.md) | Only i32/f32 input |
 | [Transpose](./transpose-engine.md) | Reorder elements within a flit | Within-flit only |
 | [Commit Adapter](./commit-adapter.md) | Per-element transforms before commit (cast, ReLU, trim) | Optional. Chained before `.commit()` |
 | [Commit](../moving-tensors/commit-engine.md) | Write results back to DM | Flit-aligned writes |

@@ -94,8 +94,17 @@
 //!     ├── to_vrf_view              →  (writes to existing view)
 //!     └── commit_trim              →  CommitTrimTensor
 //!
+//! VectorFilterTensor       (PositionVectorFilter, produced by `vector_filter_*`)
+//!     ├── vector_cast              →  VectorCastTensor
+//!     └── vector_final             →  VectorFinalTensor
+//!
 //! VectorCastTensor         (PositionVectorCast)
 //!     └── vector_final             →  VectorFinalTensor
+//!
+//! E = TagFiltered          (from `vector_filter_by_tag`; each slice holds a prefix of its packets)
+//!     ├── vector_cast, vector_final, commit_trim, commit_cast   (keep the extent)
+//!     └── commit_view              →  (writes the packets that arrive)
+//!     (`commit`, `to_vrf` and `transpose` take only `E = FixedPackets`)
 //!
 //! TransposeTensor          (PositionTranspose)
 //!     └── commit_trim              →  CommitTrimTensor
@@ -143,6 +152,7 @@ pub use fetch_adapter::*;
 pub use switch::*;
 pub use transpose::*;
 pub use vector::cast::*;
+pub use vector::{PositionVectorFilter, VectorFilterTensor};
 
 use crate::engine::vector::tensor::PositionVectorFinal;
 use crate::tensor::tu::{Position, PositionBegin};

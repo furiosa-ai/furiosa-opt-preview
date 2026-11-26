@@ -67,6 +67,7 @@ impl BinaryArgMode {
 
 /// Ternary arg mode.
 /// ModeXYZ: op(argX, argY, argZ) where 0=mainstream, 1=operand0, 2=operand1
+#[primitive(op::TernaryArgMode)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TernaryArgMode {
     /// op(mainstream, operand0, operand1).

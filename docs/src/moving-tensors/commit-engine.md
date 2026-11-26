@@ -21,6 +21,9 @@ The output `Element` mapping replaces `Time` and `Packet`, defining how the stre
 `Element` configures both the Commit Sequencer and the [Commit Adapter](../computing-tensors/commit-adapter.md), and can reorder `Time` axes relative to the input stream, performing a transpose during the commit.
 For performance implications of the `Element` mapping, see [Optimizations](#optimizations).
 
+A [tag-filtered stream](../computing-tensors/vector-engine/filter.md#select-by-tag) carries only a runtime prefix of its `Time` packets in each slice.
+It has no `.commit()`, and `.commit_view()` writes only the packets that arrive, preserving every destination value they do not reach.
+
 The following example commits a cast accumulation result to DM as `bf16`.
 The output `DmTensor` stores 16 time steps × 8 `bf16` elements across 256 slices.
 Here `D = bf16` and `Element = m![M, N # 16]`.
@@ -34,7 +37,7 @@ axes![P = 256, M = 16, N = 8];
 fn cast_commit<'l, const T: Tu>(
     input: ContractTensor<'l, T, f32, m![1], m![1 # 2], m![P], m![M], m![N]>,
 ) -> DmTensor<bf16, m![1], m![1 # 2], m![P], m![M, N # 16]> {
-    // Cast f32 to bf16 (Vector Engine cast compaction), then commit to DM (Commit Engine).
+    // Cast f32 to bf16 (Vector Engine cast), then commit to DM (Commit Engine).
     // Input: M = 16 time steps, N = 8 f32 elements per packet (32 bytes).
     // After cast: N = 8 bf16 elements padded to 16 (32 bytes).
     // After trim: N # 16 trimmed into N = 8.
@@ -51,6 +54,32 @@ fn cast_commit<'l, const T: Tu>(
 # Ok(())
 # }
 ```
+
+### Writing a tag-filtered stream
+
+Choose the existing destination values before committing a tag-filtered stream.
+For example, initialize the destination with zero when every unwritten position must remain zero:
+
+```rust,no_run
+# #![feature(adt_const_params)]
+# extern crate furiosa_opt_std;
+# use furiosa_opt_std::prelude::*;
+axes![S = 64, T2 = 2, P = 8];
+
+fn write_with_zero_tail<'l>(
+    stream: VectorFinalTensor<'l, { Tu::Main }, i32,
+        m![1], m![1], m![S], m![T2], m![P], CurrentBackend, TagFiltered>,
+    mut destination: DmTensorViewMut<'l, i32, m![1], m![1], m![S], m![T2, P]>,
+    sub: &mut TuContext<{ Tu::Sub }>,
+) {
+    destination.memset(0, sub);
+    stream.commit_trim::<m![P]>().commit_view(destination);
+}
+```
+
+Alternatively, use a view of a tensor containing the previous values to preserve them.
+The commit does not initialize the destination.
+The Filter page defines the [emitted packet count](../computing-tensors/vector-engine/filter.md#select-by-tag) and [which survivors a slice keeps](../computing-tensors/vector-engine/filter.md#input-and-capacity-constraints).
 
 ## Slice placement
 
@@ -113,6 +142,7 @@ Destination `#{0}` padding promises zero, so only stream `#{0}` padding may reac
 A stream slice that holds a value is rejected there; pad the destination with `#` or `#{!}` instead.
 
 Stream `#` and `#{!}` padding has no defined value, so the corresponding destination slice must also use `#` or `#{!}` padding.
+A tag-filtered stream's padding slice must go to `#{!}` padding, since its undefined values decide how many packets it emits.
 A stream from a tiled source therefore cannot be written to an untiled destination:
 
 ```rust,ignore
@@ -154,6 +184,7 @@ In the [sub-context](../computing-tensors/index.md#execution-context), `D[write_
 The total cycle count is `Time::SIZE * (valid_size / write_size)`.
 The division is always exact: in the main-context, `valid_size == write_size`, so each packet commits in a single cycle.
 In the sub-context, `write_size` is fixed at 8 bytes and `valid_size` is one of 8, 16, 24, or 32 bytes (from the trimming constraint), so `valid_size / write_size` is always 1, 2, 3, or 4.
+A tag-filtered slice performs these writes only for the packets it emitted.
 
 ```rust
 # #![feature(adt_const_params)]

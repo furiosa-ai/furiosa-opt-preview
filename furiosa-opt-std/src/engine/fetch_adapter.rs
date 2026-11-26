@@ -28,7 +28,7 @@ use crate::engine::{CanApplyFetchCast, CanApplyFetchMask, CanApplyFetchTableLook
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
-use crate::tensor::tu::{Position, TuTensor};
+use crate::tensor::tu::{FixedPackets, Position, TuTensor};
 
 /// Compiler-derived configuration for the Fetch Adapter's masking stage.
 ///
@@ -88,6 +88,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
         Self {
             device,
             inner,
+            time_extent: FixedPackets,
             _position: PhantomData,
         }
     }
@@ -118,6 +119,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
         Self {
             device,
             inner,
+            time_extent: FixedPackets,
             _position: PhantomData,
         }
     }
@@ -148,6 +150,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
         Self {
             device,
             inner,
+            time_extent: FixedPackets,
             _position: PhantomData,
         }
     }
@@ -272,6 +275,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
         Self {
             device,
             inner,
+            time_extent: FixedPackets,
             _position: PhantomData,
         }
     }

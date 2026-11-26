@@ -30,7 +30,7 @@ use crate::context::*;
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
-use crate::tensor::tu::{Position, TuTensor};
+use crate::tensor::tu::{FixedPackets, Position, TuTensor};
 
 /// The two un-broadcast operands (already widened to the contraction output type) plus the mappings
 /// the Lane Folder needs to fuse them, stashed by the Outer stage in place of a materialized product.
@@ -184,6 +184,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
         Self {
             device,
             inner,
+            time_extent: FixedPackets,
             _position: PhantomData,
         }
     }

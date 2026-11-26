@@ -1,6 +1,6 @@
 # Vector Engine
 
-The Vector Engine performs elementwise computation, reduction, filtering, and output cast compaction.
+The Vector Engine performs elementwise computation, reduction, filtering, and output casts.
 Examples include activations (GELU, SiLU), normalizations (softmax, layer norm), binary operations, and intra- and inter-slice reductions.
 
 The engine accepts only 32-bit types, `i32` and `f32`.
@@ -11,15 +11,16 @@ When that engine is bypassed, the [Fetch Adapter](../fetch-adapter.md#type-casti
 
 In a single Tensor Unit invocation, the Vector Engine portion is the method chain from `vector_init()` to `vector_final()`.
 The computation stages have two parts: the [Intra-Slice Chain](./intra-slice-chain.md) (elementwise / binary / per-slice reduce stages) and the [Inter-Slice Reducer](./inter-slice-reducer.md) (reduces across the 256 slices in a cluster).
-Between `vector_init()` and `vector_final()`, the chain alone, the reducer alone, or both can run, followed by optional filtering and cast compaction.
+Between `vector_init()` and `vector_final()`, the chain alone, the reducer alone, or both can run, followed by an optional filter and cast.
 When both run, the order is `IntraFirst` (chain then reducer) or `InterFirst` (reducer then chain).
+Both computation blocks can be skipped when only an output cast is needed.
 
 The intra-slice chain is entered via `vector_intra_slice_tag()`, or `vector_intra_slice_unzip()` when the input carries a 2-way grouping axis to split into two parallel streams (see [Pair Mode](./intra-slice-chain.md#pair-mode)).
 Either entry point fires right after `vector_init()` or on the inter-slice reducer's output.
 The inter-slice reducer is entered via `vector_inter_slice_reduce()`, either right after `vector_init()` or from a [compatible intra-slice stage](./intra-slice-chain.md#transitioning-to-the-inter-slice-reducer).
 For stage-by-stage API coverage, see [Intra-Slice Chain](./intra-slice-chain.md) and [Inter-Slice Reducer](./inter-slice-reducer.md).
 
-For the `vector_cast()` API, see [Cast Compaction](./cast-compaction.md).
+For the output-stage APIs, see [Filter](./filter.md) and [Cast](./cast.md).
 
 The signatures below cover the `vector_init()`-side entry methods only.
 The same method names (`vector_intra_slice_tag`, `vector_inter_slice_reduce`) also exist on chain and reducer tensors for the chain↔reducer transitions; those are documented in the child pages.
@@ -30,6 +31,90 @@ The same method names (`vector_intra_slice_tag`, `vector_inter_slice_reduce`) al
 {{#include ../../../../furiosa-opt-std/src/engine/vector/tensor/vector_tensor.rs:vector_init_intra_slice_methods_impl}}
 
 {{#include ../../../../furiosa-opt-std/src/engine/vector/tensor/vector_tensor.rs:vector_init_inter_slice_reduce_i32_impl}}
+```
+
+## Output stages
+
+The Intra-Slice Chain and Inter-Slice Reducer are the computation blocks.
+Filter and Cast are output stages: they sit outside both computation blocks and can follow either one.
+Where a component sits in the engine and what its operations span are different properties:
+
+| Component | Role | Operation scope |
+| --- | --- | --- |
+| [Intra-Slice Chain](./intra-slice-chain.md) | Computation block | Elementwise operations and reductions within each slice |
+| [Inter-Slice Reducer](./inter-slice-reducer.md) | Computation block | Reduction across slices |
+| [Filter](./filter.md) | Output stage | Selection and packing independently within each slice |
+| [Cast](./cast.md) | Output stage | Conversion of each emitted packet |
+
+A computation block does not have to run every stage before entering an output stage.
+The method chain selects a compatible exit point and skips the remaining computation stages.
+The supported output paths are:
+
+| Current position | Available next steps |
+| --- | --- |
+| Immediately after `vector_init()` | Cast |
+| Compatible 8-way intra-slice stage | Filter, Cast, or `vector_final()` |
+| Inter-Slice Reducer output | Filter, Cast, or `vector_final()` |
+| Filter output | Cast or `vector_final()` |
+| Cast output | `vector_final()` |
+
+Filter requires the `Standalone` context; the ordinary cast and finalization paths also accept the merged result of pair mode.
+Once a stream enters Filter or Cast, it cannot return to either computation block.
+
+When both blocks run, the output stages read the result of the second block, whichever order the two ran in.
+The two functions below run the blocks in opposite orders and end with the same filter and cast.
+Each sums over `B` across slices, keeps the even packet positions, and casts them to `i16`:
+
+```rust,no_run
+# #![feature(adt_const_params)]
+# extern crate furiosa_opt_std;
+# use furiosa_opt_std::prelude::*;
+axes![A = 8, B = 8, F = 8, E4 = 4];
+
+// IntraFirst: ReLU in each slice, then the sum across slices.
+fn chain_then_reducer<'l>(
+    input: CollectTensor<'l, { Tu::Main }, i32, m![1], m![1], m![A, B], m![1], m![F]>,
+) -> VectorFinalTensor<'l, { Tu::Main }, i16, m![1], m![1], m![A, 1 # 8], m![1], m![E4 # 16]> {
+    input.vector_init()
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_clip(ClipBinaryOpI32::Max, 0)
+        .vector_inter_slice_reduce::<m![A, 1 # 8], m![1]>(InterSliceReduceOpI32::AddSat)
+        .vector_filter_by_bitmap::<0b0101_0101, m![1], m![E4 # 8]>()
+        .vector_cast::<i16, m![E4 # 16]>()
+        .vector_final()
+}
+
+// InterFirst: the sum across slices, then a bias in each slice.
+fn reducer_then_chain<'l>(
+    input: CollectTensor<'l, { Tu::Main }, i32, m![1], m![1], m![A, B], m![1], m![F]>,
+) -> VectorFinalTensor<'l, { Tu::Main }, i16, m![1], m![1], m![A, 1 # 8], m![1], m![E4 # 16]> {
+    input.vector_init()
+        .vector_inter_slice_reduce::<m![A, 1 # 8], m![1]>(InterSliceReduceOpI32::AddSat)
+        .vector_intra_slice_tag(TagMode::Zero)
+        .vector_fxp(FxpBinaryOp::AddFxp, 100)
+        .vector_filter_by_bitmap::<0b0101_0101, m![1], m![E4 # 8]>()
+        .vector_cast::<i16, m![E4 # 16]>()
+        .vector_final()
+}
+```
+
+A computation block can also be cut short.
+Here filtering follows Logic without running the later intra-slice stages:
+
+```rust,no_run
+# #![feature(adt_const_params)]
+# extern crate furiosa_opt_std;
+# use furiosa_opt_std::prelude::*;
+axes![S = 64, F = 8, J = 2];
+
+fn filter_after_logic<'l>(
+    input: CollectTensor<'l, { Tu::Main }, i32, m![1], m![1], m![S], m![1], m![F]>,
+) -> VectorFinalTensor<'l, { Tu::Main }, i8, m![1], m![1], m![S], m![1], m![J # 32]> {
+    input.vector_init().vector_intra_slice_tag(TagMode::Zero)
+        .vector_logic(LogicBinaryOpI32::BitAnd, 0x7f)
+        .vector_filter_by_bitmap::<0b0000_1001, m![1], m![J # 8]>()
+        .vector_cast::<i8, m![J # 32]>().vector_final()
+}
 ```
 
 ## Examples

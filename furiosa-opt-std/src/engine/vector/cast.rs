@@ -1,7 +1,7 @@
-//! Vector Engine cast compaction.
+//! Vector Engine cast.
 
 use furiosa_mapping::*;
-use furiosa_opt_lower::{CastKind, VectorCastInput, config_vector_cast};
+use furiosa_opt_lower::{VectorCastInput, VectorCastKind, config_vector_cast};
 use furiosa_opt_macro::primitive;
 use std::marker::PhantomData;
 
@@ -15,9 +15,9 @@ use crate::engine::vector::tensor::{VeTensorShape, VectorFinalTensor};
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
-use crate::tensor::tu::{Position, TuTensor};
+use crate::tensor::tu::{FixedPackets, Position, TimeExtent, TuTensor};
 
-/// Supported narrowing conversions in the Vector Engine's cast-compaction stage.
+/// Supported narrowing conversions in the Vector Engine's cast stage.
 #[diagnostic::on_unimplemented(
     message = "cannot apply `vector_cast()` from `{Self}` to `{D}`",
     label = "unsupported Vector Engine cast conversion",
@@ -25,46 +25,60 @@ use crate::tensor::tu::{Position, TuTensor};
 )]
 pub trait VectorCast<D: Scalar>: Cast<D> {
     /// Hardware conversion represented by this scalar pair.
-    const KIND: CastKind;
+    const KIND: VectorCastKind;
 }
 
 impl VectorCast<i4> for i32 {
-    const KIND: CastKind = CastKind::I32ToI4;
+    const KIND: VectorCastKind = VectorCastKind::I32ToI4;
 }
 impl VectorCast<i8> for i32 {
-    const KIND: CastKind = CastKind::I32ToI8;
+    const KIND: VectorCastKind = VectorCastKind::I32ToI8;
 }
 impl VectorCast<i16> for i32 {
-    const KIND: CastKind = CastKind::I32ToI16;
+    const KIND: VectorCastKind = VectorCastKind::I32ToI16;
 }
 impl VectorCast<f8e4m3> for f32 {
-    const KIND: CastKind = CastKind::F32ToF8E4M3;
+    const KIND: VectorCastKind = VectorCastKind::F32ToF8E4M3;
 }
 impl VectorCast<f8e5m2> for f32 {
-    const KIND: CastKind = CastKind::F32ToF8E5M2;
+    const KIND: VectorCastKind = VectorCastKind::F32ToF8E5M2;
 }
 impl VectorCast<bf16> for f32 {
-    const KIND: CastKind = CastKind::F32ToBf16;
+    const KIND: VectorCastKind = VectorCastKind::F32ToBf16;
 }
 
-/// Stream position after VE cast compaction.
+/// Stream position after the VE cast.
 pub type PositionVectorCast = stage::Cast;
 
 impl Position for PositionVectorCast {}
 
-/// Packed stream at the Vector Engine's cast-compaction stage.
-pub type VectorCastTensor<'l, const T: Tu, D, Chip, Cluster, Slice, Time, Packet, B = CurrentBackend> =
-    TuTensor<'l, { T }, PositionVectorCast, D, Chip, Cluster, Slice, Time, Packet, B>;
+/// Packed stream at the Vector Engine's cast stage.
+pub type VectorCastTensor<
+    'l,
+    const T: Tu,
+    D,
+    Chip,
+    Cluster,
+    Slice,
+    Time,
+    Packet,
+    B = CurrentBackend,
+    E = FixedPackets,
+> = TuTensor<'l, { T }, PositionVectorCast, D, Chip, Cluster, Slice, Time, Packet, B, E>;
 
-impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend>
-    VectorCastTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B>
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend, E: TimeExtent>
+    VectorCastTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B, E>
 {
     /// Finalizes the Vector Engine output.
     #[primitive(VectorTensor::vector_final)]
-    pub fn vector_final(self) -> VectorFinalTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B> {
-        VectorFinalTensor::new(self.device, self.inner)
+    pub fn vector_final(self) -> VectorFinalTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B, E> {
+        VectorFinalTensor::new_with_time_extent(self.device, self.inner, self.time_extent)
     }
+}
 
+impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M, B: Backend, E: TimeExtent>
+    VectorCastTensor<'l, T, D, Chip, Cluster, Slice, Time, Packet, B, E>
+{
     fn check_constraints() {
         constraints::assert_cluster_size::<Cluster>();
         constraints::assert_slice_size::<Slice>();
@@ -72,12 +86,13 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
     }
 
     #[doc(hidden)]
-    pub fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>) -> Self {
+    pub fn new(device: &'l mut TuContext<{ T }>, inner: Tensor<D, Self::Mapping, B>, time_extent: E) -> Self {
         Self::check_constraints();
 
         Self {
             device,
             inner,
+            time_extent,
             _position: PhantomData,
         }
     }
@@ -95,15 +110,17 @@ pub(crate) fn cast_stream<
     Packet: M,
     OutPacket: M,
     B: Backend,
+    E: TimeExtent,
 >(
     device: &'l mut TuContext<{ T }>,
     input: Tensor<D, VeTensorShape<Chip, Cluster, Slice, Time, Packet>, B>,
-) -> VectorCastTensor<'l, T, OutD, Chip, Cluster, Slice, Time, OutPacket, B> {
+    time_extent: E,
+) -> VectorCastTensor<'l, T, OutD, Chip, Cluster, Slice, Time, OutPacket, B, E> {
     verify_cast::<D, OutD, Packet, OutPacket>();
-    VectorCastTensor::new(device, input.map(Cast::cast).transpose(false))
+    VectorCastTensor::new(device, input.map(Cast::cast).transpose(false), time_extent)
 }
 
-/// Validates the VE cast-compaction packet layouts.
+/// Validates the VE cast packet layouts.
 fn verify_cast<D: VectorCast<OutD>, OutD: Scalar, InPacket: M, OutPacket: M>() {
     config_vector_cast(VectorCastInput {
         in_packet: InPacket::to_value(),

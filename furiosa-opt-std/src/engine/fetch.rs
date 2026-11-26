@@ -11,7 +11,7 @@ use crate::engine::{CanApplyFetch, CanApplyFetchChipLift, CanApplyFetchClusterLi
 use crate::runtime::CurrentBackend;
 use crate::scalar::*;
 use crate::tensor::Tensor;
-use crate::tensor::tu::{Position, TuTensor};
+use crate::tensor::tu::{FixedPackets, Position, TuTensor};
 
 use furiosa_opt_lower::{
     FetchDimensionsInput, FetchInput, FetchLiftDimension, FetchLiftInput, config_fetch, config_fetch_dimensions,
@@ -76,6 +76,7 @@ fn new_fetch_lift_tensor<
     TuTensor {
         device,
         inner,
+        time_extent: FixedPackets,
         _position: PhantomData,
     }
 }
@@ -115,6 +116,7 @@ impl<'l, const T: Tu, D: Scalar, Chip: M, Cluster: M, Slice: M, Time: M, Packet:
         Self {
             device,
             inner,
+            time_extent: FixedPackets,
             _position: PhantomData,
         }
     }

@@ -182,7 +182,9 @@ The tag the chain was started with is untouched, which is why this is the suppor
 The flow has four steps:
 1. `vector_intra_slice_unzip()` splits the input into two parallel streams (group 0 and group 1).
 2. The chain runs through stages with both groups in lock-step (the **paired** phase).
-3. A `_zip` op fuses the two streams back into one (the **merged** phase).
+3. A `_zip` op fuses the two streams back into one (the **merged** phase): `vector_logic_zip`,
+   `vector_fxp_zip` and `vector_clip_zip` in `Way8`, `vector_fp_zip` and `vector_fp_div_zip` in
+   `Way4`.
 4. The merged stream continues to `vector_final()` like a normal chain.
 
 Stages during the paired phase fall into two flavors:

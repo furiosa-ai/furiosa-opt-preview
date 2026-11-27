@@ -4,7 +4,7 @@ use furiosa_opt_std::prelude::*;
 
 type Chip = m![1];
 type Cluster = m![1];
-axes![P = 64, A = 8, B = 16, C = 32, D = 4, A4 = 16, B4 = 32];
+axes![P = 64, A = 8, B = 16, C = 32, D = 4, E = 8, F = 2, A4 = 16, B4 = 32];
 
 /// Device function that transposes a tensor from shape [A, B, C] to [C, A, B].
 /// it is divided into two steps for demonstration purposes.
@@ -85,6 +85,32 @@ pub fn transpose_i4_tu(
         .collect::<m![A4, B4 / 16], m![B4 % 16 # 64]>()
         .transpose::<m![B4], m![A4 # 64]>()
         .commit_trim::<m![A4]>()
+        .commit();
+
+    output_dm.to_hbm(&mut device.tdma)
+}
+
+/// Transposes an `f32` tensor from `[P, F, E]` to `[P, E, F]` and commits it as `bf16`.
+///
+/// The Transpose Engine sees the `f32` stream; the commit unit narrows it to `bf16` after the
+/// transpose, so the engine must be configured for 32-bit elements, not for the committed type. A
+/// 32-bit stream feeds the engine at most two rows.
+#[device(chip = 1, pe = 1)]
+pub fn transpose_f32_commit_cast_tu(
+    device: &mut Device,
+    input: &HbmTensor<f32, Chip, m![P, F, E]>,
+) -> HbmTensor<bf16, Chip, m![P, E, F]> {
+    let input_dm: DmTensor<f32, Chip, Cluster, m![P], m![F, E]> = input.to_dm(&mut device.tdma);
+
+    // A converting commit reads at least 16 B per packet, so the two-row packet keeps its padding.
+    let output_dm: DmTensor<bf16, Chip, Cluster, m![P], m![E, F # 4]> = device
+        .main
+        .begin(input_dm.view())
+        .fetch::<m![F], m![E]>()
+        .collect::<m![F], m![E]>()
+        .transpose::<m![E], m![F # 8]>()
+        .commit_trim::<m![F # 4]>()
+        .commit_cast::<bf16>()
         .commit();
 
     output_dm.to_hbm(&mut device.tdma)

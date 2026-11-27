@@ -2,7 +2,9 @@
 
 #![expect(clippy::type_complexity, reason = "HbmTensor generics are inherently long")]
 
-use furiosa_opt_examples::transpose::{transpose_i8_tu, transpose_i16_tu, transpose_simple};
+use furiosa_opt_examples::transpose::{
+    transpose_f32_commit_cast_tu, transpose_i8_tu, transpose_i16_tu, transpose_simple,
+};
 use furiosa_opt_std::prelude::*;
 
 #[tokio::test]
@@ -90,6 +92,34 @@ async fn test_transpose_i16_tu() -> eyre::Result<()> {
         }
     }
     assert_eq!(actual, Tensor::<_, m![P, B, D], CurrentBackend>::from_vec(expected));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_transpose_f32_commit_cast_tu() -> eyre::Result<()> {
+    use furiosa_opt_examples::transpose::{E, F, P};
+
+    let mut device = Device::new(transpose_f32_commit_cast_tu.topology())?;
+    let total = 64 * 2 * 8;
+    // Integers below 256 are exact in bf16, so the narrowing commit loses nothing.
+    let input_data: Vec<f32> = (0..total).map(|x| (x % 256) as f32).collect();
+    let hbm_input = HostTensor::<f32, m![P, F, E]>::from_vec(input_data.clone())
+        .to_hbm::<m![1], m![P, F, E]>(&mut device.pdma)
+        .await?;
+
+    let output = launch(transpose_f32_commit_cast_tu, (&mut device, &hbm_input)).await?;
+    let actual = output.to_host::<m![P, E, F]>(&mut device.pdma).await?.into_inner();
+
+    let mut expected = Vec::with_capacity(total);
+    for p in 0..64 {
+        for e in 0..8 {
+            for f in 0..2 {
+                expected.push(bf16::from_f32(input_data[p * 2 * 8 + f * 8 + e]));
+            }
+        }
+    }
+    assert_eq!(actual, Tensor::<_, m![P, E, F], CurrentBackend>::from_vec(expected));
 
     Ok(())
 }

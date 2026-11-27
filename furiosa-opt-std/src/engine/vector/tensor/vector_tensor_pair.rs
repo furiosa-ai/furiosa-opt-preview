@@ -57,8 +57,8 @@ use crate::prelude::semantics::HasConversionOp;
 use crate::tensor::*;
 
 use super::vector_tensor::{
-    VeTensorData, VectorClipTensor, VectorFpTensor, VectorFxpTensor, VectorLogicTensor, apply_binary_op,
-    apply_ternary_op,
+    VeTensorData, VectorClipTensor, VectorFpDivTensor, VectorFpTensor, VectorFxpTensor, VectorLogicTensor,
+    apply_binary_op, apply_ternary_op,
 };
 
 // ============================================================================
@@ -943,10 +943,11 @@ impl<'l, const T: Tu, S: CanTransitionTo<stage::Clip>, Chip: M, Cluster: M, Slic
 // ============================================================================
 // VectorTensorPair - Combine operations (returns VectorTensor)
 // Each `vector_*_zip` merges both groups: result = op(group0, group1), placed in Group 1
-// positions and returned as a `VectorTensor` with `Zipped` state (filter/stash not available);
-// all require `Way8`. The `*_with_mode` variants take a `BinaryArgMode` where 0/1 select the two
-// grouped streams directly (0 = Group 0, 1 = Group 1).
-// Ordered by target stage: Logic → Fxp → Fp → Clip
+// positions and returned as a `VectorTensor` with `Zipped` state (filter/stash not available).
+// A zip runs in the width its stage does: the logic, fxp and clip zips in `Way8`, the fp and
+// divider zips in `Way4`. The `*_with_mode` variants take a `BinaryArgMode` where 0/1 select the
+// two grouped streams directly (0 = Group 0, 1 = Group 1).
+// Ordered by target stage: Logic → Fxp → Fp → FpDiv → Clip
 // ============================================================================
 
 // Logic combine (i32)
@@ -1182,6 +1183,66 @@ impl<'l, const T: Tu, S: CanTransitionTo<stage::Fp>, Chip: M, Cluster: M, Slice:
             .inner
             .zip_with(&self.group1.inner, op.binary_op_fn(Some(mode)));
         VectorFpTensor::from_parts(self.device, result, self.group1.tag, self.group0.ve_state)
+    }
+}
+
+// FpDiv combine
+impl<'l, const T: Tu, S: CanTransitionTo<stage::FpDiv>, Chip: M, Cluster: M, Slice: M, Time: M, Packet: M>
+    VectorTensorPair<'l, T, f32, S, Chip, Cluster, Slice, Time, Packet, Way4>
+{
+    /// Floating-point division merging Group 0 and Group 1: `group0 / group1`.
+    #[primitive(VectorTensorPair::vector_fp_div_zip)]
+    pub fn vector_fp_div_zip(
+        mut self,
+    ) -> VectorFpDivTensor<
+        'l,
+        T,
+        f32,
+        Chip,
+        Cluster,
+        Slice,
+        Time,
+        Packet,
+        Fresh,
+        { VeOrder::IntraFirst },
+        stage::Zipped,
+        Way4,
+    > {
+        self.group0.ve_state.merge(self.group1.ve_state);
+        self.group0.ve_state.use_alu(FpDivBinaryOp::DivF.alu());
+        let result = self
+            .group0
+            .inner
+            .zip_with(&self.group1.inner, FpDivBinaryOp::DivF.binary_op_fn(None));
+        VectorFpDivTensor::from_parts(self.device, result, self.group1.tag, self.group0.ve_state)
+    }
+
+    /// Floating-point division merging Group 0 and Group 1 with explicit mode.
+    #[primitive(VectorTensorPair::vector_fp_div_zip_with_mode)]
+    pub fn vector_fp_div_zip_with_mode(
+        mut self,
+        mode: BinaryArgMode,
+    ) -> VectorFpDivTensor<
+        'l,
+        T,
+        f32,
+        Chip,
+        Cluster,
+        Slice,
+        Time,
+        Packet,
+        Fresh,
+        { VeOrder::IntraFirst },
+        stage::Zipped,
+        Way4,
+    > {
+        self.group0.ve_state.merge(self.group1.ve_state);
+        self.group0.ve_state.use_alu(FpDivBinaryOp::DivF.alu());
+        let result = self
+            .group0
+            .inner
+            .zip_with(&self.group1.inner, FpDivBinaryOp::DivF.binary_op_fn(Some(mode)));
+        VectorFpDivTensor::from_parts(self.device, result, self.group1.tag, self.group0.ve_state)
     }
 }
 

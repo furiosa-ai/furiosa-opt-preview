@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Vector Engine's divider merges the two groups of a pair pass: `vector_fp_div_zip` and
+  `vector_fp_div_zip_with_mode` divide one group by the other in `Way4`, as `vector_fp_zip`
+  multiplies them. The pair-mode docs no longer say every zip runs in `Way8`; the fp and divider
+  zips run in `Way4`.
+
 ### Changed
 
 - `.cast()` becomes `.vector_cast()`, a Vector Engine stage between `vector_init()` and

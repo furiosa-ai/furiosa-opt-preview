@@ -365,6 +365,64 @@ pub fn ve_group_pair_fp_multi_packet(
     result.to_hbm(&mut device.tdma)
 }
 
+/// `ve_group_pair_fp` with the divider as the zip: `lhs / rhs`.
+#[device(chip = 1)]
+pub fn ve_group_pair_fp_div_zip(
+    device: &mut Device,
+    lhs: &HbmTensor<i32, Chip, m![A]>,
+    rhs: &HbmTensor<i32, Chip, m![A]>,
+) -> HbmTensor<f32, Chip, m![A]> {
+    let lhs_dm = lhs.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut device.tdma);
+    let rhs_dm = rhs.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut device.tdma);
+
+    let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = device
+        .main
+        .begin_interleaved::<I, _, _, _, _, _>(lhs_dm.view(), rhs_dm.view())
+        .fetch::<m![I], m![A % 2]>()
+        .fetch_cast::<i32>()
+        .collect::<m![I], m![A % 2 # 8]>()
+        .vector_init()
+        .vector_intra_slice_unzip::<I, m![1]>()
+        .vector_fxp_to_fp(31)
+        .vector_narrow_split::<m![1 # 2], m![A % 2 # 4]>()
+        .vector_fp_div_zip()
+        .vector_widen_concat::<m![1], m![A % 2 # 8]>()
+        .vector_final()
+        .commit_trim::<m![A % 2]>()
+        .commit();
+
+    result.to_hbm(&mut device.tdma)
+}
+
+/// `ve_group_pair_fp_div_zip` in `Mode10`: `rhs / lhs`.
+#[device(chip = 1)]
+pub fn ve_group_pair_fp_div_zip_mode10(
+    device: &mut Device,
+    lhs: &HbmTensor<i32, Chip, m![A]>,
+    rhs: &HbmTensor<i32, Chip, m![A]>,
+) -> HbmTensor<f32, Chip, m![A]> {
+    let lhs_dm = lhs.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut device.tdma);
+    let rhs_dm = rhs.to_dm::<Cluster, m![A / 2], m![A % 2]>(&mut device.tdma);
+
+    let result: DmTensor<f32, Chip, Cluster, m![A / 2], m![A % 2]> = device
+        .main
+        .begin_interleaved::<I, _, _, _, _, _>(lhs_dm.view(), rhs_dm.view())
+        .fetch::<m![I], m![A % 2]>()
+        .fetch_cast::<i32>()
+        .collect::<m![I], m![A % 2 # 8]>()
+        .vector_init()
+        .vector_intra_slice_unzip::<I, m![1]>()
+        .vector_fxp_to_fp(31)
+        .vector_narrow_split::<m![1 # 2], m![A % 2 # 4]>()
+        .vector_fp_div_zip_with_mode(BinaryArgMode::Mode10)
+        .vector_widen_concat::<m![1], m![A % 2 # 8]>()
+        .vector_final()
+        .commit_trim::<m![A % 2]>()
+        .commit();
+
+    result.to_hbm(&mut device.tdma)
+}
+
 #[device(chip = 1)]
 pub fn ve_group_pair_unary(
     device: &mut Device,

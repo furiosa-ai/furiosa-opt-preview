@@ -1,9 +1,10 @@
 use crate::common::{assert_f32_bits_eq, assert_f32_vec_eq};
 use furiosa_opt_examples::vector_engine::{
-    A, ve_group_pair_add, ve_group_pair_chain, ve_group_pair_fp, ve_group_pair_fxp, ve_group_pair_logic,
-    ve_group_pair_logic_abs_add_f32, ve_group_pair_preprocess_both, ve_group_pair_preprocess_g0,
-    ve_group_pair_preprocess_g1, ve_group_pair_reinterpret_scale_f32, ve_group_pair_ternary,
-    ve_group_pair_ternary_selective, ve_group_pair_unary, ve_group_pair_unary_selective,
+    A, ve_group_pair_add, ve_group_pair_chain, ve_group_pair_fp, ve_group_pair_fp_div_zip,
+    ve_group_pair_fp_div_zip_mode10, ve_group_pair_fxp, ve_group_pair_logic, ve_group_pair_logic_abs_add_f32,
+    ve_group_pair_preprocess_both, ve_group_pair_preprocess_g0, ve_group_pair_preprocess_g1,
+    ve_group_pair_reinterpret_scale_f32, ve_group_pair_ternary, ve_group_pair_ternary_selective, ve_group_pair_unary,
+    ve_group_pair_unary_selective,
 };
 use furiosa_opt_std::prelude::*;
 use rand::SeedableRng;
@@ -384,5 +385,55 @@ async fn test_ve_group_pair_ternary_selective() -> eyre::Result<()> {
 
     assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
 
+    Ok(())
+}
+
+/// Non-zero `i32`s of either sign, small enough that `x as f32` is exact.
+fn nonzero_i32s(rng: &mut SmallRng) -> Vec<i32> {
+    use rand::Rng;
+    (0..<m![A]>::SIZE)
+        .map(|_| rng.random_range(1..=1000) * if rng.random::<bool>() { 1 } else { -1 })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_ve_group_pair_fp_div_zip() -> eyre::Result<()> {
+    let mut device = Device::new(ve_group_pair_fp_div_zip.topology())?;
+
+    let mut rng = SmallRng::seed_from_u64(42);
+    let lhs = HostTensor::<i32, m![A]>::from_vec(nonzero_i32s(&mut rng));
+    let rhs = HostTensor::<i32, m![A]>::from_vec(nonzero_i32s(&mut rng));
+
+    let lhs_hbm = lhs.to_hbm(&mut device.pdma).await?;
+    let rhs_hbm = rhs.to_hbm(&mut device.pdma).await?;
+
+    let out_hbm = launch(ve_group_pair_fp_div_zip, (&mut device, &lhs_hbm, &rhs_hbm)).await?;
+    let result = out_hbm.to_host::<m![A]>(&mut device.pdma).await?;
+
+    let expected = lhs
+        .into_inner()
+        .zip_with(&rhs.into_inner(), |x, y| (x as f32) / (y as f32));
+    assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ve_group_pair_fp_div_zip_mode10() -> eyre::Result<()> {
+    let mut device = Device::new(ve_group_pair_fp_div_zip_mode10.topology())?;
+
+    let mut rng = SmallRng::seed_from_u64(42);
+    let lhs = HostTensor::<i32, m![A]>::from_vec(nonzero_i32s(&mut rng));
+    let rhs = HostTensor::<i32, m![A]>::from_vec(nonzero_i32s(&mut rng));
+
+    let lhs_hbm = lhs.to_hbm(&mut device.pdma).await?;
+    let rhs_hbm = rhs.to_hbm(&mut device.pdma).await?;
+
+    let out_hbm = launch(ve_group_pair_fp_div_zip_mode10, (&mut device, &lhs_hbm, &rhs_hbm)).await?;
+    let result = out_hbm.to_host::<m![A]>(&mut device.pdma).await?;
+
+    let expected = lhs
+        .into_inner()
+        .zip_with(&rhs.into_inner(), |x, y| (y as f32) / (x as f32));
+    assert_f32_vec_eq(&expected.into_vec(), &result.into_vec());
     Ok(())
 }
